@@ -60,6 +60,7 @@ import {
 const navItems: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[] = [
   { key: 'overview', label: 'Overview', icon: LayoutDashboard },
   { key: 'workflow', label: 'Flow designer', icon: Network },
+  { key: 'experience', label: 'Human experience', icon: Users },
   { key: 'issues', label: 'Issue workbench', icon: Inbox },
   { key: 'settings', label: 'Configuration', icon: Settings2 },
 ];
@@ -208,6 +209,7 @@ function App() {
         <div className="page">
           {view === 'overview' && <Overview goToIssue={goToIssue} />}
           {view === 'workflow' && <Workflow notify={notify} />}
+          {view === 'experience' && <ExperiencePreview notify={notify} />}
           {view === 'issues' && (
             <IssueWorkbench
               selected={selectedIssue}
@@ -315,7 +317,16 @@ function Overview({ goToIssue }: { goToIssue: (id: number) => void }) {
           <CardHeader
             title="Pipeline throughput"
             subtitle="Issues entering and leaving the pipeline each week"
-            action={<button className="text-button">View report <ArrowRight size={14} /></button>}
+            action={
+              <a
+                className="text-button"
+                href="/reports/apache-superset/issue-intake-2025-09-05-to-2026-09-04.html"
+                target="_blank"
+                rel="noreferrer"
+              >
+                View research <ArrowRight size={14} />
+              </a>
+            }
           />
           <LineChart />
           <div className="chart-legend">
@@ -556,6 +567,320 @@ function StateBadge({ state }: { state: Issue['state'] }) {
 
 function Avatar({ initials, size = 'normal' }: { initials: string; size?: 'normal' | 'small' }) {
   return <span className={`avatar ${size}`}>{initials}</span>;
+}
+
+function ExperiencePreview({ notify }: { notify: (message: string) => void }) {
+  const [persona, setPersona] = useState<'reporter' | 'owner'>('reporter');
+  const [reporterStep, setReporterStep] = useState<'answering' | 'submitted'>('answering');
+  const [refreshPath, setRefreshPath] = useState('Dashboard refresh icon');
+  const [ownerDecision, setOwnerDecision] = useState<'pending' | 'confirmed' | 'more-info'>('pending');
+
+  const submitReporterResponse = () => {
+    setReporterStep('submitted');
+    notify('Reporter response accepted; reproduction queued');
+  };
+
+  const decide = (decision: 'confirmed' | 'more-info') => {
+    setOwnerDecision(decision);
+    notify(decision === 'confirmed' ? 'Bug confirmed; bounded fix authorized' : 'One follow-up drafted');
+  };
+
+  return (
+    <>
+      <PageHeader
+        eyebrow="Human-centered automation"
+        title="Experience preview"
+        description="Review exactly what an issue reporter and a code owner see at each human handoff."
+        actions={
+          <a
+            className="secondary-button"
+            href="/reports/apache-superset/issue-intake-2025-09-05-to-2026-09-04.html"
+            target="_blank"
+            rel="noreferrer"
+          >
+            <BarChart3 size={15} /> Research baseline
+          </a>
+        }
+      />
+
+      <div className="experience-switcher card">
+        <div className="persona-tabs" role="tablist" aria-label="Experience persona">
+          <button
+            className={persona === 'reporter' ? 'active' : ''}
+            onClick={() => setPersona('reporter')}
+            role="tab"
+            aria-selected={persona === 'reporter'}
+          >
+            <MessageCircleMore size={17} />
+            <span><strong>Issue reporter</strong><small>Guided evidence, no jargon</small></span>
+          </button>
+          <button
+            className={persona === 'owner' ? 'active' : ''}
+            onClick={() => setPersona('owner')}
+            role="tab"
+            aria-selected={persona === 'owner'}
+          >
+            <FileCheck2 size={17} />
+            <span><strong>Code owner</strong><small>Decision-ready evidence</small></span>
+          </button>
+        </div>
+        <div className="experience-scenario">
+          <span className="micro-badge violet">Scenario</span>
+          <strong>SUP-43218</strong>
+          <span>Incomplete UI regression · reminder day 6</span>
+        </div>
+      </div>
+
+      {persona === 'reporter' ? (
+        <section className="reporter-experience">
+          <div className="reporter-main card">
+            <div className="portal-bar">
+              <div><Logo /><strong>Issue helper</strong></div>
+              <span><ShieldCheck size={14} /> Public-safe guidance</span>
+            </div>
+
+            {reporterStep === 'submitted' ? (
+              <div className="reporter-success">
+                <span className="success-mark"><Check size={23} /></span>
+                <p className="eyebrow">Response received</p>
+                <h2>Thanks—this is ready for a clean reproduction.</h2>
+                <p>We will test the dashboard refresh path on Superset 6.1 and current master. You will get the result here; no further reply is needed unless one specific discriminator is missing.</p>
+                <div className="success-next">
+                  <div><span>Next step</span><strong>Reproduction queued</strong></div>
+                  <div><span>Expected update</span><strong>Within 1 business day</strong></div>
+                  <div><span>Your issue</span><strong>Stays open</strong></div>
+                </div>
+                <button className="secondary-button" onClick={() => setReporterStep('answering')}>
+                  <RotateCcw size={15} /> Review submitted answers
+                </button>
+              </div>
+            ) : (
+              <>
+                <div className="reporter-request">
+                  <div className="request-icon"><MessageCircleMore size={23} /></div>
+                  <div>
+                    <p className="eyebrow">Two details needed</p>
+                    <h2>Help us reproduce the filter reset safely</h2>
+                    <p>Your report looks like a product bug. These answers separate an in-app refresh defect from browser or deployment behavior.</p>
+                  </div>
+                  <span className="due-chip"><Clock3 size={13} /> Reply by Sep 12</span>
+                </div>
+
+                <div className="reporter-progress" aria-label="Reporter progress">
+                  {[
+                    ['Report received', true],
+                    ['Answer 2 questions', false],
+                    ['We reproduce', false],
+                    ['You get an update', false],
+                  ].map(([label, complete], index) => (
+                    <div className={complete ? 'complete' : index === 1 ? 'current' : ''} key={String(label)}>
+                      <i>{complete ? <Check size={12} /> : index + 1}</i>
+                      <span>{label}</span>
+                      {index < 3 && <b />}
+                    </div>
+                  ))}
+                </div>
+
+                <div className="guided-question">
+                  <div className="question-number">1</div>
+                  <div className="question-content">
+                    <div className="question-heading">
+                      <div>
+                        <span>Required · about 10 seconds</span>
+                        <h3>Which refresh action resets the filters?</h3>
+                      </div>
+                      <span className="answered-chip"><Check size={12} /> Answered</span>
+                    </div>
+                    <p className="why-copy"><HelpCircle size={14} /> Why we ask: each refresh path uses different dashboard state code.</p>
+                    <div className="choice-grid">
+                      {['Dashboard refresh icon', 'Browser refresh', 'Both actions'].map(choice => (
+                        <button
+                          className={refreshPath === choice ? 'selected' : ''}
+                          onClick={() => setRefreshPath(choice)}
+                          key={choice}
+                        >
+                          <i>{refreshPath === choice && <Check size={12} />}</i>
+                          {choice}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="guided-question">
+                  <div className="question-number">2</div>
+                  <div className="question-content">
+                    <div className="question-heading">
+                      <div>
+                        <span>Required · about 2 minutes</span>
+                        <h3>Share only the dashboard feature flags involved</h3>
+                      </div>
+                      <span className="needed-chip">Still needed</span>
+                    </div>
+                    <p className="why-copy"><HelpCircle size={14} /> Why we ask: the report started after an upgrade and may depend on the dashboard state model.</p>
+                    <div className="safe-command">
+                      <code>DASHBOARD_RBAC=true, NATIVE_FILTERS=true</code>
+                      <button onClick={() => notify('Safe example copied')}>Use safe example</button>
+                    </div>
+                    <div className="privacy-note">
+                      <ShieldCheck size={16} />
+                      <span><strong>Keep private data out.</strong> Do not paste credentials, internal URLs, production records, or your full configuration.</span>
+                    </div>
+                    <button className="cannot-answer" onClick={() => notify('Alternative evidence options opened')}>
+                      I cannot provide this <ChevronRight size={14} />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="reporter-submit">
+                  <div>
+                    <strong>That is everything we need.</strong>
+                    <span>You can edit these answers later. Submitting does not run code from your environment.</span>
+                  </div>
+                  <button className="primary-button" onClick={submitReporterResponse}>
+                    Submit and queue reproduction <ArrowRight size={15} />
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+
+          <aside className="reporter-aside">
+            <div className="card reporter-policy">
+              <p className="eyebrow">What happens next</p>
+              {[
+                ['1', 'Clean environment', 'We recreate the behavior without your data.'],
+                ['2', 'Target + control', 'We compare 6.1 with current master.'],
+                ['3', 'Clear outcome', 'You receive evidence or one focused follow-up.'],
+              ].map(([number, title, copy]) => (
+                <div className="policy-step" key={number}>
+                  <i>{number}</i>
+                  <div><strong>{title}</strong><span>{copy}</span></div>
+                </div>
+              ))}
+            </div>
+            <div className="card reporter-timing">
+              <p className="eyebrow">If you need more time</p>
+              <h3>No surprise closure</h3>
+              <p>We send a gentle reminder, then a final notice with the planned date. New evidence reopens the issue automatically.</p>
+              <div className="mini-timeline">
+                <span className="active"><i />Today <b>Request</b></span>
+                <span><i />7d <b>Reminder</b></span>
+                <span><i />14d <b>Final notice</b></span>
+                <span><i />21d <b>Inactive</b></span>
+              </div>
+            </div>
+            <div className="card reporter-help">
+              <HelpCircle size={18} />
+              <div><strong>Not sure how to answer?</strong><span>Choose “I cannot provide this” for a safer alternative or maintainer help.</span></div>
+            </div>
+          </aside>
+        </section>
+      ) : (
+        <section className="owner-experience">
+          <div className="owner-main card">
+            <div className="owner-brief-head">
+              <div>
+                <p className="eyebrow">Decision packet · SUP-43218</p>
+                <h2>Confirm expected behavior before code work starts</h2>
+                <p>Relay condensed the reporter thread into portable evidence. No branch or pull request exists yet.</p>
+              </div>
+              <span className="micro-badge green">Evidence ready</span>
+            </div>
+
+            {ownerDecision !== 'pending' && (
+              <div className={`decision-result ${ownerDecision}`}>
+                {ownerDecision === 'confirmed' ? <Check size={18} /> : <HelpCircle size={18} />}
+                <div>
+                  <strong>{ownerDecision === 'confirmed' ? 'Bug confirmed and fix authorized' : 'One targeted follow-up requested'}</strong>
+                  <span>{ownerDecision === 'confirmed' ? 'A bounded Devin session will draft a regression test and minimal fix.' : 'The reporter will see only the missing discriminator, not a repeated checklist.'}</span>
+                </div>
+                <button onClick={() => setOwnerDecision('pending')}>Undo</button>
+              </div>
+            )}
+
+            <div className="owner-question">
+              <span>Decision</span>
+              <h3>Should an in-app dashboard refresh preserve applied native filters?</h3>
+              <p>Current policy and existing tests suggest yes. Confirming authorizes a fix attempt; it does not approve or merge code.</p>
+            </div>
+
+            <div className="behavior-comparison">
+              <div className="observed">
+                <span>Observed on 6.1.0</span>
+                <strong>Filters reset after dashboard refresh</strong>
+                <small><AlertTriangle size={13} /> Failed 3 of 3 isolated runs</small>
+              </div>
+              <ArrowRight size={19} />
+              <div className="expected">
+                <span>Control on master</span>
+                <strong>Filter state remains applied</strong>
+                <small><Check size={13} /> Passed 3 of 3 isolated runs</small>
+              </div>
+            </div>
+
+            <div className="owner-facts">
+              {[
+                ['Regression window', '6.0.0 → 6.1.0'],
+                ['Minimal condition', 'DASHBOARD_RBAC + refresh icon'],
+                ['Likely component', 'dashboard / native filters'],
+                ['Reporter data', 'Not required to reproduce'],
+                ['Regression test', 'Drafted; fails before fix'],
+                ['Security signal', 'None detected'],
+              ].map(([label, value]) => (
+                <div key={label}><span>{label}</span><strong>{value}</strong></div>
+              ))}
+            </div>
+
+            <div className="owner-actions">
+              <button className="decision-button confirm" onClick={() => decide('confirmed')}>
+                <Check size={18} />
+                <span><strong>Confirm bug & authorize fix</strong><small>Regression test first · no automatic merge</small></span>
+              </button>
+              <button className="decision-button" onClick={() => decide('more-info')}>
+                <HelpCircle size={18} />
+                <span><strong>Need one more discriminator</strong><small>Draft a single focused reporter question</small></span>
+              </button>
+              <button className="decision-button" onClick={() => notify('Reclassification options opened')}>
+                <ArrowDownRight size={18} />
+                <span><strong>Reclassify outcome</strong><small>Support, expected behavior, duplicate, unsupported</small></span>
+              </button>
+              <button className="decision-button danger" onClick={() => notify('Public processing stopped; private route opened')}>
+                <ShieldCheck size={18} />
+                <span><strong>Route as security-sensitive</strong><small>Stop public analysis immediately</small></span>
+              </button>
+            </div>
+          </div>
+
+          <aside className="owner-aside">
+            <div className="card owner-sla">
+              <p className="eyebrow">Owner attention</p>
+              <div><Avatar initials="DX" /><span><strong>Dashboard Experience</strong><small>Suggested by component map</small></span></div>
+              <hr />
+              <span>Decision requested <strong>2h ago</strong></span>
+              <span>Target response <strong>3 business days</strong></span>
+              <span>Escalation <strong>Triage rotation</strong></span>
+            </div>
+            <div className="card automation-contract">
+              <p className="eyebrow">If you confirm</p>
+              <h3>Bounded fix contract</h3>
+              <ul>
+                <li><Check size={13} /> Create a failing regression test</li>
+                <li><Check size={13} /> Implement the smallest scoped fix</li>
+                <li><Check size={13} /> Run affected checks</li>
+                <li><Check size={13} /> Open a linked draft PR</li>
+                <li><LockKeyhole size={13} /> Wait for owner approval</li>
+              </ul>
+            </div>
+            <div className="card owner-control">
+              <ShieldCheck size={18} />
+              <div><strong>Human authority is preserved</strong><span>Owner silence escalates; it never closes a reproduced bug or merges a change.</span></div>
+            </div>
+          </aside>
+        </section>
+      )}
+    </>
+  );
 }
 
 function Workflow({ notify }: { notify: (message: string) => void }) {

@@ -1,4 +1,4 @@
-export type ViewKey = 'overview' | 'workflow' | 'issues' | 'settings';
+export type ViewKey = 'overview' | 'workflow' | 'experience' | 'issues' | 'settings';
 
 export type IssueState =
   | 'Needs information'
