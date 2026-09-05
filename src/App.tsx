@@ -47,11 +47,13 @@ import {
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import {
+  devinSessions,
   flowSteps,
   issues,
   outcomeData,
   ownerLoad,
   weeklyVolume,
+  type DevinSession,
   type FlowStep,
   type Issue,
   type ViewKey,
@@ -61,6 +63,7 @@ const navItems: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[] 
   { key: 'overview', label: 'Overview', icon: LayoutDashboard },
   { key: 'workflow', label: 'Flow designer', icon: Network },
   { key: 'experience', label: 'Human experience', icon: Users },
+  { key: 'sessions', label: 'Devin sessions', icon: Activity },
   { key: 'issues', label: 'Issue workbench', icon: Inbox },
   { key: 'settings', label: 'Configuration', icon: Settings2 },
 ];
@@ -73,6 +76,14 @@ const stateClass: Record<Issue['state'], string> = {
   'PR in review': 'blue',
   Redirected: 'gray',
   'Closed · inactive': 'rose',
+};
+
+const sessionStateClass: Record<DevinSession['status'], string> = {
+  Running: 'running',
+  Queued: 'queued',
+  'Needs attention': 'attention',
+  'Waiting on owner': 'waiting',
+  Completed: 'completed',
 };
 
 function Logo() {
@@ -131,6 +142,7 @@ function App() {
               >
                 <Icon size={18} strokeWidth={1.9} />
                 <span>{item.label}</span>
+                {item.key === 'sessions' && <b>2</b>}
                 {item.key === 'issues' && <b>6</b>}
               </button>
             );
@@ -199,7 +211,13 @@ function App() {
               <Bell size={18} />
               <span className="notification-dot" />
             </button>
-            <button className="primary-button" onClick={() => goToIssue(43218)}>
+            <button
+              className="primary-button"
+              onClick={() => {
+                setView('sessions');
+                notify('Dry-run reproduction session queued');
+              }}
+            >
               <Play size={16} fill="currentColor" />
               Run dry test
             </button>
@@ -210,6 +228,7 @@ function App() {
           {view === 'overview' && <Overview goToIssue={goToIssue} />}
           {view === 'workflow' && <Workflow notify={notify} />}
           {view === 'experience' && <ExperiencePreview notify={notify} />}
+          {view === 'sessions' && <DevinSessions goToIssue={goToIssue} notify={notify} />}
           {view === 'issues' && (
             <IssueWorkbench
               selected={selectedIssue}
@@ -567,6 +586,277 @@ function StateBadge({ state }: { state: Issue['state'] }) {
 
 function Avatar({ initials, size = 'normal' }: { initials: string; size?: 'normal' | 'small' }) {
   return <span className={`avatar ${size}`}>{initials}</span>;
+}
+
+function SessionStatus({ status }: { status: DevinSession['status'] }) {
+  return (
+    <span className={`session-status ${sessionStateClass[status]}`}>
+      <i />
+      {status}
+    </span>
+  );
+}
+
+function DevinSessions({
+  goToIssue,
+  notify,
+}: {
+  goToIssue: (id: number) => void;
+  notify: (message: string) => void;
+}) {
+  const [selectedSessionId, setSelectedSessionId] = useState(devinSessions[0].id);
+  const [filter, setFilter] = useState<'live' | 'attention' | 'all'>('live');
+  const [detailTab, setDetailTab] = useState<'activity' | 'artifacts' | 'guardrails'>('activity');
+  const selected = devinSessions.find(session => session.id === selectedSessionId) ?? devinSessions[0];
+  const visibleSessions = devinSessions.filter(session => {
+    if (filter === 'attention') return session.status === 'Needs attention';
+    if (filter === 'all') return true;
+    return session.status !== 'Completed';
+  });
+  const runningCount = devinSessions.filter(session => session.status === 'Running').length;
+  const queuedCount = devinSessions.filter(session => session.status === 'Queued').length;
+  const attentionCount = devinSessions.filter(session => session.status === 'Needs attention').length;
+
+  const selectSession = (id: string) => {
+    setSelectedSessionId(id);
+    setDetailTab('activity');
+  };
+
+  return (
+    <>
+      <PageHeader
+        eyebrow="Bounded agent execution"
+        title="Devin sessions"
+        description="See every agent run created by the issue flow, what triggered it, and where human attention is required."
+        actions={
+          <>
+            <button className="secondary-button" onClick={() => notify('Session data refreshed')}>
+              <RefreshCw size={15} /> Live · 18s ago
+            </button>
+            <button className="primary-button" onClick={() => notify('Dry-run reproduction session queued')}>
+              <Plus size={15} /> Run dry test
+            </button>
+          </>
+        }
+      />
+
+      <section className="session-summary" aria-label="Devin session summary">
+        <div className="card">
+          <span className="session-summary-icon running"><Activity size={17} /></span>
+          <div><strong>{runningCount}</strong><span>Agents running</span></div>
+          <small>of 6 workspace slots</small>
+        </div>
+        <div className="card">
+          <span className="session-summary-icon queued"><Clock3 size={17} /></span>
+          <div><strong>{queuedCount}</strong><span>Queued trigger</span></div>
+          <small>next slot in ~4 min</small>
+        </div>
+        <div className="card">
+          <span className="session-summary-icon attention"><AlertTriangle size={17} /></span>
+          <div><strong>{attentionCount}</strong><span>Needs attention</span></div>
+          <small>environment recovery</small>
+        </div>
+        <div className="card">
+          <span className="session-summary-icon released"><Pause size={17} /></span>
+          <div><strong>1</strong><span>Waiting on human</span></div>
+          <small>workspace already released</small>
+        </div>
+      </section>
+
+      <section className="session-monitor card">
+        <aside className="session-list-panel">
+          <div className="session-list-head">
+            <div>
+              <p className="eyebrow">Flow-triggered runs</p>
+              <strong>Session queue</strong>
+            </div>
+            <span className="live-indicator"><i /> Live</span>
+          </div>
+          <div className="session-filters">
+            <button className={filter === 'live' ? 'active' : ''} onClick={() => setFilter('live')}>Live & waiting</button>
+            <button className={filter === 'attention' ? 'active' : ''} onClick={() => setFilter('attention')}>Attention</button>
+            <button className={filter === 'all' ? 'active' : ''} onClick={() => setFilter('all')}>All</button>
+          </div>
+          <div className="session-list">
+            {visibleSessions.map(session => (
+              <button
+                className={`session-list-item ${selected.id === session.id ? 'selected' : ''}`}
+                onClick={() => selectSession(session.id)}
+                key={session.id}
+              >
+                <div className="session-list-row">
+                  <SessionStatus status={session.status} />
+                  <small>{session.id}</small>
+                </div>
+                <strong>{session.title}</strong>
+                <span>{session.issueKey} · {session.flowStep}</span>
+                <div className="session-mini-progress">
+                  <i style={{ width: `${session.progress}%` }} />
+                </div>
+                <div className="session-list-foot">
+                  <span><Clock3 size={11} /> {session.elapsed}</span>
+                  <span>{session.updated}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+          <div className="session-list-policy">
+            <ShieldCheck size={15} />
+            <span><strong>No idle agents.</strong> Human waits release the workspace and resume through a new event.</span>
+          </div>
+        </aside>
+
+        <div className="session-detail">
+          <div className="session-detail-head">
+            <div className="session-title">
+              <span className={`session-agent-icon ${sessionStateClass[selected.status]}`}><Bot size={21} /></span>
+              <div>
+                <span>{selected.id} · {selected.actor}</span>
+                <h2>{selected.title}</h2>
+                <button onClick={() => goToIssue(selected.issueId)}>{selected.issueKey} · {selected.issueTitle} <ChevronRight size={13} /></button>
+              </div>
+            </div>
+            <div className="session-head-actions">
+              <SessionStatus status={selected.status} />
+              {selected.status === 'Running' && (
+                <button className="icon-button" onClick={() => notify(`${selected.id} pause requested`)} aria-label="Pause session">
+                  <Pause size={16} />
+                </button>
+              )}
+              <button className="secondary-button" onClick={() => notify(`${selected.id} opened in Devin`)}>
+                Open session <ArrowRight size={14} />
+              </button>
+            </div>
+          </div>
+
+          <div className={`session-current-work ${sessionStateClass[selected.status]}`}>
+            <span>
+              {selected.status === 'Running' ? <Activity size={17} /> : selected.status === 'Needs attention' ? <AlertTriangle size={17} /> : <Clock3 size={17} />}
+            </span>
+            <div>
+              <small>{selected.status === 'Running' ? 'Working on' : selected.status === 'Needs attention' ? 'Blocked at' : 'Current state'}</small>
+              <strong>{selected.currentAction}</strong>
+            </div>
+            <div className="session-elapsed">
+              <small>Elapsed / budget</small>
+              <strong>{selected.elapsed} <span>/ {selected.budget}</span></strong>
+            </div>
+          </div>
+
+          <div className="session-progress-block">
+            <div>
+              <span>Session progress</span>
+              <strong>{selected.progress}%</strong>
+            </div>
+            <div className="session-progress-track"><i style={{ width: `${selected.progress}%` }} /></div>
+            <small>Next checkpoint: {selected.nextCheckpoint}</small>
+          </div>
+
+          <div className="session-tabs" role="tablist" aria-label="Session details">
+            {[
+              ['activity', 'Activity'],
+              ['artifacts', `Artifacts · ${selected.artifacts.length}`],
+              ['guardrails', 'Guardrails'],
+            ].map(([key, label]) => (
+              <button
+                className={detailTab === key ? 'active' : ''}
+                onClick={() => setDetailTab(key as typeof detailTab)}
+                role="tab"
+                aria-selected={detailTab === key}
+                key={key}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <div className="session-detail-body">
+            <div className="session-detail-primary">
+              {detailTab === 'activity' && (
+                <div className="session-timeline">
+                  <div className="session-section-title">
+                    <div><p className="eyebrow">Execution trace</p><h3>What this session has done</h3></div>
+                    <span>Updated {selected.updated}</span>
+                  </div>
+                  {selected.events.map(event => (
+                    <div className={`session-event ${event.state}`} key={`${selected.id}-${event.label}`}>
+                      <i>{event.state === 'complete' ? <Check size={12} /> : event.state === 'blocked' ? <AlertTriangle size={12} /> : <span />}</i>
+                      <div><strong>{event.label}</strong><span>{event.detail}</span></div>
+                      <small>{event.time}</small>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {detailTab === 'artifacts' && (
+                <div className="session-artifacts">
+                  <div className="session-section-title">
+                    <div><p className="eyebrow">Portable evidence</p><h3>Outputs attached to the issue lifecycle</h3></div>
+                  </div>
+                  {selected.artifacts.map((artifact, index) => (
+                    <button onClick={() => notify(`${artifact} preview opened`)} key={artifact}>
+                      <span><FileCheck2 size={17} /></span>
+                      <div><strong>{artifact}</strong><small>{index === 0 ? 'Primary output' : 'Supporting evidence'} · retained with issue state</small></div>
+                      <ChevronRight size={15} />
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {detailTab === 'guardrails' && (
+                <div className="session-guardrails">
+                  <div className="session-section-title">
+                    <div><p className="eyebrow">Execution contract</p><h3>Limits applied to this run</h3></div>
+                  </div>
+                  {[
+                    ['Bounded runtime', `${selected.budget} maximum; no unattended continuation`],
+                    ['Isolated workspace', 'No reporter production data or credentials are available'],
+                    ['Narrow scope', `Only the ${selected.flowStep.toLowerCase()} transition is authorized`],
+                    ['Human gates', 'No merge, issue closure, or expected-behavior decision'],
+                  ].map(([label, copy]) => (
+                    <div className="guardrail-row" key={label}>
+                      <ShieldCheck size={16} />
+                      <div><strong>{label}</strong><span>{copy}</span></div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <aside className="session-context">
+              <div>
+                <p className="eyebrow">Flow linkage</p>
+                <span><small>Triggered by</small><strong>{selected.trigger}</strong></span>
+                <span><small>Flow step</small><strong>{selected.flowStep}</strong></span>
+                <span><small>Started</small><strong>{selected.started}</strong></span>
+                <span><small>Environment</small><strong>{selected.environment}</strong></span>
+                {selected.branch && <span><small>Working branch</small><strong>{selected.branch}</strong></span>}
+              </div>
+              <div>
+                <p className="eyebrow">Operator controls</p>
+                {selected.status === 'Needs attention' ? (
+                  <button className="primary-button" onClick={() => notify('Recovery options opened')}>
+                    Review recovery options
+                  </button>
+                ) : selected.status === 'Waiting on owner' ? (
+                  <button className="primary-button" onClick={() => goToIssue(selected.issueId)}>
+                    Open owner decision
+                  </button>
+                ) : (
+                  <button className="secondary-button" onClick={() => notify('Session logs exported')}>
+                    <TerminalSquare size={14} /> Export run log
+                  </button>
+                )}
+                <button className="text-button" onClick={() => notify('Flow definition opened')}>
+                  View trigger in flow <ArrowRight size={13} />
+                </button>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </section>
+    </>
+  );
 }
 
 function ExperiencePreview({ notify }: { notify: (message: string) => void }) {

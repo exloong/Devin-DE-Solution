@@ -1,4 +1,4 @@
-export type ViewKey = 'overview' | 'workflow' | 'experience' | 'issues' | 'settings';
+export type ViewKey = 'overview' | 'workflow' | 'experience' | 'sessions' | 'issues' | 'settings';
 
 export type IssueState =
   | 'Needs information'
@@ -43,6 +43,38 @@ export interface FlowStep {
   exit: string;
   fallback: string;
   actions: string[];
+}
+
+export type DevinSessionStatus = 'Running' | 'Queued' | 'Needs attention' | 'Waiting on owner' | 'Completed';
+
+export interface DevinSessionEvent {
+  label: string;
+  detail: string;
+  time: string;
+  state: 'complete' | 'active' | 'pending' | 'blocked';
+}
+
+export interface DevinSession {
+  id: string;
+  issueId: number;
+  issueKey: string;
+  issueTitle: string;
+  title: string;
+  flowStep: string;
+  actor: string;
+  status: DevinSessionStatus;
+  started: string;
+  elapsed: string;
+  updated: string;
+  progress: number;
+  budget: string;
+  environment: string;
+  trigger: string;
+  currentAction: string;
+  nextCheckpoint: string;
+  branch?: string;
+  events: DevinSessionEvent[];
+  artifacts: string[];
 }
 
 export const issues: Issue[] = [
@@ -301,4 +333,166 @@ export const ownerLoad = [
   { owner: 'Database Connectivity', initials: 'DB', active: 14, waiting: 5, sla: 92 },
   { owner: 'Core Platform', initials: 'CP', active: 12, waiting: 3, sla: 96 },
   { owner: 'SQL Lab', initials: 'SL', active: 9, waiting: 4, sla: 81 },
+];
+
+export const devinSessions: DevinSession[] = [
+  {
+    id: 'DEV-8472',
+    issueId: 43207,
+    issueKey: 'SUP-43207',
+    issueTitle: 'Trino temporal column displays shifted timezone',
+    title: 'Reproduce timezone shift',
+    flowStep: 'Reproduce safely',
+    actor: 'Devin reproducer',
+    status: 'Running',
+    started: '8:42 ago',
+    elapsed: '08:42',
+    updated: '18s ago',
+    progress: 64,
+    budget: '60 min',
+    environment: 'superset-repro-43207',
+    trigger: 'Context completeness reached 88%',
+    currentAction: 'Comparing Trino timestamp fixtures across target and control builds',
+    nextCheckpoint: 'Attach minimal fixture and result matrix',
+    events: [
+      { label: 'Session started', detail: 'Clean workspace created from the approved reproduction image.', time: '08:42', state: 'complete' },
+      { label: 'Fixture built', detail: 'Created a two-row temporal dataset without reporter data.', time: '06:18', state: 'complete' },
+      { label: 'Target run', detail: 'Timezone shift reproduced twice on Superset 6.1.0.', time: '02:11', state: 'complete' },
+      { label: 'Control run', detail: 'Testing the same fixture on current master.', time: 'Now', state: 'active' },
+      { label: 'Evidence packet', detail: 'Publish result matrix or request one discriminator.', time: 'Next', state: 'pending' },
+    ],
+    artifacts: ['Reproduction plan', 'Fixture manifest', 'Target run log'],
+  },
+  {
+    id: 'DEV-8469',
+    issueId: 42991,
+    issueKey: 'SUP-42991',
+    issueTitle: 'CSV export ignores configured row limit',
+    title: 'Prepare row-limit fix',
+    flowStep: 'Prepare the fix',
+    actor: 'Devin coding agent',
+    status: 'Running',
+    started: '21:16 ago',
+    elapsed: '21:16',
+    updated: '41s ago',
+    progress: 78,
+    budget: '90 min',
+    environment: 'superset-fix-42991',
+    trigger: 'Core Platform confirmed expected behavior',
+    currentAction: 'Running the affected export unit suite after a scoped DAO change',
+    nextCheckpoint: 'Open linked draft PR when focused checks pass',
+    branch: 'devin/42991-csv-row-limit',
+    events: [
+      { label: 'Fix authorized', detail: 'Owner approved the bounded coding contract.', time: '21:16', state: 'complete' },
+      { label: 'Regression test', detail: 'Added a test that fails when the configured limit is ignored.', time: '15:04', state: 'complete' },
+      { label: 'Scoped implementation', detail: 'Applied the limit at the export query boundary.', time: '08:27', state: 'complete' },
+      { label: 'Affected checks', detail: 'Unit tests and type checks are running.', time: 'Now', state: 'active' },
+      { label: 'Draft PR', detail: 'Requires green checks; no automatic merge.', time: 'Next', state: 'pending' },
+    ],
+    artifacts: ['Regression test', 'Working diff', 'Test output'],
+  },
+  {
+    id: 'DEV-8475',
+    issueId: 43218,
+    issueKey: 'SUP-43218',
+    issueTitle: 'Dashboard filters reset after force refresh',
+    title: 'Classify new reporter evidence',
+    flowStep: 'Classify outcome',
+    actor: 'Devin triage agent',
+    status: 'Queued',
+    started: 'Not started',
+    elapsed: '00:00',
+    updated: '1m ago',
+    progress: 8,
+    budget: '10 min',
+    environment: 'Waiting for slot',
+    trigger: 'Reporter submitted two requested details',
+    currentAction: 'Queued behind two active workspace sessions',
+    nextCheckpoint: 'Validate whether the report is reproduction-ready',
+    events: [
+      { label: 'Trigger accepted', detail: 'Reporter reply matched the active information request.', time: '01:04', state: 'complete' },
+      { label: 'Idempotency check', detail: 'No duplicate triage session exists for this issue revision.', time: '00:58', state: 'complete' },
+      { label: 'Workspace slot', detail: 'Waiting within the configured concurrency limit.', time: 'Now', state: 'active' },
+      { label: 'Evidence classification', detail: 'Start a bounded triage session.', time: 'Next', state: 'pending' },
+    ],
+    artifacts: ['Reporter response snapshot'],
+  },
+  {
+    id: 'DEV-8458',
+    issueId: 43231,
+    issueKey: 'SUP-43231',
+    issueTitle: 'Bulk tag removal returns a 500 response',
+    title: 'Reproduce bulk tag failure',
+    flowStep: 'Reproduce safely',
+    actor: 'Devin reproducer',
+    status: 'Needs attention',
+    started: '34:09 ago',
+    elapsed: '34:09',
+    updated: '6m ago',
+    progress: 46,
+    budget: '60 min',
+    environment: 'superset-repro-43231',
+    trigger: 'Maintainer enrolled issue for reproduction',
+    currentAction: 'Blocked: fixture migration cannot reach the expected test database',
+    nextCheckpoint: 'Operator chooses retry, alternate image, or human handoff',
+    events: [
+      { label: 'Session started', detail: 'Clean workspace created from the standard image.', time: '34:09', state: 'complete' },
+      { label: 'API path isolated', detail: 'Minimal bulk tag request prepared.', time: '25:44', state: 'complete' },
+      { label: 'Environment check', detail: 'Test database readiness failed after the bounded retry policy.', time: '06:03', state: 'blocked' },
+      { label: 'Operator decision', detail: 'No further compute runs until a recovery path is selected.', time: 'Now', state: 'pending' },
+    ],
+    artifacts: ['Request fixture', 'Environment diagnostic'],
+  },
+  {
+    id: 'DEV-8431',
+    issueId: 43231,
+    issueKey: 'SUP-43231',
+    issueTitle: 'Bulk tag removal returns a 500 response',
+    title: 'Build owner evidence packet',
+    flowStep: 'Confirm the bug',
+    actor: 'Devin evidence agent',
+    status: 'Waiting on owner',
+    started: 'Completed in 12:07',
+    elapsed: '12:07',
+    updated: '2h ago',
+    progress: 100,
+    budget: '20 min',
+    environment: 'Workspace released',
+    trigger: 'Reproduction completed with 3 matching failures',
+    currentAction: 'No agent is running; the evidence packet is waiting for Core Platform',
+    nextCheckpoint: 'Owner confirms behavior or requests one discriminator',
+    events: [
+      { label: 'Evidence normalized', detail: 'Separated observed behavior from expected behavior.', time: '12:07', state: 'complete' },
+      { label: 'Packet published', detail: 'Attached result matrix, minimal request, and regression window.', time: '00:18', state: 'complete' },
+      { label: 'Workspace released', detail: 'Session ended before the human wait began.', time: '00:00', state: 'complete' },
+      { label: 'Owner decision', detail: 'Core Platform has three business days to respond.', time: 'Waiting', state: 'active' },
+    ],
+    artifacts: ['Evidence packet', 'Result matrix', 'Owner decision request'],
+  },
+  {
+    id: 'DEV-8422',
+    issueId: 43104,
+    issueKey: 'SUP-43104',
+    issueTitle: 'Custom OAuth callback fails behind proxy',
+    title: 'Classify proxy callback report',
+    flowStep: 'Classify outcome',
+    actor: 'Devin triage agent',
+    status: 'Completed',
+    started: 'Completed in 07:33',
+    elapsed: '07:33',
+    updated: '3h ago',
+    progress: 100,
+    budget: '10 min',
+    environment: 'Workspace released',
+    trigger: 'Maintainer enrolled issue for triage',
+    currentAction: 'Completed: configuration guidance delivered with a reopen path',
+    nextCheckpoint: 'None unless the reporter adds contradictory evidence',
+    events: [
+      { label: 'Policy checked', detail: 'Compared the report with supported reverse-proxy configuration.', time: '07:33', state: 'complete' },
+      { label: 'Outcome classified', detail: 'Evidence supported a configuration outcome, not a product defect.', time: '03:02', state: 'complete' },
+      { label: 'Guidance published', detail: 'Linked canonical setup guidance and preserved the reopen path.', time: '00:14', state: 'complete' },
+      { label: 'Workspace released', detail: 'No coding or reproduction session was started.', time: '00:00', state: 'complete' },
+    ],
+    artifacts: ['Classification evidence', 'Reporter guidance'],
+  },
 ];
