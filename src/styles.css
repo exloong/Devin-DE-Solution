@@ -2829,6 +2829,11 @@ select:focus-visible {
   font-size: 8px;
 }
 
+.safe-command.selected {
+  border-color: #afa6ee;
+  background: #f4f1ff;
+}
+
 .safe-command button,
 .cannot-answer,
 .decision-result button {
@@ -2865,6 +2870,10 @@ select:focus-visible {
   margin-top: 8px;
   padding: 0;
   color: #737c8d;
+}
+
+.cannot-answer.selected {
+  color: #6255cf;
 }
 
 .reporter-submit {

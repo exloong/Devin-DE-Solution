@@ -102,6 +102,7 @@ function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [mobileNav, setMobileNav] = useState(false);
   const selectedIssue = issues.find(issue => issue.id === selectedIssueId) ?? issues[0];
+  const runningSessionCount = devinSessions.filter(session => session.status === 'Running').length;
 
   const notify = (message: string) => {
     setToast(message);
@@ -142,7 +143,7 @@ function App() {
               >
                 <Icon size={18} strokeWidth={1.9} />
                 <span>{item.label}</span>
-                {item.key === 'sessions' && <b>2</b>}
+                {item.key === 'sessions' && <b>{runningSessionCount}</b>}
                 {item.key === 'issues' && <b>6</b>}
               </button>
             );
@@ -607,15 +608,16 @@ function DevinSessions({
   const [selectedSessionId, setSelectedSessionId] = useState(devinSessions[0].id);
   const [filter, setFilter] = useState<'live' | 'attention' | 'all'>('live');
   const [detailTab, setDetailTab] = useState<'activity' | 'artifacts' | 'guardrails'>('activity');
-  const selected = devinSessions.find(session => session.id === selectedSessionId) ?? devinSessions[0];
   const visibleSessions = devinSessions.filter(session => {
     if (filter === 'attention') return session.status === 'Needs attention';
     if (filter === 'all') return true;
     return session.status !== 'Completed';
   });
+  const selected = visibleSessions.find(session => session.id === selectedSessionId) ?? visibleSessions[0] ?? devinSessions[0];
   const runningCount = devinSessions.filter(session => session.status === 'Running').length;
   const queuedCount = devinSessions.filter(session => session.status === 'Queued').length;
   const attentionCount = devinSessions.filter(session => session.status === 'Needs attention').length;
+  const waitingCount = devinSessions.filter(session => session.status === 'Waiting on owner').length;
 
   const selectSession = (id: string) => {
     setSelectedSessionId(id);
@@ -658,7 +660,7 @@ function DevinSessions({
         </div>
         <div className="card">
           <span className="session-summary-icon released"><Pause size={17} /></span>
-          <div><strong>1</strong><span>Waiting on human</span></div>
+          <div><strong>{waitingCount}</strong><span>Waiting on human</span></div>
           <small>workspace already released</small>
         </div>
       </section>
@@ -863,11 +865,20 @@ function ExperiencePreview({ notify }: { notify: (message: string) => void }) {
   const [persona, setPersona] = useState<'reporter' | 'owner'>('reporter');
   const [reporterStep, setReporterStep] = useState<'answering' | 'submitted'>('answering');
   const [refreshPath, setRefreshPath] = useState('Dashboard refresh icon');
+  const [featureFlagResponse, setFeatureFlagResponse] = useState<'provided' | 'unavailable' | null>(null);
   const [ownerDecision, setOwnerDecision] = useState<'pending' | 'confirmed' | 'more-info'>('pending');
 
   const submitReporterResponse = () => {
+    if (featureFlagResponse === null) {
+      notify('Answer the remaining question or choose a safe alternative');
+      return;
+    }
     setReporterStep('submitted');
-    notify('Reporter response accepted; reproduction queued');
+    notify(
+      featureFlagResponse === 'provided'
+        ? 'Reporter response accepted; reproduction queued'
+        : 'Reporter response accepted; alternative evidence review queued',
+    );
   };
 
   const decide = (decision: 'confirmed' | 'more-info') => {
@@ -933,10 +944,21 @@ function ExperiencePreview({ notify }: { notify: (message: string) => void }) {
               <div className="reporter-success">
                 <span className="success-mark"><Check size={23} /></span>
                 <p className="eyebrow">Response received</p>
-                <h2>Thanks—this is ready for a clean reproduction.</h2>
-                <p>We will test the dashboard refresh path on Superset 6.1 and current master. You will get the result here; no further reply is needed unless one specific discriminator is missing.</p>
+                <h2>
+                  {featureFlagResponse === 'provided'
+                    ? 'Thanks—this is ready for a clean reproduction.'
+                    : 'Thanks—we will use a safe alternative.'}
+                </h2>
+                <p>
+                  {featureFlagResponse === 'provided'
+                    ? 'We will test the dashboard refresh path on Superset 6.1 and current master. You will get the result here; no further reply is needed unless one specific discriminator is missing.'
+                    : 'A maintainer will select a public fixture or request one safer discriminator. You do not need to expose private deployment configuration.'}
+                </p>
                 <div className="success-next">
-                  <div><span>Next step</span><strong>Reproduction queued</strong></div>
+                  <div>
+                    <span>Next step</span>
+                    <strong>{featureFlagResponse === 'provided' ? 'Reproduction queued' : 'Alternative evidence review'}</strong>
+                  </div>
                   <div><span>Expected update</span><strong>Within 1 business day</strong></div>
                   <div><span>Your issue</span><strong>Stays open</strong></div>
                 </div>
@@ -1005,30 +1027,68 @@ function ExperiencePreview({ notify }: { notify: (message: string) => void }) {
                         <span>Required · about 2 minutes</span>
                         <h3>Share only the dashboard feature flags involved</h3>
                       </div>
-                      <span className="needed-chip">Still needed</span>
+                      {featureFlagResponse === null ? (
+                        <span className="needed-chip">Still needed</span>
+                      ) : (
+                        <span className="answered-chip">
+                          <Check size={12} />
+                          {featureFlagResponse === 'provided' ? 'Answered' : 'Alternative requested'}
+                        </span>
+                      )}
                     </div>
                     <p className="why-copy"><HelpCircle size={14} /> Why we ask: the report started after an upgrade and may depend on the dashboard state model.</p>
-                    <div className="safe-command">
+                    <div className={`safe-command ${featureFlagResponse === 'provided' ? 'selected' : ''}`}>
                       <code>DASHBOARD_RBAC=true, NATIVE_FILTERS=true</code>
-                      <button onClick={() => notify('Safe example copied')}>Use safe example</button>
+                      <button
+                        onClick={() => {
+                          setFeatureFlagResponse('provided');
+                          notify('Safe example selected');
+                        }}
+                      >
+                        {featureFlagResponse === 'provided' ? 'Selected' : 'Use safe example'}
+                      </button>
                     </div>
                     <div className="privacy-note">
                       <ShieldCheck size={16} />
                       <span><strong>Keep private data out.</strong> Do not paste credentials, internal URLs, production records, or your full configuration.</span>
                     </div>
-                    <button className="cannot-answer" onClick={() => notify('Alternative evidence options opened')}>
-                      I cannot provide this <ChevronRight size={14} />
+                    <button
+                      className={`cannot-answer ${featureFlagResponse === 'unavailable' ? 'selected' : ''}`}
+                      onClick={() => {
+                        setFeatureFlagResponse('unavailable');
+                        notify('Safe alternative selected');
+                      }}
+                    >
+                      {featureFlagResponse === 'unavailable' ? 'Safe alternative selected' : 'I cannot provide this'}
+                      <ChevronRight size={14} />
                     </button>
                   </div>
                 </div>
 
                 <div className="reporter-submit">
                   <div>
-                    <strong>That is everything we need.</strong>
-                    <span>You can edit these answers later. Submitting does not run code from your environment.</span>
+                    <strong>
+                      {featureFlagResponse === null
+                        ? 'One answer is still needed.'
+                        : featureFlagResponse === 'provided'
+                          ? 'That is everything we need.'
+                          : 'We will route around the unavailable detail.'}
+                    </strong>
+                    <span>
+                      {featureFlagResponse === null
+                        ? 'Use the safe example or request an alternative before submitting.'
+                        : 'You can edit these answers later. Submitting does not run code from your environment.'}
+                    </span>
                   </div>
-                  <button className="primary-button" onClick={submitReporterResponse}>
-                    Submit and queue reproduction <ArrowRight size={15} />
+                  <button
+                    className="primary-button"
+                    disabled={featureFlagResponse === null}
+                    onClick={submitReporterResponse}
+                  >
+                    {featureFlagResponse === 'unavailable'
+                      ? 'Submit for alternative review'
+                      : 'Submit and queue reproduction'}
+                    <ArrowRight size={15} />
                   </button>
                 </div>
               </>
@@ -1103,7 +1163,7 @@ function ExperiencePreview({ notify }: { notify: (message: string) => void }) {
               </div>
               <ArrowRight size={19} />
               <div className="expected">
-                <span>Control on master</span>
+                <span>Control on 6.0.0</span>
                 <strong>Filter state remains applied</strong>
                 <small><Check size={13} /> Passed 3 of 3 isolated runs</small>
               </div>
