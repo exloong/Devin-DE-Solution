@@ -80,7 +80,7 @@
     .grid-3 { display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: 18px; }
     .card {
       padding: 24px; border-radius: 24px; border: 1px solid rgba(23,57,74,.1);
-      background: var(--card); box-shadow: var(--shadow);
+      min-width: 0; background: var(--card); box-shadow: var(--shadow);
     }
     .card h3 { margin: 0 0 5px; font-size: 20px; letter-spacing: -.025em; }
     .card-sub { margin: 0 0 22px; color: var(--muted); font-size: 13px; }
@@ -138,7 +138,7 @@
     .impact { padding: 5px 9px; border-radius: 999px; color: #835a11; background: #f9e6b8; font-size: 11px; font-weight: 850; }
     .estimate-metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
     .estimate-metric {
-      padding: 21px; border-radius: 20px; color: white; background: var(--navy);
+      min-width: 0; padding: 21px; border-radius: 20px; color: white; background: var(--navy);
       box-shadow: var(--shadow);
     }
     .estimate-metric:nth-child(2) { background: #17665f; }
@@ -153,7 +153,7 @@
     .comparison-table th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
     .comparison-table td:first-child { font-weight: 700; }
     .comparison-table .base { color: #0e6e66; background: rgba(139,211,199,.12); font-weight: 800; }
-    .table-scroll { overflow-x: auto; }
+    .table-scroll { width: 100%; max-width: 100%; overflow-x: auto; }
     .formula { margin: 0; padding: 15px 17px; border-radius: 14px; color: #dce7e8; background: var(--navy); font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .source-list { margin: 0; padding-left: 18px; color: var(--muted); font-size: 12px; }
     .source-list li + li { margin-top: 8px; }
