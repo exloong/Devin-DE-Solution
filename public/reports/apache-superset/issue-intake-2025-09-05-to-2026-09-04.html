@@ -136,6 +136,27 @@
     .opportunity b { font-size: 14px; }
     .opportunity p { margin: 0; color: var(--muted); font-size: 12px; }
     .impact { padding: 5px 9px; border-radius: 999px; color: #835a11; background: #f9e6b8; font-size: 11px; font-weight: 850; }
+    .estimate-metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
+    .estimate-metric {
+      padding: 21px; border-radius: 20px; color: white; background: var(--navy);
+      box-shadow: var(--shadow);
+    }
+    .estimate-metric:nth-child(2) { background: #17665f; }
+    .estimate-metric:nth-child(3) { color: var(--ink); background: #f3c970; }
+    .estimate-metric:nth-child(4) { background: var(--purple); }
+    .estimate-metric span { display: block; min-height: 36px; font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; opacity: .75; }
+    .estimate-metric strong { display: block; margin: 9px 0 5px; font-size: 31px; line-height: 1; letter-spacing: -.035em; }
+    .estimate-metric small { display: block; font-size: 11px; opacity: .76; }
+    .comparison-table { width: 100%; border-collapse: collapse; min-width: 730px; }
+    .comparison-table th, .comparison-table td { padding: 13px 12px; border-bottom: 1px solid var(--line); text-align: right; font-size: 13px; vertical-align: top; }
+    .comparison-table th:first-child, .comparison-table td:first-child { text-align: left; }
+    .comparison-table th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+    .comparison-table td:first-child { font-weight: 700; }
+    .comparison-table .base { color: #0e6e66; background: rgba(139,211,199,.12); font-weight: 800; }
+    .table-scroll { overflow-x: auto; }
+    .formula { margin: 0; padding: 15px 17px; border-radius: 14px; color: #dce7e8; background: var(--navy); font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .source-list { margin: 0; padding-left: 18px; color: var(--muted); font-size: 12px; }
+    .source-list li + li { margin-top: 8px; }
     .method { columns: 2; column-gap: 42px; color: var(--muted); font-size: 13px; }
     .method h3 { break-after: avoid; color: var(--ink); }
     .method p, .method ul { break-inside: avoid; }
@@ -146,6 +167,7 @@
     @media (max-width: 920px) {
       .hero, .grid-2, .grid-3 { grid-template-columns: 1fr; }
       .metrics { grid-template-columns: repeat(2, 1fr); }
+      .estimate-metrics { grid-template-columns: repeat(2, 1fr); }
       .insights { grid-template-columns: 1fr; }
       .hero-aside { max-width: 620px; }
       .donut-wrap { grid-template-columns: 1fr; }
@@ -157,6 +179,7 @@
       .topline { align-items: flex-start; flex-direction: column; }
       .hero { padding-top: 38px; }
       .metrics { grid-template-columns: 1fr; }
+      .estimate-metrics { grid-template-columns: 1fr; }
       .method { columns: 1; }
       .section-head { align-items: flex-start; flex-direction: column; }
       .card { padding: 18px; }
@@ -198,6 +221,7 @@
       <a href="#resolution">Resolution</a>
       <a href="#backlog">Backlog</a>
       <a href="#automation">Automation</a>
+      <a href="#devin-case">Devin case</a>
       <a href="#method">Method</a>
     </nav>
 
@@ -320,6 +344,102 @@
       </div>
     </section>
 
+    <section id="devin-case">
+      <div class="section-head">
+        <div><div class="eyebrow">Engineer-run vs. Devin-run</div><h2>The modeled base case returns 4,700 engineering hours per year</h2></div>
+        <p class="section-note">This is a capacity model, not a measurement of Superset contributor labor. It assumes Devin owns intake through a reviewable PR for the 429 bugs with the strict closed-plus-fix/PR signal; an engineer still reviews and approves every PR.</p>
+      </div>
+
+      <div class="estimate-metrics">
+        <article class="estimate-metric"><span>Engineering time saved</span><strong>4,700h/year</strong><small>394h/month · 2.4 FTE at 2,000h/FTE</small></article>
+        <article class="estimate-metric"><span>Human work retained</span><strong>429h/year</strong><small>One hour of approval time for each of 429 PRs</small></article>
+        <article class="estimate-metric"><span>Active Devin runtime</span><strong>2,300h/year</strong><small>Agent-active estimate; not billable wall-clock hours</small></article>
+        <article class="estimate-metric"><span>Token-priced equivalent</span><strong>≈ $4,100/year</strong><small>Extra-usage equivalent; plan fees and included quota separate</small></article>
+      </div>
+
+      <div class="grid-2">
+        <article class="card">
+          <h3>Operating model comparison · base case</h3>
+          <p class="card-sub">The engineer approval gate is intentionally unchanged. Waiting for reporters, test suites, or review is not counted as active engineering or agent runtime.</p>
+          <div class="table-scroll">
+            <table class="comparison-table">
+              <thead><tr><th>Annual work</th><th>Engineer-run</th><th>Devin-run</th><th>Difference</th></tr></thead>
+              <tbody>
+                <tr><td>Intake and triage · 825 bugs</td><td>275h</td><td>Automated</td><td>−275h</td></tr>
+                <tr><td>Human clarification · 315 bugs</td><td>158h</td><td>Automated</td><td>−158h</td></tr>
+                <tr><td>Reproduce and diagnose · 429 bugs</td><td>858h</td><td>Automated</td><td>−858h</td></tr>
+                <tr><td>Fix, test, and open PR · 429 bugs</td><td>3,432h</td><td>Automated</td><td>−3,432h</td></tr>
+                <tr><td>Review and approve · 429 PRs</td><td>429h</td><td>429h</td><td>No change</td></tr>
+                <tr class="base"><td>Total engineer time</td><td>5,152h</td><td>429h</td><td>−4,723h · −91.7%</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="card">
+          <h3>How Devin usage is charged</h3>
+          <p class="card-sub">Devin does not publish one universal hourly rate. Cost depends on account type and the model work performed.</p>
+          <ul class="source-list">
+            <li><strong>Self-serve:</strong> paid plans include daily and weekly usage allowances. Extra usage is consumed at API token pricing; included quota can reduce incremental cash cost.</li>
+            <li><strong>Enterprise:</strong> newer contracts meter Agent Compute Units (ACUs). Dollar cost is <code>ACUs × contracted $/ACU</code>; no public universal enterprise ACU price is available.</li>
+            <li><strong>Runtime:</strong> planning, tool use, browser/code execution, VM, and networking contribute to usage. Sessions generally consume little while waiting and sleep when idle, so elapsed issue age is not billable runtime.</li>
+            <li><strong>Plan fees:</strong> public list prices start at $20/month Pro, $200/month Max, or $80/month for Teams plus $40/month per full seat. These are separate from the extra-usage estimate.</li>
+          </ul>
+          <div class="warning" style="margin-bottom:0"><strong>Not used:</strong> the documented Adaptive promotional token rate ended 7 July 2026, and SWE-1.7’s free preview ended 8 August. Neither expired promotion is treated as the current price.</div>
+        </article>
+      </div>
+
+      <div class="card" style="margin-top:18px">
+        <h3>Low / base / high sensitivity</h3>
+        <p class="card-sub">All three scenarios apply the report’s measured volumes. The range changes only modeled effort, agent runtime, and token consumption.</p>
+        <div class="table-scroll">
+          <table class="comparison-table">
+            <thead><tr><th>Annual estimate</th><th>Low</th><th class="base">Base</th><th>High</th></tr></thead>
+            <tbody>
+              <tr><td>Human intake per bug</td><td>10 min</td><td class="base">20 min</td><td>30 min</td></tr>
+              <tr><td>Human clarification per observed request</td><td>15 min</td><td class="base">30 min</td><td>45 min</td></tr>
+              <tr><td>Human reproduction + diagnosis per PR-path bug</td><td>1h</td><td class="base">2h</td><td>4h</td></tr>
+              <tr><td>Human fix + tests + PR per PR-path bug</td><td>4h</td><td class="base">8h</td><td>12h</td></tr>
+              <tr><td>Engineering time saved</td><td>2,361h · 1.2 FTE</td><td class="base">4,723h · 2.4 FTE</td><td>7,513h · 3.8 FTE</td></tr>
+              <tr><td>Approval time retained</td><td>215h</td><td class="base">429h</td><td>644h</td></tr>
+              <tr><td>Devin active time per intake / clarification</td><td>5 min / 5 min</td><td class="base">10 min / 10 min</td><td>20 min / 20 min</td></tr>
+              <tr><td>Devin active time per PR path</td><td>2.5h</td><td class="base">5h</td><td>10h</td></tr>
+              <tr><td>Active Devin runtime</td><td>1,168h</td><td class="base">2,335h</td><td>4,670h</td></tr>
+              <tr><td>Token-priced extra-usage equivalent</td><td>≈ $1,500</td><td class="base">≈ $4,100</td><td>≈ $10,900</td></tr>
+              <tr><td>Enterprise ACU planning range</td><td>≈ 3,100 ACUs</td><td class="base">≈ 6,100 ACUs</td><td>≈ 12,700 ACUs</td></tr>
+              <tr><td>Direct usage cost per engineer-hour saved</td><td>≈ $0.62</td><td class="base">≈ $0.87</td><td>≈ $1.45</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="grid-2" style="margin-top:18px">
+        <article class="card">
+          <h3>Calculation</h3>
+          <p class="card-sub">The comparison uses the same annual cohort in both operating models.</p>
+          <p class="formula">hours saved = 825 × intake effort<br>+ 315 × clarification effort<br>+ 429 × (reproduction effort + fix/test/PR effort)<br><br>base = 825 × ⅓h + 315 × ½h + 429 × (2h + 8h)<br>= 4,722.5 engineering hours/year</p>
+        </article>
+        <article class="card">
+          <h3>Cost calculation</h3>
+          <p class="card-sub">The token estimate uses the published GPT-5.1 Medium rates as a transparent benchmark: $1.25/M input, $10/M output, and $0.125/M cache-read tokens.</p>
+          <p class="formula">base token profile<br>intake/clarification: 100k input + 10k output + 300k cache<br>PR path: 3M input + 300k output + 10M cache<br><br>1.10 × (1,140 × $0.2625 + 429 × $8.00)<br>= $4,104/year</p>
+          <p class="card-sub" style="margin:14px 0 0">The 1.10 multiplier is a 10% planning allowance for non-token VM/network usage. Low profiles use 50k/5k/150k tokens per intake and 1M/100k/4M per PR path; high profiles use 200k/20k/600k and 8M/800k/30M, ordered as input/output/cache read.</p>
+        </article>
+      </div>
+
+      <div class="warning"><strong>Risk-adjusted year-one view:</strong> if Devin independently reaches a reviewable PR on 60% rather than 100% of the 429 PR-path bugs, base savings fall to about 3,000 hours/year and token-priced usage to about $2,600/year; the remaining fixes return to engineers. Also, public PR links include community work, so the headline estimate is gross engineering capacity across the ecosystem—not proven Apache maintainer payroll savings.</div>
+
+      <div class="card">
+        <h3>Pricing and model sources</h3>
+        <ul class="source-list">
+          <li><a href="https://devin.ai/pricing">Devin plans and pricing</a> — included quota, public plan fees, and API-priced extra usage.</li>
+          <li><a href="https://docs.devin.ai/desktop/accounts/quota">Usage and quota</a> — chargeable actions, VM/network contribution, and idle/wait behavior.</li>
+          <li><a href="https://docs.devin.ai/desktop/models">AI model pricing</a> — token rates and enterprise ACU model.</li>
+          <li><a href="https://docs.devin.ai/enterprise/admin-tool/usage-and-insights">Enterprise usage and insights</a> — ACU metering and session sizing context. The base model uses the documented 12-ACU expected pagination task as an order-of-magnitude anchor; the same example reached 42 ACUs after avoidable dead-end work.</li>
+        </ul>
+      </div>
+    </section>
+
     <section id="method">
       <div class="section-head">
         <div><div class="eyebrow">Methodology</div><h2>Definitions, sources, and limits</h2></div>
@@ -350,6 +470,8 @@
           <li>Issues near the end of the cohort have less time to close than early issues.</li>
           <li>Closure rate is a cohort snapshot, not a causal measure of maintainer performance.</li>
         </ul>
+        <h3>Capacity estimate</h3>
+        <p>The Devin comparison is a separate scenario model layered onto the observed cohort. It does not infer labor hours from issue elapsed time. The 429 strict fix/PR proxy is used as the reviewable-PR workload; low/base/high handling times are explicit assumptions. FTE conversion uses 2,000 engineering hours per year. ACU planning assumes 0.5/1/2 ACUs per intake, 0.25/0.5/1 per clarification, and 6/12/25 per PR path. Token and ACU estimates are planning ranges, not invoices.</p>
       </div>
     </section>
   </main>
