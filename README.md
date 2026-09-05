@@ -11,6 +11,14 @@ and fix workflow. The interface includes:
 All content and actions are simulated. The mockup does not connect to GitHub or
 start Devin sessions.
 
+## Research
+
+- [Apache Superset issue intake and bug resolution report](public/reports/apache-superset/issue-intake-2025-09-05-to-2026-09-04.html)
+  covers 1,030 public issues created during the 365 complete days ending
+  September 4, 2026. It documents the measured GitHub data, classification
+  proxies, lifecycle timing, backlog age, and automation opportunities that
+  informed the mockup.
+
 ## Run with Docker
 
 ```bash
