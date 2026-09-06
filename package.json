@@ -7,6 +7,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
+    "test:fixtures": "esbuild src/api/fixtures/reachability.fixture.ts --bundle --platform=node --format=esm --define:import.meta.env={} --outfile=dist/fixtures/reachability.mjs --log-level=warning && node dist/fixtures/reachability.mjs",
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {

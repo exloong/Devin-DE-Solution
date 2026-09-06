@@ -4,3 +4,8 @@ dist
 .gitignore
 README.md
 npm-debug.log
+backend/.venv
+backend/.pytest_cache
+backend/.mypy_cache
+backend/.ruff_cache
+backend/relay.sqlite3

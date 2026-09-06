@@ -45,7 +45,14 @@ export interface FlowStep {
   actions: string[];
 }
 
-export type DevinSessionStatus = 'Running' | 'Queued' | 'Needs attention' | 'Waiting on owner' | 'Completed';
+export type DevinSessionStatus =
+  | 'Running'
+  | 'Queued'
+  | 'Needs attention'
+  | 'Waiting on owner'
+  | 'Completed'
+  | 'Failed'
+  | 'Cancelled';
 
 export interface DevinSessionEvent {
   label: string;

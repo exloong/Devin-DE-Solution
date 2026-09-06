@@ -1,0 +1,12 @@
+services:
+  api:
+    environment:
+      RELAY_MODE: demo
+      RELAY_SEED: "1"
+      GITHUB_WEBHOOK_SECRET: relay-local-webhook-secret
+      RELAY_AUTH_TOKENS: ""
+      RELAY_AUTH_TOKENS_FILE: ""
+
+  worker:
+    environment:
+      RELAY_MODE: demo

@@ -30,6 +30,8 @@ import {
   Play,
   Plus,
   RefreshCw,
+  Loader2,
+  ShieldAlert,
   RotateCcw,
   Search,
   Send,
@@ -53,11 +55,36 @@ import {
   outcomeData,
   ownerLoad,
   weeklyVolume,
-  type DevinSession,
   type FlowStep,
   type Issue,
   type ViewKey,
 } from './data';
+import {
+  fromApiDetail,
+  fromApiSummary,
+  isWaitingOnHuman,
+  fromDemoSession,
+  useAnalytics,
+  useApiStatus,
+  useDryRun,
+  useSession,
+  useSessions,
+  type ApiStatus,
+  type SessionView,
+} from './hooks';
+import {
+  DataSourceBadge,
+  LifecycleBadge,
+  LiveIssueWorkbench,
+  RepositorySafetyNotice,
+  ResourceNotice,
+  SessionDetailView,
+  SessionStatusBadge,
+  isRepositorySafetyError,
+  useLiveIssueList,
+  type IssueListFilter,
+} from './components';
+import { OPERATOR_TOKEN_STORAGE_KEY } from './api';
 
 const navItems: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[] = [
   { key: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -78,14 +105,6 @@ const stateClass: Record<Issue['state'], string> = {
   'Closed · inactive': 'rose',
 };
 
-const sessionStateClass: Record<DevinSession['status'], string> = {
-  Running: 'running',
-  Queued: 'queued',
-  'Needs attention': 'attention',
-  'Waiting on owner': 'waiting',
-  Completed: 'completed',
-};
-
 function Logo() {
   return (
     <div className="logo-mark" aria-hidden="true">
@@ -99,19 +118,46 @@ function Logo() {
 function App() {
   const [view, setView] = useState<ViewKey>('overview');
   const [selectedIssueId, setSelectedIssueId] = useState(43218);
+  const [selectedLiveIssueId, setSelectedLiveIssueId] = useState<string | null>(null);
+  const [issueFilter, setIssueFilter] = useState<IssueListFilter>('all');
+  const [issueSearch, setIssueSearch] = useState('');
   const [toast, setToast] = useState<string | null>(null);
   const [mobileNav, setMobileNav] = useState(false);
   const selectedIssue = issues.find(issue => issue.id === selectedIssueId) ?? issues[0];
-  const runningSessionCount = devinSessions.filter(session => session.status === 'Running').length;
+
+  const api = useApiStatus();
+  const live = api.mode === 'live' || api.mode === 'degraded';
+  const demo = api.mode === 'demo';
+  // While checking, or after a reachable API failure, no issue/session records may render — live or demo.
+  const gated = api.mode === 'checking' || api.mode === 'error';
+  const liveSessions = useSessions({}, live);
+  const liveIssues = useLiveIssueList(issueFilter, issueSearch, live);
+  const analytics = useAnalytics(live);
+  const runningSessionCount = live
+    ? liveSessions.data?.items.filter(session => session.status === 'running').length ?? 0
+    : demo
+      ? devinSessions.filter(session => session.status === 'Running').length
+      : null;
+  const issueCount = live ? liveIssues.data?.total ?? 0 : demo ? issues.length : null;
 
   const notify = (message: string) => {
     setToast(message);
     window.setTimeout(() => setToast(null), 2600);
   };
 
-  const goToIssue = (id: number) => {
-    setSelectedIssueId(id);
+  const goToIssue = (id: number | string) => {
+    if (typeof id === 'number') setSelectedIssueId(id);
+    else if (/^\d+$/.test(id)) setSelectedIssueId(Number(id));
+    else setSelectedLiveIssueId(id);
     setView('issues');
+  };
+
+  const dryRun = useDryRun(() => notify('Dry-run accepted by the API'));
+  const runDryTest = () => {
+    setView('sessions');
+    if (live) void dryRun.run();
+    else if (demo) notify('Dry-run reproduction session queued (simulated)');
+    else notify('Relay API is not available; dry-run was not sent');
   };
 
   return (
@@ -143,8 +189,8 @@ function App() {
               >
                 <Icon size={18} strokeWidth={1.9} />
                 <span>{item.label}</span>
-                {item.key === 'sessions' && <b>{runningSessionCount}</b>}
-                {item.key === 'issues' && <b>6</b>}
+                {item.key === 'sessions' && <b>{runningSessionCount ?? '–'}</b>}
+                {item.key === 'issues' && <b>{issueCount ?? '–'}</b>}
               </button>
             );
           })}
@@ -152,30 +198,51 @@ function App() {
 
         <div className="sidebar-section">
           <p className="nav-label">Saved views</p>
-          <button className="saved-view">
-            <span className="dot amber-dot" />
-            Waiting on reporter
-            <b>8</b>
-          </button>
-          <button className="saved-view">
-            <span className="dot green-dot" />
-            Owner decisions
-            <b>5</b>
-          </button>
-          <button className="saved-view">
-            <span className="dot blue-dot" />
-            PRs in review
-            <b>11</b>
-          </button>
+          {(
+            [
+              ['waiting', 'amber-dot', 'Waiting on reporter', ['awaiting_reporter'], 8],
+              ['decision', 'green-dot', 'Owner decisions', ['needs_owner_decision'], 5],
+              ['review', 'blue-dot', 'PRs in review', ['pr_open', 'awaiting_owner', 'changes_requested'], 11],
+            ] as [IssueListFilter, string, string, string[], number][]
+          ).map(([key, dot, label, states, demoCount]) => {
+            const counts = analytics.data?.state_counts;
+            const count = live ? states.reduce((sum, state) => sum + (counts?.[state as keyof typeof counts] ?? 0), 0) : demo ? demoCount : null;
+            return (
+              <button
+                className="saved-view"
+                key={key}
+                onClick={() => {
+                  setIssueFilter(key);
+                  setView('issues');
+                }}
+              >
+                <span className={`dot ${dot}`} />
+                {label}
+                <b>{count === null || (live && !analytics.data) ? '–' : count}</b>
+              </button>
+            );
+          })}
         </div>
 
         <div className="sidebar-spacer" />
         <div className="environment-card">
           <div className="environment-title">
-            <span className="pulse-dot" />
-            Dry-run environment
+            <span className={`pulse-dot ${api.mode}`} />
+            {api.mode === 'checking' ? 'Checking API…' : api.mode === 'error' ? 'Relay API error' : live ? 'Connected to Relay API' : 'Demo environment'}
           </div>
-          <p>All actions are simulated in <strong>exloong/superset</strong>.</p>
+          <p>
+            {live ? (
+              <>Events, sessions, and PRs are scoped to <strong>exloong/superset</strong>.{api.mode === 'degraded' && api.reason ? <> Degraded: {api.reason}.</> : null}</>
+            ) : api.mode === 'error' ? (
+              <>
+                {api.error?.apiAbsent ? 'The API did not respond' : 'The API response is not usable'}: {api.reason}. No records are shown; demo data is disabled.
+              </>
+            ) : api.mode === 'checking' ? (
+              <>Waiting for the Relay API health and readiness probes.</>
+            ) : (
+              <>API unreachable; showing committed demo data for <strong>exloong/superset</strong>. Nothing here is live.</>
+            )}
+          </p>
           <button onClick={() => setView('settings')}>
             Review safeguards <ArrowRight size={14} />
           </button>
@@ -204,21 +271,12 @@ function App() {
             <kbd>⌘ K</kbd>
           </div>
           <div className="top-actions">
-            <div className="mode-pill">
-              <span />
-              Simulation mode
-            </div>
+            <ModePill api={api} />
             <button className="icon-button" aria-label="Notifications">
               <Bell size={18} />
               <span className="notification-dot" />
             </button>
-            <button
-              className="primary-button"
-              onClick={() => {
-                setView('sessions');
-                notify('Dry-run reproduction session queued');
-              }}
-            >
+            <button className="primary-button" onClick={runDryTest} disabled={dryRun.pending}>
               <Play size={16} fill="currentColor" />
               Run dry test
             </button>
@@ -226,16 +284,42 @@ function App() {
         </header>
 
         <div className="page">
-          {view === 'overview' && <Overview goToIssue={goToIssue} />}
+          {gated && view !== 'workflow' && view !== 'settings' && <ApiGate api={api} />}
+          {!gated && view === 'overview' && <Overview goToIssue={goToIssue} live={live} analytics={analytics} />}
           {view === 'workflow' && <Workflow notify={notify} />}
-          {view === 'experience' && <ExperiencePreview notify={notify} />}
-          {view === 'sessions' && <DevinSessions goToIssue={goToIssue} notify={notify} />}
-          {view === 'issues' && (
+          {!gated && view === 'experience' && <ExperiencePreview notify={notify} />}
+          {!gated && view === 'sessions' && <DevinSessions goToIssue={goToIssue} notify={notify} live={live} sessions={liveSessions} onRunDryTest={runDryTest} />}
+          {view === 'issues' && demo && (
             <IssueWorkbench
               selected={selectedIssue}
               onSelect={setSelectedIssueId}
               notify={notify}
             />
+          )}
+          {view === 'issues' && live && (
+            <>
+              <PageHeader
+                eyebrow="Live workbench"
+                title="Issue queue"
+                description="Reporter questions, evidence packets, owner routing, and human decisions from the Relay API."
+                actions={
+                  <button className="secondary-button" onClick={() => void liveIssues.refresh()}>
+                    <RefreshCw size={15} /> Refresh
+                  </button>
+                }
+              />
+              {liveIssues.state.kind === 'error' && isRepositorySafetyError(liveIssues.state.error) && <RepositorySafetyNotice error={liveIssues.state.error} />}
+              <LiveIssueWorkbench
+                issues={liveIssues}
+                selectedId={selectedLiveIssueId}
+                onSelect={setSelectedLiveIssueId}
+                filter={issueFilter}
+                onFilter={setIssueFilter}
+                search={issueSearch}
+                onSearch={setIssueSearch}
+                notify={notify}
+              />
+            </>
           )}
           {view === 'settings' && <Configuration notify={notify} />}
         </div>
@@ -247,6 +331,57 @@ function App() {
           {toast}
         </div>
       )}
+    </div>
+  );
+}
+
+function ApiGate({ api }: { api: ApiStatus }) {
+  if (api.mode === 'checking') {
+    return (
+      <section className="api-gate checking" role="status" aria-live="polite">
+        <Loader2 size={22} className="spin" />
+        <div>
+          <strong>Checking the Relay API</strong>
+          <p>Waiting for <code>/api/v1/health</code>{api.health ? <> and <code>/api/v1/ready</code></> : null} before showing any records.</p>
+        </div>
+      </section>
+    );
+  }
+  const absent = api.error?.apiAbsent === true;
+  return (
+    <section className="api-gate error" role="alert">
+      <ShieldAlert size={22} />
+      <div>
+        <strong>{absent ? 'Relay API did not respond' : 'Relay API returned an error'} — no records shown</strong>
+        <p>
+          {api.reason ?? (absent ? 'No response was received from the API.' : 'The API response could not be trusted.')}
+          {api.error?.status ? <> (HTTP {api.error.status}, {api.error.code})</> : api.error ? <> ({api.error.code})</> : null}
+          {api.error?.correlationId ? <> · correlation {api.error.correlationId}</> : null}
+        </p>
+        <p>{absent ? 'Demo data is disabled in production. Restore the API and retry.' : 'Demo data is disabled while the API rejects or returns an invalid response. Fix the API or authentication and retry.'}</p>
+        <button className="secondary-button" onClick={() => void api.refresh()}>
+          <RefreshCw size={15} /> Retry health check
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function ModePill({ api }: { api: ApiStatus }) {
+  const label =
+    api.mode === 'checking'
+      ? 'Checking API'
+      : api.mode === 'live'
+        ? 'Live · exloong/superset'
+        : api.mode === 'degraded'
+          ? `Degraded · ${api.reason ?? 'API'}`
+          : api.mode === 'error'
+            ? `API error · ${api.reason ?? 'unusable response'}`
+            : 'Demo data';
+  return (
+    <div className={`mode-pill ${api.mode}`} title={api.reason ?? (api.health?.version ? `API ${api.health.version}` : undefined)} role="status">
+      <span />
+      {label}
     </div>
   );
 }
@@ -274,61 +409,144 @@ function PageHeader({
   );
 }
 
-function Overview({ goToIssue }: { goToIssue: (id: number) => void }) {
+function Overview({
+  goToIssue,
+  live,
+  analytics,
+}: {
+  goToIssue: (id: number | string) => void;
+  live: boolean;
+  analytics: ReturnType<typeof useAnalytics>;
+}) {
+  const summary = live ? analytics.data : undefined;
+  const attention = useLiveIssueList('attention', '', live);
+  const liveAttention = attention.data?.items ?? [];
+  const ownerRows = summary?.owner_load ?? (live ? [] : ownerLoad);
+  const period = summary
+    ? `${new Date(summary.period.from).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} – ${new Date(summary.period.to).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`
+    : live
+      ? 'Waiting for live data'
+      : 'September 1–7, 2026';
+  const funnelValues = summary
+    ? [
+        ['Entered', summary.issues_processed, '#6558e8'],
+        [
+          'Actionable context',
+          summary.issues_processed -
+            (summary.state_counts.awaiting_reporter ?? 0) -
+            (summary.state_counts.closed_inactive ?? 0),
+          '#766ce9',
+        ],
+        [
+          'Reproduction attempted',
+          (summary.state_counts.reproducing ?? 0) +
+            (summary.state_counts.needs_owner_decision ?? 0) +
+            (summary.state_counts.fix_authorized ?? 0) +
+            (summary.state_counts.fixing ?? 0) +
+            (summary.state_counts.pr_open ?? 0) +
+            (summary.state_counts.awaiting_owner ?? 0) +
+            (summary.state_counts.changes_requested ?? 0) +
+            (summary.state_counts.completed ?? 0),
+          '#3c8fd5',
+        ],
+        [
+          'Reproduced',
+          (summary.state_counts.needs_owner_decision ?? 0) +
+            (summary.state_counts.fix_authorized ?? 0) +
+            (summary.state_counts.fixing ?? 0) +
+            (summary.state_counts.pr_open ?? 0) +
+            (summary.state_counts.awaiting_owner ?? 0) +
+            (summary.state_counts.changes_requested ?? 0) +
+            (summary.state_counts.completed ?? 0),
+          '#24a781',
+        ],
+        [
+          'Fix authorized',
+          (summary.state_counts.fix_authorized ?? 0) +
+            (summary.state_counts.fixing ?? 0) +
+            (summary.state_counts.pr_open ?? 0) +
+            (summary.state_counts.awaiting_owner ?? 0) +
+            (summary.state_counts.changes_requested ?? 0) +
+            (summary.state_counts.completed ?? 0),
+          '#e19a49',
+        ],
+        [
+          'PR opened',
+          (summary.state_counts.pr_open ?? 0) +
+            (summary.state_counts.awaiting_owner ?? 0) +
+            (summary.state_counts.changes_requested ?? 0) +
+            (summary.state_counts.completed ?? 0),
+          '#df775c',
+        ],
+      ]
+    : live
+      ? []
+      : [
+        ['Entered', 148, '#6558e8'],
+        ['Actionable context', 112, '#766ce9'],
+        ['Reproduction attempted', 83, '#3c8fd5'],
+        ['Reproduced', 57, '#24a781'],
+        ['Fix authorized', 36, '#e19a49'],
+        ['PR opened', 29, '#df775c'],
+      ];
+  const funnelTotal = Math.max(Number(funnelValues[0]?.[1] ?? 0), 1);
   return (
     <>
       <PageHeader
-        eyebrow="September 1–7, 2026"
+        eyebrow={period}
         title="Issue operations"
         description="A single view of intake quality, reproduction throughput, and owner attention."
         actions={
           <>
+            <DataSourceBadge state={live ? analytics.state : { kind: 'demo', reason: 'API unavailable' }} />
             <button className="secondary-button">
               Last 90 days <ChevronDown size={15} />
             </button>
-            <button className="secondary-button">
+            <button className="secondary-button" onClick={() => void analytics.refresh()} disabled={!live}>
               <RefreshCw size={15} /> Refresh
             </button>
           </>
         }
       />
 
+      {live && <ResourceNotice state={analytics.state} resourceLabel="analytics" />}
+
       <section className="metric-grid" aria-label="Key metrics">
         <MetricCard
           label="Issues processed"
-          value="148"
-          change="+18%"
-          note="vs. previous period"
+          value={summary ? String(summary.issues_processed) : live ? '–' : '148'}
+          change={summary ? 'live' : live ? '' : '+18%'}
+          note={summary ? 'this period' : live ? 'awaiting analytics' : 'vs. previous period'}
           icon={<Inbox size={19} />}
           tone="violet"
-          spark={[18, 24, 22, 31, 28, 38, 42]}
+          spark={live ? [] : [18, 24, 22, 31, 28, 38, 42]}
         />
         <MetricCard
           label="Confirmed bugs"
-          value="43"
-          change="29.1%"
-          note="of total intake"
+          value={summary ? String(summary.confirmed_bugs) : live ? '–' : '43'}
+          change={summary ? (summary.issues_processed ? `${Math.round((summary.confirmed_bugs / summary.issues_processed) * 1000) / 10}%` : '') : live ? '' : '29.1%'}
+          note={live && !summary ? 'awaiting analytics' : 'of total intake'}
           icon={<CircleDot size={19} />}
           tone="green"
-          spark={[20, 19, 28, 24, 34, 38, 36]}
+          spark={live ? [] : [20, 19, 28, 24, 34, 38, 36]}
         />
         <MetricCard
           label="Reproduced autonomously"
-          value="68%"
-          change="+9.4%"
-          note="without owner setup"
+          value={summary ? `${summary.reproduced_autonomously_pct}%` : live ? '–' : '68%'}
+          change={summary ? 'live' : live ? '' : '+9.4%'}
+          note={live && !summary ? 'awaiting analytics' : 'without owner setup'}
           icon={<TestTube2 size={19} />}
           tone="blue"
-          spark={[14, 20, 21, 29, 31, 33, 42]}
+          spark={live ? [] : [14, 20, 21, 29, 31, 33, 42]}
         />
         <MetricCard
           label="Median to owner decision"
-          value="9.4h"
-          change="-3.1h"
-          note="faster this period"
+          value={summary?.median_to_owner_decision_hours != null ? `${summary.median_to_owner_decision_hours}h` : live ? '–' : '9.4h'}
+          change={summary ? 'live' : live ? '' : '-3.1h'}
+          note={live && !summary ? 'awaiting analytics' : live ? 'this period' : 'faster this period'}
           icon={<Clock3 size={19} />}
           tone="amber"
-          spark={[42, 39, 34, 36, 28, 25, 21]}
+          spark={live ? [] : [42, 39, 34, 36, 28, 25, 21]}
         />
       </section>
 
@@ -336,7 +554,7 @@ function Overview({ goToIssue }: { goToIssue: (id: number) => void }) {
         <div className="card volume-card">
           <CardHeader
             title="Pipeline throughput"
-            subtitle="Issues entering and leaving the pipeline each week"
+            subtitle={live ? 'Live runtime history' : 'Static 12-month research baseline · not live runtime data'}
             action={
               <a
                 className="text-button"
@@ -348,44 +566,44 @@ function Overview({ goToIssue }: { goToIssue: (id: number) => void }) {
               </a>
             }
           />
-          <LineChart />
-          <div className="chart-legend">
-            <span><i className="legend-line violet-line" /> Entered pipeline</span>
-            <span><i className="legend-line green-line" /> Reached outcome</span>
-          </div>
+          {live ? (
+            <p className="session-empty">No live throughput history is available in this clean environment.</p>
+          ) : (
+            <>
+              <LineChart />
+              <div className="chart-legend">
+                <span><i className="legend-line violet-line" /> Entered pipeline</span>
+                <span><i className="legend-line green-line" /> Reached outcome</span>
+              </div>
+            </>
+          )}
         </div>
 
         <div className="card outcomes-card">
-          <CardHeader title="Outcome mix" subtitle="148 issues classified" />
+          <CardHeader title="Outcome mix" subtitle={summary ? `${summary.issues_processed} issues classified · live` : live ? 'Awaiting analytics' : '148 issues classified · demo'} />
           <div className="outcomes-layout">
-            <DonutChart />
+            {!summary && !live && <DonutChart />}
             <div className="outcome-list">
-              {outcomeData.map(item => (
+              {(summary ? summary.outcome_mix.map((item, index) => ({ ...item, color: outcomeData[index % outcomeData.length].color })) : live ? [] : outcomeData).map(item => (
                 <div className="outcome-row" key={item.label}>
                   <span className="dot" style={{ background: item.color }} />
                   <span>{item.label}</span>
                   <strong>{item.value}</strong>
                 </div>
               ))}
+              {live && !summary && <p className="session-empty">No live outcomes are available in this clean environment.</p>}
             </div>
           </div>
         </div>
 
         <div className="card funnel-card">
-          <CardHeader title="Conversion funnel" subtitle="Where issue reports lose momentum" />
+          <CardHeader title="Conversion funnel" subtitle={summary ? 'Live lifecycle state totals' : live ? 'Awaiting live analytics' : 'Static research baseline'} />
           <div className="funnel">
-            {[
-              ['Entered', 148, 100, '#6558e8'],
-              ['Actionable context', 112, 76, '#766ce9'],
-              ['Reproduction attempted', 83, 56, '#3c8fd5'],
-              ['Reproduced', 57, 39, '#24a781'],
-              ['Fix authorized', 36, 24, '#e19a49'],
-              ['PR opened', 29, 20, '#df775c'],
-            ].map(([label, value, width, color]) => (
+            {funnelValues.map(([label, value, color]) => (
               <div className="funnel-row" key={String(label)}>
                 <span>{label}</span>
                 <div className="funnel-track">
-                  <i style={{ width: `${width}%`, background: String(color) }} />
+                  <i style={{ width: `${Math.round((Number(value) / funnelTotal) * 100)}%`, background: String(color) }} />
                 </div>
                 <strong>{value}</strong>
               </div>
@@ -394,8 +612,14 @@ function Overview({ goToIssue }: { goToIssue: (id: number) => void }) {
           <div className="insight">
             <Sparkles size={17} />
             <div>
-              <strong>Largest opportunity</strong>
-              <span>29 reports are waiting for portable reproduction data.</span>
+              <strong>{summary ? 'Live pipeline' : live ? 'Awaiting live analytics' : 'Largest opportunity'}</strong>
+              <span>
+                {summary
+                  ? `${summary.state_counts.awaiting_reporter ?? 0} reports are waiting for reporter context.`
+                  : live
+                    ? 'No live lifecycle records have been received.'
+                    : '29 reports are waiting for portable reproduction data.'}
+              </span>
             </div>
           </div>
         </div>
@@ -403,25 +627,31 @@ function Overview({ goToIssue }: { goToIssue: (id: number) => void }) {
         <div className="card bottleneck-card">
           <CardHeader
             title="Time by stage"
-            subtitle="Median active + waiting time"
-            action={<span className="micro-badge">Target &lt; 7d</span>}
+            subtitle={live ? 'Live runtime history' : 'Static 12-month research baseline · not live runtime data'}
+            action={!live ? <span className="micro-badge">Research</span> : undefined}
           />
-          <div className="bottleneck-chart">
-            {[
-              ['Initial triage', 1.2, 18],
-              ['Reporter context', 6.8, 100],
-              ['Reproduction', 2.4, 35],
-              ['Owner decision', 3.1, 46],
-              ['PR review', 4.7, 69],
-            ].map(([label, days, width]) => (
-              <div className="bottleneck-row" key={String(label)}>
-                <span>{label}</span>
-                <div><i style={{ width: `${width}%` }} /></div>
-                <strong>{days}d</strong>
+          {live ? (
+            <p className="session-empty">No live stage-duration history is available in this clean environment.</p>
+          ) : (
+            <>
+              <div className="bottleneck-chart">
+                {[
+                  ['Initial triage', 1.2, 18],
+                  ['Reporter context', 6.8, 100],
+                  ['Reproduction', 2.4, 35],
+                  ['Owner decision', 3.1, 46],
+                  ['PR review', 4.7, 69],
+                ].map(([label, days, width]) => (
+                  <div className="bottleneck-row" key={String(label)}>
+                    <span>{label}</span>
+                    <div><i style={{ width: `${width}%` }} /></div>
+                    <strong>{days}d</strong>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-          <p className="card-footnote"><AlertTriangle size={14} /> Reporter context accounts for 37% of total cycle time.</p>
+              <p className="card-footnote"><AlertTriangle size={14} /> Reporter context accounts for 37% of total cycle time.</p>
+            </>
+          )}
         </div>
       </section>
 
@@ -439,24 +669,40 @@ function Overview({ goToIssue }: { goToIssue: (id: number) => void }) {
               <span>Owner</span>
               <span>Next action</span>
             </div>
-            {issues.slice(0, 4).map(issue => (
-              <button className="issue-table-row" key={issue.id} onClick={() => goToIssue(issue.id)}>
-                <span className="issue-title-cell">
-                  <small>{issue.key} · {issue.category}</small>
-                  <strong>{issue.title}</strong>
-                </span>
-                <span><StateBadge state={issue.state} /></span>
-                <span className="owner-cell"><Avatar initials={issue.ownerInitials} /> {issue.owner}</span>
-                <span className="next-cell">{issue.nextAction}<small>{issue.due}</small></span>
-              </button>
-            ))}
+            {live
+              ? liveAttention.slice(0, 4).map(issue => {
+                  const owner = issue.owner_routing.candidates.find(candidate => candidate.selected);
+                  return (
+                    <button className="issue-table-row" key={issue.id} onClick={() => goToIssue(issue.id)}>
+                      <span className="issue-title-cell">
+                        <small>{issue.key} · {issue.category ?? 'Unclassified'}</small>
+                        <strong>{issue.title}</strong>
+                      </span>
+                      <span><LifecycleBadge state={issue.state} /></span>
+                      <span className="owner-cell"><Avatar initials={owner?.initials ?? '—'} /> {owner?.team ?? 'Unassigned'}</span>
+                      <span className="next-cell">{issue.next_action}<small>{issue.next_action_due ?? 'No deadline'}</small></span>
+                    </button>
+                  );
+                })
+              : issues.slice(0, 4).map(issue => (
+                  <button className="issue-table-row" key={issue.id} onClick={() => goToIssue(issue.id)}>
+                    <span className="issue-title-cell">
+                      <small>{issue.key} · {issue.category}</small>
+                      <strong>{issue.title}</strong>
+                    </span>
+                    <span><StateBadge state={issue.state} /></span>
+                    <span className="owner-cell"><Avatar initials={issue.ownerInitials} /> {issue.owner}</span>
+                    <span className="next-cell">{issue.nextAction}<small>{issue.due}</small></span>
+                  </button>
+                ))}
+            {live && liveAttention.length === 0 && <p className="session-empty">No blocked or failed issues need operator attention.</p>}
           </div>
         </div>
 
         <div className="card owner-card">
-          <CardHeader title="Owner load" subtitle="Open work and response health" />
+          <CardHeader title="Owner load" subtitle={summary ? 'Live owner-routing totals' : live ? 'Awaiting live owner routing' : 'Static demo workload'} />
           <div className="owner-list">
-            {ownerLoad.map(owner => (
+            {ownerRows.map(owner => (
               <div className="owner-row" key={owner.owner}>
                 <Avatar initials={owner.initials} />
                 <div>
@@ -469,6 +715,7 @@ function Overview({ goToIssue }: { goToIssue: (id: number) => void }) {
                 </div>
               </div>
             ))}
+            {live && ownerRows.length === 0 && <p className="session-empty">No live owner workload is available.</p>}
           </div>
         </div>
       </section>
@@ -502,16 +749,18 @@ function MetricCard({
         <strong>{value}</strong>
         <p><b className={change.startsWith('-') && tone !== 'amber' ? 'negative' : ''}>{change}</b> {note}</p>
       </div>
-      <svg className={`sparkline ${tone}`} viewBox="0 0 110 52" aria-hidden="true">
-        <defs>
-          <linearGradient id={`gradient-${tone}`} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="currentColor" stopOpacity=".28" />
-            <stop offset="100%" stopColor="currentColor" stopOpacity="0" />
-          </linearGradient>
-        </defs>
-        <polyline points={`0,52 ${points} 108,52`} fill={`url(#gradient-${tone})`} stroke="none" />
-        <polyline points={points} fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
+      {spark.length > 0 && (
+        <svg className={`sparkline ${tone}`} viewBox="0 0 110 52" aria-hidden="true">
+          <defs>
+            <linearGradient id={`gradient-${tone}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="currentColor" stopOpacity=".28" />
+              <stop offset="100%" stopColor="currentColor" stopOpacity="0" />
+            </linearGradient>
+          </defs>
+          <polyline points={`0,52 ${points} 108,52`} fill={`url(#gradient-${tone})`} stroke="none" />
+          <polyline points={points} fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      )}
     </div>
   );
 }
@@ -589,40 +838,42 @@ function Avatar({ initials, size = 'normal' }: { initials: string; size?: 'norma
   return <span className={`avatar ${size}`}>{initials}</span>;
 }
 
-function SessionStatus({ status }: { status: DevinSession['status'] }) {
-  return (
-    <span className={`session-status ${sessionStateClass[status]}`}>
-      <i />
-      {status}
-    </span>
-  );
-}
-
 function DevinSessions({
   goToIssue,
   notify,
+  live,
+  sessions,
+  onRunDryTest,
 }: {
-  goToIssue: (id: number) => void;
+  goToIssue: (id: string) => void;
   notify: (message: string) => void;
+  live: boolean;
+  sessions: ReturnType<typeof useSessions>;
+  onRunDryTest: () => void;
 }) {
-  const [selectedSessionId, setSelectedSessionId] = useState(devinSessions[0].id);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [filter, setFilter] = useState<'live' | 'attention' | 'all'>('live');
-  const [detailTab, setDetailTab] = useState<'activity' | 'artifacts' | 'guardrails'>('activity');
-  const visibleSessions = devinSessions.filter(session => {
-    if (filter === 'attention') return session.status === 'Needs attention';
-    if (filter === 'all') return true;
-    return session.status !== 'Completed';
-  });
-  const selected = visibleSessions.find(session => session.id === selectedSessionId) ?? visibleSessions[0] ?? devinSessions[0];
-  const runningCount = devinSessions.filter(session => session.status === 'Running').length;
-  const queuedCount = devinSessions.filter(session => session.status === 'Queued').length;
-  const attentionCount = devinSessions.filter(session => session.status === 'Needs attention').length;
-  const waitingCount = devinSessions.filter(session => session.status === 'Waiting on owner').length;
+  const now = Date.now();
 
-  const selectSession = (id: string) => {
-    setSelectedSessionId(id);
-    setDetailTab('activity');
-  };
+  const allSessions: SessionView[] = live
+    ? (sessions.data?.items ?? []).map(session => fromApiSummary(session, now))
+    : devinSessions.map(fromDemoSession);
+
+  const visibleSessions = allSessions.filter(session => {
+    if (filter === 'attention') return session.status === 'Needs attention' || session.status === 'Failed';
+    if (filter === 'all') return true;
+    return isWaitingOnHuman(session) || (session.status !== 'Completed' && session.status !== 'Cancelled' && session.status !== 'Failed');
+  });
+  const selectedSummary = visibleSessions.find(session => session.id === selectedSessionId) ?? visibleSessions[0] ?? allSessions[0] ?? null;
+  const detail = useSession(live && selectedSummary ? selectedSummary.id : null, live);
+  const selected: SessionView | null =
+    live && detail.data && selectedSummary && detail.data.id === selectedSummary.id ? fromApiDetail(detail.data, now) : selectedSummary;
+
+  const count = (status: SessionView['status']) => allSessions.filter(session => session.status === status).length;
+  const capacity = live ? sessions.data?.capacity : undefined;
+  const slots = capacity?.slots ?? (live ? null : 6);
+  const releasedWaiting = allSessions.filter(isWaitingOnHuman);
+  const allReleased = releasedWaiting.every(session => session.workspaceReleased);
 
   return (
     <>
@@ -632,10 +883,10 @@ function DevinSessions({
         description="See every agent run created by the issue flow, what triggered it, and where human attention is required."
         actions={
           <>
-            <button className="secondary-button" onClick={() => notify('Session data refreshed')}>
-              <RefreshCw size={15} /> Live · 18s ago
+            <button className="secondary-button" onClick={() => (live ? void sessions.refresh() : notify('Demo data does not refresh'))}>
+              <RefreshCw size={15} /> <DataSourceBadge state={live ? sessions.state : { kind: 'demo', reason: 'API unavailable' }} compact />
             </button>
-            <button className="primary-button" onClick={() => notify('Dry-run reproduction session queued')}>
+            <button className="primary-button" onClick={onRunDryTest}>
               <Plus size={15} /> Run dry test
             </button>
           </>
@@ -645,25 +896,33 @@ function DevinSessions({
       <section className="session-summary" aria-label="Devin session summary">
         <div className="card">
           <span className="session-summary-icon running"><Activity size={17} /></span>
-          <div><strong>{runningCount}</strong><span>Agents running</span></div>
-          <small>of 6 workspace slots</small>
+          <div><strong>{count('Running')}</strong><span>Agents running</span></div>
+          <small>{slots !== null ? `of ${slots} workspace slots` : 'capacity not reported'}</small>
         </div>
         <div className="card">
           <span className="session-summary-icon queued"><Clock3 size={17} /></span>
-          <div><strong>{queuedCount}</strong><span>Queued trigger</span></div>
-          <small>next slot in ~4 min</small>
+          <div><strong>{count('Queued')}</strong><span>Queued trigger</span></div>
+          <small>
+            {live
+              ? capacity?.next_slot_eta_seconds !== undefined
+                ? `next slot in ~${Math.max(1, Math.round(capacity.next_slot_eta_seconds / 60))} min`
+                : 'next slot ETA not reported'
+              : 'next slot in ~4 min'}
+          </small>
         </div>
         <div className="card">
           <span className="session-summary-icon attention"><AlertTriangle size={17} /></span>
-          <div><strong>{attentionCount}</strong><span>Needs attention</span></div>
-          <small>environment recovery</small>
+          <div><strong>{count('Needs attention') + count('Failed')}</strong><span>Needs attention</span></div>
+          <small>{live ? 'recovery or retry required' : 'environment recovery'}</small>
         </div>
         <div className="card">
-          <span className="session-summary-icon released"><Pause size={17} /></span>
-          <div><strong>{waitingCount}</strong><span>Waiting on human</span></div>
-          <small>workspace already released</small>
+          <span className={`session-summary-icon ${allReleased ? 'released' : 'attention'}`}><Pause size={17} /></span>
+          <div><strong>{releasedWaiting.length}</strong><span>Waiting on human</span></div>
+          <small>{allReleased ? 'workspace already released' : 'workspace still allocated!'}</small>
         </div>
       </section>
+
+      {live && sessions.state.kind === 'error' && isRepositorySafetyError(sessions.state.error) && <RepositorySafetyNotice error={sessions.state.error} />}
 
       <section className="session-monitor card">
         <aside className="session-list-panel">
@@ -672,7 +931,7 @@ function DevinSessions({
               <p className="eyebrow">Flow-triggered runs</p>
               <strong>Session queue</strong>
             </div>
-            <span className="live-indicator"><i /> Live</span>
+            <DataSourceBadge state={live ? sessions.state : { kind: 'demo', reason: 'API unavailable' }} />
           </div>
           <div className="session-filters">
             <button className={filter === 'live' ? 'active' : ''} onClick={() => setFilter('live')}>Live & waiting</button>
@@ -680,21 +939,25 @@ function DevinSessions({
             <button className={filter === 'all' ? 'active' : ''} onClick={() => setFilter('all')}>All</button>
           </div>
           <div className="session-list">
+            {live && <ResourceNotice state={sessions.state} resourceLabel="sessions" />}
+            {visibleSessions.length === 0 && allSessions.length > 0 && <p className="session-empty">No sessions match this filter.</p>}
             {visibleSessions.map(session => (
               <button
-                className={`session-list-item ${selected.id === session.id ? 'selected' : ''}`}
-                onClick={() => selectSession(session.id)}
+                className={`session-list-item ${selected?.id === session.id ? 'selected' : ''}`}
+                onClick={() => setSelectedSessionId(session.id)}
                 key={session.id}
               >
                 <div className="session-list-row">
-                  <SessionStatus status={session.status} />
-                  <small>{session.id}</small>
+                  <SessionStatusBadge status={session.status} />
+                  <small>{session.shortId}</small>
                 </div>
                 <strong>{session.title}</strong>
                 <span>{session.issueKey} · {session.flowStep}</span>
-                <div className="session-mini-progress">
-                  <i style={{ width: `${session.progress}%` }} />
-                </div>
+                {session.progress !== null && (
+                  <div className="session-mini-progress">
+                    <i style={{ width: `${session.progress}%` }} />
+                  </div>
+                )}
                 <div className="session-list-foot">
                   <span><Clock3 size={11} /> {session.elapsed}</span>
                   <span>{session.updated}</span>
@@ -708,154 +971,22 @@ function DevinSessions({
           </div>
         </aside>
 
-        <div className="session-detail">
-          <div className="session-detail-head">
-            <div className="session-title">
-              <span className={`session-agent-icon ${sessionStateClass[selected.status]}`}><Bot size={21} /></span>
-              <div>
-                <span>{selected.id} · {selected.actor}</span>
-                <h2>{selected.title}</h2>
-                <button onClick={() => goToIssue(selected.issueId)}>{selected.issueKey} · {selected.issueTitle} <ChevronRight size={13} /></button>
-              </div>
-            </div>
-            <div className="session-head-actions">
-              <SessionStatus status={selected.status} />
-              {selected.status === 'Running' && (
-                <button className="icon-button" onClick={() => notify(`${selected.id} pause requested`)} aria-label="Pause session">
-                  <Pause size={16} />
-                </button>
-              )}
-              <button className="secondary-button" onClick={() => notify(`${selected.id} opened in Devin`)}>
-                Open session <ArrowRight size={14} />
-              </button>
-            </div>
+        {selected ? (
+          <SessionDetailView
+            session={selected}
+            detailState={live ? detail.state : undefined}
+            goToIssue={goToIssue}
+            notify={notify}
+            onRefresh={live ? () => void Promise.all([sessions.refresh(), detail.refresh()]) : undefined}
+          />
+        ) : (
+          <div className="session-detail session-detail-empty">
+            {live ? <ResourceNotice state={sessions.state} resourceLabel="sessions" /> : null}
+            {live && sessions.state.kind === 'empty' && (
+              <p className="session-empty">The API is reachable and reports no sessions. Demo sessions are hidden while the API is live.</p>
+            )}
           </div>
-
-          <div className={`session-current-work ${sessionStateClass[selected.status]}`}>
-            <span>
-              {selected.status === 'Running' ? <Activity size={17} /> : selected.status === 'Needs attention' ? <AlertTriangle size={17} /> : <Clock3 size={17} />}
-            </span>
-            <div>
-              <small>{selected.status === 'Running' ? 'Working on' : selected.status === 'Needs attention' ? 'Blocked at' : 'Current state'}</small>
-              <strong>{selected.currentAction}</strong>
-            </div>
-            <div className="session-elapsed">
-              <small>Elapsed / budget</small>
-              <strong>{selected.elapsed} <span>/ {selected.budget}</span></strong>
-            </div>
-          </div>
-
-          <div className="session-progress-block">
-            <div>
-              <span>Session progress</span>
-              <strong>{selected.progress}%</strong>
-            </div>
-            <div className="session-progress-track"><i style={{ width: `${selected.progress}%` }} /></div>
-            <small>Next checkpoint: {selected.nextCheckpoint}</small>
-          </div>
-
-          <div className="session-tabs" role="tablist" aria-label="Session details">
-            {[
-              ['activity', 'Activity'],
-              ['artifacts', `Artifacts · ${selected.artifacts.length}`],
-              ['guardrails', 'Guardrails'],
-            ].map(([key, label]) => (
-              <button
-                className={detailTab === key ? 'active' : ''}
-                onClick={() => setDetailTab(key as typeof detailTab)}
-                role="tab"
-                aria-selected={detailTab === key}
-                key={key}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-
-          <div className="session-detail-body">
-            <div className="session-detail-primary">
-              {detailTab === 'activity' && (
-                <div className="session-timeline">
-                  <div className="session-section-title">
-                    <div><p className="eyebrow">Execution trace</p><h3>What this session has done</h3></div>
-                    <span>Updated {selected.updated}</span>
-                  </div>
-                  {selected.events.map(event => (
-                    <div className={`session-event ${event.state}`} key={`${selected.id}-${event.label}`}>
-                      <i>{event.state === 'complete' ? <Check size={12} /> : event.state === 'blocked' ? <AlertTriangle size={12} /> : <span />}</i>
-                      <div><strong>{event.label}</strong><span>{event.detail}</span></div>
-                      <small>{event.time}</small>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {detailTab === 'artifacts' && (
-                <div className="session-artifacts">
-                  <div className="session-section-title">
-                    <div><p className="eyebrow">Portable evidence</p><h3>Outputs attached to the issue lifecycle</h3></div>
-                  </div>
-                  {selected.artifacts.map((artifact, index) => (
-                    <button onClick={() => notify(`${artifact} preview opened`)} key={artifact}>
-                      <span><FileCheck2 size={17} /></span>
-                      <div><strong>{artifact}</strong><small>{index === 0 ? 'Primary output' : 'Supporting evidence'} · retained with issue state</small></div>
-                      <ChevronRight size={15} />
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {detailTab === 'guardrails' && (
-                <div className="session-guardrails">
-                  <div className="session-section-title">
-                    <div><p className="eyebrow">Execution contract</p><h3>Limits applied to this run</h3></div>
-                  </div>
-                  {[
-                    ['Bounded runtime', `${selected.budget} maximum; no unattended continuation`],
-                    ['Isolated workspace', 'No reporter production data or credentials are available'],
-                    ['Narrow scope', `Only the ${selected.flowStep.toLowerCase()} transition is authorized`],
-                    ['Human gates', 'No merge, issue closure, or expected-behavior decision'],
-                  ].map(([label, copy]) => (
-                    <div className="guardrail-row" key={label}>
-                      <ShieldCheck size={16} />
-                      <div><strong>{label}</strong><span>{copy}</span></div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <aside className="session-context">
-              <div>
-                <p className="eyebrow">Flow linkage</p>
-                <span><small>Triggered by</small><strong>{selected.trigger}</strong></span>
-                <span><small>Flow step</small><strong>{selected.flowStep}</strong></span>
-                <span><small>Started</small><strong>{selected.started}</strong></span>
-                <span><small>Environment</small><strong>{selected.environment}</strong></span>
-                {selected.branch && <span><small>Working branch</small><strong>{selected.branch}</strong></span>}
-              </div>
-              <div>
-                <p className="eyebrow">Operator controls</p>
-                {selected.status === 'Needs attention' ? (
-                  <button className="primary-button" onClick={() => notify('Recovery options opened')}>
-                    Review recovery options
-                  </button>
-                ) : selected.status === 'Waiting on owner' ? (
-                  <button className="primary-button" onClick={() => goToIssue(selected.issueId)}>
-                    Open owner decision
-                  </button>
-                ) : (
-                  <button className="secondary-button" onClick={() => notify('Session logs exported')}>
-                    <TerminalSquare size={14} /> Export run log
-                  </button>
-                )}
-                <button className="text-button" onClick={() => notify('Flow definition opened')}>
-                  View trigger in flow <ArrowRight size={13} />
-                </button>
-              </div>
-            </aside>
-          </div>
-        </div>
+        )}
       </section>
     </>
   );
@@ -1279,7 +1410,7 @@ function Workflow({ notify }: { notify: (message: string) => void }) {
             <div>
               <button className="tool-button"><Box size={15} /> Fit view</button>
               <button className="tool-button"><Plus size={15} /> Add step</button>
-              <button className="icon-button"><MoreHorizontal size={17} /></button>
+              <button className="icon-button" aria-label="More lifecycle actions"><MoreHorizontal size={17} /></button>
             </div>
           </div>
           <div className="flow-scroll">
@@ -1330,7 +1461,7 @@ function Workflow({ notify }: { notify: (message: string) => void }) {
               {selected.kind === 'human' && <Users size={19} />}
               {selected.kind === 'terminal' && <ArrowDownRight size={19} />}
             </div>
-            <button className="icon-button"><MoreHorizontal size={17} /></button>
+            <button className="icon-button" aria-label="More step actions"><MoreHorizontal size={17} /></button>
           </div>
           <p className="eyebrow">{selected.eyebrow}</p>
           <h2>{selected.label}</h2>
@@ -1505,7 +1636,7 @@ function IssueWorkbench({
             </div>
             <div className="detail-actions">
               <button className="secondary-button"><GitPullRequestArrow size={15} /> GitHub</button>
-              <button className="icon-button"><MoreHorizontal size={18} /></button>
+              <button className="icon-button" aria-label="More issue actions"><MoreHorizontal size={18} /></button>
             </div>
           </div>
 
@@ -2127,25 +2258,81 @@ function ToggleSetting({
 }
 
 function Connections({ notify }: { notify: (message: string) => void }) {
+  const [operatorToken, setOperatorToken] = useState('');
+  const [hasOperatorToken, setHasOperatorToken] = useState(
+    () => window.sessionStorage.getItem(OPERATOR_TOKEN_STORAGE_KEY) !== null,
+  );
+  const saveOperatorToken = () => {
+    const value = operatorToken.trim();
+    if (!value) {
+      notify('Enter the Relay operator token supplied by the deployment administrator.');
+      return;
+    }
+    window.sessionStorage.setItem(OPERATOR_TOKEN_STORAGE_KEY, value);
+    setOperatorToken('');
+    setHasOperatorToken(true);
+    window.location.reload();
+  };
+  const clearOperatorToken = () => {
+    window.sessionStorage.removeItem(OPERATOR_TOKEN_STORAGE_KEY);
+    setHasOperatorToken(false);
+    notify('Relay operator access was removed from this browser session.');
+  };
+
   return (
     <div className="connections-grid">
+      <section className="connection-access card">
+        <div>
+          <LockKeyhole size={22} />
+          <div>
+            <h2>Dashboard operator access</h2>
+            <p>
+              Enter a Relay API token. It stays in browser session storage and is never
+              embedded in the application bundle or used as a GitHub or Devin credential.
+            </p>
+          </div>
+        </div>
+        <label htmlFor="operator-token">Relay operator token</label>
+        <form
+          className="connection-access-control"
+          onSubmit={event => {
+            event.preventDefault();
+            saveOperatorToken();
+          }}
+        >
+          <input
+            id="operator-token"
+            type="password"
+            autoComplete="off"
+            value={operatorToken}
+            onChange={event => setOperatorToken(event.target.value)}
+            placeholder={hasOperatorToken ? 'Access configured for this tab' : 'Paste operator token'}
+          />
+          <button className="primary-button" type="submit">Connect</button>
+          {hasOperatorToken && (
+            <button className="secondary-button" type="button" onClick={clearOperatorToken}>Remove</button>
+          )}
+        </form>
+        <span role="status" aria-live="polite">
+          {hasOperatorToken ? 'Operator access is configured for this browser session.' : 'Operator access is not configured.'}
+        </span>
+      </section>
       {[
-        { name: 'GitHub', icon: <GitPullRequest size={22} />, status: 'Connected', copy: 'Read issues and write only to exloong/superset.', tone: 'green' },
-        { name: 'Devin Automations', icon: <Zap size={22} />, status: 'Draft', copy: 'Trusted label events start bounded Devin sessions.', tone: 'amber' },
-        { name: 'Docker sandbox', icon: <Box size={22} />, status: 'Ready', copy: 'Fresh, isolated reproduction environments.', tone: 'green' },
-        { name: 'Owner routing', icon: <Users size={22} />, status: 'Preview', copy: 'CODEOWNERS plus component and availability policy.', tone: 'violet' },
+        { name: 'GitHub', icon: <GitPullRequest size={22} />, copy: 'Webhook and API credentials are injected into the server at runtime.' },
+        { name: 'Devin sessions', icon: <Zap size={22} />, copy: 'Organization and API credentials remain private to the worker.' },
+        { name: 'PostgreSQL', icon: <Box size={22} />, copy: 'Lifecycle records persist in the deployment volume.' },
+        { name: 'Owner routing', icon: <Users size={22} />, copy: 'Trusted CODEOWNERS data is read from the exact pull request head.' },
       ].map(item => (
         <div className="connection-card card" key={item.name}>
           <div className="connection-icon">{item.icon}</div>
-          <span className={`micro-badge ${item.tone}`}>{item.status}</span>
+          <span className="micro-badge">Server-managed</span>
           <h2>{item.name}</h2>
           <p>{item.copy}</p>
-          <button className="secondary-button" onClick={() => notify(`${item.name} configuration opened`)}>Configure <ArrowRight size={14} /></button>
         </div>
       ))}
       <div className="connection-note card">
         <LockKeyhole size={19} />
-        <div><strong>Production routing requires one additional gate</strong><span>Use Devin Preflight when available, or a small deterministic GitHub controller to validate issue state and actor before invoking an agent.</span></div>
+        <div><strong>Provider secrets never enter the browser</strong><span>Configure GitHub, Devin, Devin Review, and webhook credentials as runtime environment variables or Docker secrets.</span></div>
       </div>
     </div>
   );
