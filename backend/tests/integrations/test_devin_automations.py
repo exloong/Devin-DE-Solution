@@ -2,23 +2,28 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from uuid import uuid4
 
 import pytest
 from app.integrations import FakeDevinSessionAdapter, LiveDevinSessionClient
 from app.integrations.devin_automations import (
-    WEBHOOK_SECRET_HEADER,
+    DEVIN_COMMENT_MARKER_PREFIX,
+    FIX_OPENED_MARKER,
+    NEEDS_INFORMATION_MARKER,
+    NOT_A_BUG_MARKER,
+    REPRODUCED_MARKER,
     AutomationHandle,
     AutomationPatch,
     AutomationSpec,
     FakeDevinAutomationClient,
-    InMemoryAutomationSecretStore,
     LiveDevinAutomationClient,
     automation_metadata,
     automation_output_schema,
     automation_prompt,
-    dispatch_payload,
+    automation_triggers,
+    fix_trigger_conditions,
+    follow_up_trigger_conditions,
     native_issue_number,
+    parse_native_fix_output,
     parse_native_triage_output,
     reproduction_trigger_conditions,
 )
@@ -37,30 +42,57 @@ INBOX = "https://api.devin.ai/v3/webhooks/inbox/abc"
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 TOKEN = StaticTokenProvider("devin-token")
 
+# Fields Devin's live event schemas expose for github:issues / github:issue_comment.
+SUPPORTED_FIELDS = {
+    "action",
+    "issue.title",
+    "issue.body",
+    "issue.user.login",
+    "label.name",
+    "comment.body",
+    "comment.user.login",
+    "comment.path",
+    "repository.full_name",
+}
+
 
 def client(transport: RecordedTransport) -> LiveDevinAutomationClient:
     sessions = LiveDevinSessionClient(transport=transport, token_provider=TOKEN, org_id=ORG_ID)
     return LiveDevinAutomationClient(
-        transport=transport,
-        token_provider=TOKEN,
-        org_id=ORG_ID,
-        sessions=sessions,
-        secret_store=InMemoryAutomationSecretStore(),
+        transport=transport, token_provider=TOKEN, org_id=ORG_ID, sessions=sessions
     )
 
 
-def automation_doc(
-    kind: TaskKind, *, secret: str | None = "inbox-secret", automation_id: str = "auto-1"
-) -> dict[str, JsonValue]:
-    webhook: dict[str, JsonValue] = {"url": INBOX}
-    if secret is not None:
-        webhook["secret"] = secret
+def inbox_doc(*, automation_id: str = "auto-1", metadata: TaskKind | None = None) -> dict:
+    """An operator-created (or legacy Relay) automation on a webhook inbox."""
+    return {
+        "automation_id": automation_id,
+        "name": "Relay",
+        "enabled": True,
+        "metadata": dict(automation_metadata(metadata)) if metadata else {},
+        "triggers": [
+            {
+                "trigger_id": "t1",
+                "event_type": "webhook:incoming",
+                "webhook": {"url": INBOX, "secret": "inbox-secret"},
+            }
+        ],
+    }
+
+
+def native_doc(kind: TaskKind, *, automation_id: str = "auto-1", prompt: str | None = None) -> dict:
     return {
         "automation_id": automation_id,
         "name": "Relay",
         "enabled": True,
         "metadata": dict(automation_metadata(kind)),
-        "triggers": [{"trigger_id": "t1", "event_type": "webhook:incoming", "webhook": webhook}],
+        "triggers": [
+            {"trigger_id": f"t{i}", **trigger}
+            for i, trigger in enumerate(automation_triggers(kind), start=1)
+        ],
+        "actions": [
+            {"type": "start_session", "prompt": prompt or automation_prompt(kind)},
+        ],
     }
 
 
@@ -68,37 +100,45 @@ def page(items: list[dict[str, JsonValue]]) -> dict[str, JsonValue]:
     return {"items": list(items), "has_next_page": False, "end_cursor": None}
 
 
-def test_prompts_separate_native_triage_from_owner_authorized_fix() -> None:
-    fix = automation_prompt(TaskKind.FIX)
-    assert "@exloong/superset" in fix
-    assert "task_id" in fix
-    assert "Never merge" in fix
-    assert "human owner has confirmed" in fix
+def _fields(conditions: dict) -> set[str]:
+    return {cond["field"] for group in conditions["any"] for cond in group["all"]}
+
+
+def test_prompts_make_devin_own_every_public_update() -> None:
     repro = automation_prompt(TaskKind.REPRODUCTION)
-    assert "GitHub `issues` event" in repro
+    assert "classify" in repro.lower()
     assert "context_completeness >= 80" in repro
     assert "never open a pull request" in repro
-    assert "task_id" not in repro
+    assert NOT_A_BUG_MARKER in repro
+    assert NEEDS_INFORMATION_MARKER in repro
+    assert REPRODUCED_MARKER in repro
+    assert "issue_comment" in repro
+    assert "Never write a Devin session link" in repro
+    assert "task_id" not in repro and "Relay posts" not in repro
+
+    fix = automation_prompt(TaskKind.FIX)
+    assert "@exloong/superset" in fix
+    assert REPRODUCED_MARKER in fix
+    assert FIX_OPENED_MARKER in fix
+    assert "Fixes #<issue.number>" in fix
+    assert "Never merge" in fix
+    assert "Never write a Devin session link" in fix
+    assert "owner" not in fix.lower() and "task_id" not in fix
     with pytest.raises(ContractValidationError):
         automation_prompt(TaskKind.CLASSIFICATION)
 
 
-def test_prompt_schemas_match_each_kind_of_session() -> None:
-    fix_schema = automation_output_schema(TaskKind.FIX)
-    assert fix_schema["additionalProperties"] is False
-    assert "task_id" in fix_schema["properties"]  # type: ignore[operator]
-    assert "task_id" in fix_schema["required"]  # type: ignore[operator]
-    assert json.dumps(fix_schema, sort_keys=True) in automation_prompt(TaskKind.FIX)
-
-    native = automation_output_schema(TaskKind.REPRODUCTION)
-    assert native["required"] == ["issue_number", "repository", "phase"]
-    assert "task_id" not in native["properties"]  # type: ignore[operator]
-    assert json.dumps(native, sort_keys=True) in automation_prompt(TaskKind.REPRODUCTION)
+def test_prompt_schemas_are_embedded_and_name_the_issue() -> None:
+    for kind in (TaskKind.REPRODUCTION, TaskKind.FIX):
+        schema = automation_output_schema(kind)
+        assert schema["additionalProperties"] is False
+        assert schema["required"] == ["issue_number", "repository", "phase"]
+        assert "task_id" not in schema["properties"]  # type: ignore[operator]
+        assert json.dumps(schema, sort_keys=True) in automation_prompt(kind)
 
 
-def test_native_trigger_conditions_encode_the_repository_and_label_gate() -> None:
-    conditions = reproduction_trigger_conditions("bug")
-    assert conditions == {
+def test_triggers_chain_natively_inside_devin_using_supported_fields() -> None:
+    assert reproduction_trigger_conditions() == {
         "any": [
             {
                 "all": [
@@ -107,14 +147,35 @@ def test_native_trigger_conditions_encode_the_repository_and_label_gate() -> Non
                         "operator": "eq",
                         "value": "exloong/superset",
                     },
-                    {"field": "action", "operator": "eq", "value": "labeled"},
-                    {"field": "label.name", "operator": "eq", "value": "bug"},
+                    {"field": "action", "operator": "eq", "value": "opened"},
                 ]
             }
         ]
     }
-    with pytest.raises(ContractValidationError):
-        reproduction_trigger_conditions(" ")
+    repro = automation_triggers(TaskKind.REPRODUCTION)
+    assert [t["event_type"] for t in repro] == ["github:issues", "github:issue_comment"]
+    follow_up = repro[1]["conditions"]
+    assert {
+        "field": "comment.body",
+        "operator": "not_contains",
+        "value": DEVIN_COMMENT_MARKER_PREFIX,
+    } in follow_up["any"][0]["all"]
+    assert REPRODUCED_MARKER.startswith(DEVIN_COMMENT_MARKER_PREFIX)
+
+    fix = automation_triggers(TaskKind.FIX)
+    assert [t["event_type"] for t in fix] == ["github:issue_comment"]
+    assert fix[0]["conditions"] == fix_trigger_conditions()
+    assert {"field": "comment.body", "operator": "contains", "value": REPRODUCED_MARKER} in fix[0][
+        "conditions"
+    ]["any"][0]["all"]
+
+    for conditions in (
+        reproduction_trigger_conditions(),
+        follow_up_trigger_conditions(),
+        fix_trigger_conditions(),
+    ):
+        assert _fields(conditions) <= SUPPORTED_FIELDS
+        assert "webhook" not in json.dumps(conditions)
 
 
 def test_native_triage_output_applies_relay_context_gate() -> None:
@@ -166,106 +227,126 @@ def test_native_triage_output_applies_relay_context_gate() -> None:
         parse_native_triage_output({"phase": "triage"})
 
 
-def native_doc(*, automation_id: str = "auto-1", event_type: str = "github:issues") -> dict:
-    return {
-        "automation_id": automation_id,
-        "name": "Relay",
-        "enabled": True,
-        "metadata": dict(automation_metadata(TaskKind.REPRODUCTION)),
-        "triggers": [
+def test_native_fix_output_requires_a_superset_pull_request() -> None:
+    done = parse_native_fix_output(
+        {
+            "issue_number": 9,
+            "repository": "exloong/superset",
+            "phase": "done",
+            "summary": "root cause: off by one",
+            "pull_request": {
+                "number": 42,
+                "url": "https://github.com/exloong/superset/pull/42",
+                "head_branch": "devin/9-fix",
+            },
+        }
+    )
+    assert done.pull_request is not None and done.pull_request.number == 42
+    assert done.summary == "root cause: off by one"
+
+    blocked = parse_native_fix_output(
+        {
+            "issue_number": 9,
+            "repository": "exloong/superset",
+            "phase": "done",
+            "blocked_reason": "x",
+        }
+    )
+    assert blocked.pull_request is None and blocked.blocked_reason == "x"
+
+    with pytest.raises(ContractValidationError):
+        parse_native_fix_output(None)
+    with pytest.raises(ContractValidationError):
+        parse_native_fix_output({"phase": "done"})
+    with pytest.raises(ContractValidationError):
+        parse_native_fix_output(
             {
-                "trigger_id": "t1",
-                "event_type": event_type,
-                "conditions": reproduction_trigger_conditions(),
+                "issue_number": 9,
+                "pull_request": {
+                    "number": 1,
+                    "url": "https://github.com/other/repo/pull/1",
+                    "head_branch": "b",
+                },
             }
-        ],
-    }
+        )
 
 
-def test_ensure_creates_native_reproduction_automation_without_inbox() -> None:
-    transport = RecordedTransport([HttpResponse(200, page([])), HttpResponse(201, native_doc())])
+@pytest.mark.parametrize("kind", [TaskKind.REPRODUCTION, TaskKind.FIX])
+def test_ensure_creates_native_automation_without_inbox(kind: TaskKind) -> None:
+    transport = RecordedTransport(
+        [HttpResponse(200, page([])), HttpResponse(201, native_doc(kind))]
+    )
     automations = client(transport)
 
-    handle = automations.ensure_automation(TaskKind.REPRODUCTION, now=NOW)
+    handle = automations.ensure_automation(kind, now=NOW)
 
-    assert handle == AutomationHandle("auto-1", TaskKind.REPRODUCTION, "", None)
-    assert handle.native is True and handle.can_dispatch is False
+    assert handle == AutomationHandle("auto-1", kind)
+    assert handle.native is True
     listing, create = transport.requests
     assert listing.method == "GET"
-    assert listing.query["metadata.relay_kind"] == "reproduction"
+    assert listing.query["metadata.relay_kind"] == kind.value
     assert create.method == "POST"
     body = create.json_body
     assert body is not None
-    assert body["triggers"] == [
-        {"event_type": "github:issues", "conditions": reproduction_trigger_conditions("bug")}
-    ]
-    assert body["metadata"] == {"relay_kind": "reproduction", "relay_repo": "exloong/superset"}
-    assert automations.secret_store.load(TaskKind.REPRODUCTION) == handle
+    assert body["run_as"] == {"type": "organization"}
+    assert body["triggers"] == automation_triggers(kind)
+    assert body["metadata"] == {"relay_kind": kind.value, "relay_repo": "exloong/superset"}
+    assert "webhook" not in json.dumps(body)
 
 
-def test_ensure_migrates_legacy_inbox_reproduction_automation_in_place() -> None:
+def test_ensure_migrates_legacy_inbox_fix_automation_in_place() -> None:
     transport = RecordedTransport(
         [
-            HttpResponse(200, page([automation_doc(TaskKind.REPRODUCTION, secret=None)])),
-            HttpResponse(200, native_doc()),
+            HttpResponse(200, page([inbox_doc(metadata=TaskKind.FIX)])),
+            HttpResponse(200, native_doc(TaskKind.FIX)),
         ]
+    )
+    automations = client(transport)
+
+    handle = automations.ensure_automation(TaskKind.FIX, now=NOW)
+
+    assert handle.automation_id == "auto-1"
+    listing, patch = transport.requests
+    assert patch.method == "PATCH" and patch.url == f"{API}/automations/auto-1"
+    assert patch.json_body is not None
+    assert patch.json_body["triggers"] == automation_triggers(TaskKind.FIX)
+    assert patch.json_body["actions"][0]["prompt"] == automation_prompt(TaskKind.FIX)
+
+
+def test_ensure_repairs_stale_prompt_but_never_recreates() -> None:
+    stale = native_doc(TaskKind.REPRODUCTION, prompt="old prompt")
+    stale["enabled"] = False
+    transport = RecordedTransport(
+        [HttpResponse(200, page([stale])), HttpResponse(200, native_doc(TaskKind.REPRODUCTION))]
     )
     automations = client(transport)
 
     handle = automations.ensure_automation(TaskKind.REPRODUCTION, now=NOW)
 
-    assert handle.automation_id == "auto-1" and handle.inbox_secret is None
-    listing, patch = transport.requests
-    assert patch.method == "PATCH" and patch.url == f"{API}/automations/auto-1"
-    assert patch.json_body is not None
-    assert patch.json_body["triggers"] == [
-        {"event_type": "github:issues", "conditions": reproduction_trigger_conditions("bug")}
-    ]
-
-
-def test_ensure_creates_fix_automation_when_none_exists_and_keeps_secret() -> None:
-    transport = RecordedTransport(
-        [
-            HttpResponse(200, page([])),
-            HttpResponse(201, automation_doc(TaskKind.FIX)),
-        ]
-    )
-    automations = client(transport)
-
-    handle = automations.ensure_automation(TaskKind.FIX, now=NOW)
-
-    assert handle == AutomationHandle("auto-1", TaskKind.FIX, INBOX, "inbox-secret")
-    listing, create = transport.requests
-    assert listing.query["metadata.relay_kind"] == "fix"
-    body = create.json_body
-    assert body is not None
-    assert body["run_as"] == {"type": "organization"}
-    assert body["triggers"] == [{"event_type": "webhook:incoming", "conditions": None}]
-    actions = body["actions"]
-    assert isinstance(actions, list) and len(actions) == 1
-    action = actions[0]
-    assert isinstance(action, dict)
-    assert action["type"] == "start_session"
-    assert body["metadata"] == {"relay_kind": "fix", "relay_repo": "exloong/superset"}
-    assert automations.secret_store.load(TaskKind.FIX) == handle
-
-
-def test_ensure_reuses_existing_automation_without_patching_it() -> None:
-    doc = automation_doc(TaskKind.FIX, secret=None)
-    doc["enabled"] = False
-    transport = RecordedTransport([HttpResponse(200, page([doc]))])
-    automations = client(transport)
-    automations.secret_store.save(AutomationHandle("auto-1", TaskKind.FIX, INBOX, "kept"))
-
-    handle = automations.ensure_automation(TaskKind.FIX, now=NOW)
-
-    assert handle.inbox_secret == "kept"
     assert handle.enabled is False
+    assert [r.method for r in transport.requests] == ["GET", "PATCH"]
+
+
+def test_ensure_reuses_current_automation_without_patching_it() -> None:
+    transport = RecordedTransport([HttpResponse(200, page([native_doc(TaskKind.FIX)]))])
+    automations = client(transport)
+
+    handle = automations.ensure_automation(TaskKind.FIX, now=NOW)
+
+    assert handle == AutomationHandle("auto-1", TaskKind.FIX, enabled=True)
     assert [r.method for r in transport.requests] == ["GET"]
 
 
+def test_ensure_rejects_provider_that_drops_a_trigger() -> None:
+    partial = native_doc(TaskKind.REPRODUCTION)
+    partial["triggers"] = partial["triggers"][:1]
+    transport = RecordedTransport([HttpResponse(200, page([])), HttpResponse(201, partial)])
+    with pytest.raises(ContractValidationError):
+        client(transport).ensure_automation(TaskKind.REPRODUCTION, now=NOW)
+
+
 def test_management_list_get_create_update_delete_redact_secrets() -> None:
-    created = automation_doc(TaskKind.FIX, automation_id="new")
+    created = inbox_doc(automation_id="new")
     created.update(
         {
             "name": "Nightly triage",
@@ -276,10 +357,9 @@ def test_management_list_get_create_update_delete_redact_secrets() -> None:
             "actions": [{"type": "start_session", "prompt": "do the thing"}],
         }
     )
-    del created["metadata"]
     transport = RecordedTransport(
         [
-            HttpResponse(200, page([automation_doc(TaskKind.REPRODUCTION), created])),
+            HttpResponse(200, page([native_doc(TaskKind.REPRODUCTION), created])),
             HttpResponse(200, created),
             HttpResponse(201, created),
             HttpResponse(200, created),
@@ -291,11 +371,12 @@ def test_management_list_get_create_update_delete_redact_secrets() -> None:
     listed = automations.list_automations()
     assert [a.automation_id for a in listed] == ["auto-1", "new"]
     assert listed[0].relay_kind is TaskKind.REPRODUCTION
+    assert listed[0].has_inbox is False
+    assert [t.event_type for t in listed[0].triggers] == ["github:issues", "github:issue_comment"]
     assert listed[1].relay_kind is None
     assert listed[1].created_by == "Ops"
     assert listed[1].last_invocation_status == "succeeded"
     assert listed[1].has_inbox is True
-    assert listed[1].triggers[0].event_type == "webhook:incoming"
     assert "inbox-secret" not in repr(listed) and INBOX not in repr(listed)
 
     assert automations.get_automation("new").prompt == "do the thing"
@@ -308,12 +389,6 @@ def test_management_list_get_create_update_delete_redact_secrets() -> None:
     assert body["run_as"] == {"type": "organization"}
     assert body["triggers"] == [{"event_type": "webhook:incoming", "conditions": None}]
     assert body["metadata"] == {"team": "ops"}
-    actions = body["actions"]
-    assert isinstance(actions, list) and isinstance(actions[0], dict)
-    assert actions[0]["session"] == {
-        "bypass_approval": False,
-        "tags": ["relay", "repo:exloong/superset", "launcher:automation"],
-    }
 
     automations.update_automation("new", AutomationPatch(prompt="new prompt", enabled=False))
     patch = transport.requests[3]
@@ -358,114 +433,27 @@ def test_list_automation_sessions_is_lenient_about_untagged_sessions() -> None:
     assert rows[0].tags == ("relay",)
 
 
-def test_ensure_recreates_automation_whose_secret_was_never_seen() -> None:
-    transport = RecordedTransport(
-        [
-            HttpResponse(
-                200, page([automation_doc(TaskKind.FIX, secret=None, automation_id="old")])
-            ),
-            HttpResponse(204, None),
-            HttpResponse(201, automation_doc(TaskKind.FIX, automation_id="new")),
-        ]
-    )
-    automations = client(transport)
-
-    handle = automations.ensure_automation(TaskKind.FIX, now=NOW)
-
-    assert handle.automation_id == "new"
-    assert handle.inbox_secret == "inbox-secret"
-    assert [r.method for r in transport.requests] == ["GET", "DELETE", "POST"]
-    assert transport.requests[1].url == f"{API}/automations/old"
-
-
-def test_dispatch_posts_task_envelope_to_inbox_with_secret_header() -> None:
-    transport = RecordedTransport([HttpResponse(202, {"accepted": True})])
-    automations = client(transport)
-    handle = AutomationHandle("auto-1", TaskKind.FIX, INBOX, "inbox-secret")
-    task = make_task(TaskKind.FIX)
-
-    receipt = automations.dispatch(handle, task, reporter_context="steps", now=NOW)
-
-    assert receipt.automation_id == "auto-1"
-    assert receipt.task_id == str(task.task_id)
-    request = transport.requests[0]
-    assert request.method == "POST"
-    assert request.url == INBOX
-    assert request.headers[WEBHOOK_SECRET_HEADER] == "inbox-secret"
-    assert "Authorization" not in request.headers
-    assert request.json_body == dispatch_payload(task, reporter_context="steps")
-    body = request.json_body["task"]
-    assert isinstance(body, dict)
-    assert body["task_id"] == str(task.task_id)
-    assert body["target_commit"] == task.target_commit.sha
-
-
-def test_dispatch_refuses_handle_without_secret() -> None:
-    automations = client(RecordedTransport())
-    handle = AutomationHandle("auto-1", TaskKind.FIX, INBOX, None)
-    with pytest.raises(ContractValidationError):
-        automations.dispatch(handle, make_task(TaskKind.FIX), now=NOW)
-
-
-def test_dispatch_refuses_native_reproduction_automation() -> None:
-    automations = client(RecordedTransport())
-    handle = AutomationHandle("auto-1", TaskKind.REPRODUCTION, INBOX, "secret")
-    with pytest.raises(ContractValidationError):
-        automations.dispatch(handle, make_task(TaskKind.REPRODUCTION), now=NOW)
-    assert automations.transport.requests == ()
-
-
-def test_list_spawned_sessions_filters_by_automation_and_since() -> None:
-    task = make_task(TaskKind.REPRODUCTION)
-
-    def session(session_id: str, created: str) -> dict[str, JsonValue]:
-        return {
-            "session_id": session_id,
-            "org_id": ORG_ID,
-            "status": "running",
-            "created_at": created,
-            "updated_at": created,
-            "tags": ["relay", "kind:reproduction", "repo:exloong/superset"],
-            "url": canonical_session_url(session_id),
-        }
-
-    transport = RecordedTransport(
-        [
-            HttpResponse(
-                200,
-                page(
-                    [
-                        session("devin-new", "2026-01-01T12:05:00Z"),
-                        session("devin-old", "2025-12-31T00:00:00Z"),
-                    ]
-                ),
-            )
-        ]
-    )
-    automations = client(transport)
-
-    spawned = automations.list_spawned_sessions("auto-1", since=NOW, task=task)
-
-    assert [s.session_id for s in spawned] == ["devin-new"]
-    assert spawned[0].kind is TaskKind.REPRODUCTION
-    assert spawned[0].target_commit == task.target_commit
-    request = transport.requests[0]
-    assert request.url == f"{API}/sessions"
-    assert request.query["automation_ids"] == "auto-1"
-
-
-def test_fake_client_spawns_sessions_for_dispatches_in_order() -> None:
+def test_fake_client_only_lists_sessions_devin_started_itself() -> None:
     sessions = FakeDevinSessionAdapter()
-    fake = FakeDevinAutomationClient(sessions, auto_spawn=False)
-    handle = fake.ensure_automation(TaskKind.FIX, now=NOW)
-    first = make_task(TaskKind.FIX)
-    second = make_task(TaskKind.FIX, task_id=uuid4())
+    fake = FakeDevinAutomationClient(sessions)
+    repro = fake.ensure_automation(TaskKind.REPRODUCTION, now=NOW)
+    fix = fake.ensure_automation(TaskKind.FIX, now=NOW)
+    assert not hasattr(fake, "dispatch")
 
-    fake.dispatch(handle, first, now=NOW)
-    fake.dispatch(handle, second, now=NOW)
-    assert fake.list_spawned_sessions(handle.automation_id, since=NOW) == ()
+    fake.simulate_native_session(
+        make_task(TaskKind.REPRODUCTION),
+        session_id="devin-r1",
+        structured_output={"issue_number": 9, "repository": "exloong/superset", "phase": "triage"},
+    )
+    fake.simulate_native_session(
+        make_task(TaskKind.FIX),
+        session_id="devin-f1",
+        kind=TaskKind.FIX,
+        structured_output={"issue_number": 9, "repository": "exloong/superset", "phase": "fixing"},
+    )
 
-    spawned = fake.spawn_pending(TaskKind.FIX)
-
-    assert [s.task_id for s in spawned] == [str(first.task_id), str(second.task_id)]
-    assert fake.dispatched(TaskKind.FIX) == (str(first.task_id), str(second.task_id))
+    assert [r.session_id for r in fake.list_automation_sessions(repro.automation_id)] == [
+        "devin-r1"
+    ]
+    assert [r.session_id for r in fake.list_automation_sessions(fix.automation_id)] == ["devin-f1"]
+    assert fake.get_automation(fix.automation_id).last_invocation_status == "succeeded"

@@ -136,7 +136,7 @@ JOB_RETRY_BACKOFF_MAX = timedelta(minutes=30)
 
 # States in which a queued (not yet started, no workspace) FIX session may wait.
 _HOLDS_QUEUED_FIX: frozenset[IssueState] = frozenset(
-    {IssueState.FIX_AUTHORIZED, IssueState.CHANGES_REQUESTED}
+    {IssueState.FIX_PENDING, IssueState.CHANGES_REQUESTED}
 )
 
 
@@ -636,7 +636,7 @@ class TransitionService:
         return [
             q
             for q in ctx.uow.list_questions(ctx.issue.id, ctx.issue.revision)
-            if q.required and q.status != QuestionStatus.ANSWERED
+            if q.required and q.status not in (QuestionStatus.ANSWERED, QuestionStatus.SUPERSEDED)
         ]
 
     def _assert_reproduction_ready(self, ctx: _Context) -> None:
@@ -893,6 +893,8 @@ class TransitionService:
         return self._start_reproduction(ctx, "classification found reproduction context complete")
 
     def _on_reporter_response(self, ctx: _Context) -> _Outcome:
+        if ctx.event.payload.get("follow_up") is True:
+            return self._on_reporter_follow_up(ctx)
         self._authorize_reporter_response(ctx)
         answers = self._payload_list(ctx, "answers")
         if not answers:
@@ -951,6 +953,43 @@ class TransitionService:
             TransitionName.RECORD_REPORTER_RESPONSE,
             IssueState.AWAITING_REPORTER,
             "answers recorded; required context still missing",
+        )
+
+    def _on_reporter_follow_up(self, ctx: _Context) -> _Outcome:
+        """A reporter comment arrived on GitHub; triage runs again over the new context."""
+        if ctx.event.type is not EventType.REPORTER_COMMENT:
+            raise DomainError(ErrorCode.INVALID_INPUT, "follow_up requires a reporter comment")
+        actor = ctx.event.actor
+        if actor.role is ActorRole.REPORTER and actor.login != ctx.issue.reporter_login:
+            raise DomainError(
+                ErrorCode.UNAUTHORIZED_ACTOR,
+                "only the original reporter may follow up",
+                {"reporter": ctx.issue.reporter_login},
+            )
+        retired = 0
+        for question in ctx.uow.list_questions(ctx.issue.id, ctx.issue.revision):
+            if question.status in (QuestionStatus.ANSWERED, QuestionStatus.SUPERSEDED):
+                continue
+            question.status = QuestionStatus.SUPERSEDED
+            question.answered_at = ctx.now
+            ctx.uow.save_question(question)
+            retired += 1
+        ctx.uow.add_evidence(
+            Evidence(
+                issue_id=ctx.issue.id,
+                issue_revision=ctx.issue.revision,
+                kind=EvidenceKind.REPORTER_SNAPSHOT,
+                title="Reporter follow-up",
+                summary=f"{retired} open question(s) retired; the report is triaged again",
+                created_at=ctx.now,
+            )
+        )
+        self._cancel_pending_jobs(ctx, public_only=False)
+        ctx.issue.reporter_wait = None
+        return _Outcome(
+            TransitionName.REPORTER_FOLLOW_UP,
+            IssueState.TRIAGE,
+            "reporter followed up on GitHub; re-running triage",
         )
 
     def _authorize_reporter_response(self, ctx: _Context) -> None:
@@ -1130,11 +1169,18 @@ class TransitionService:
             "Evidence packet published",
             f"Workspace released; owner packet ready ({summary}).",
         )
+        if reproduced:
+            self._queue_fix_session(ctx, "Devin reproduced the defect")
+            return _Outcome(
+                TransitionName.REPRODUCTION_CONFIRMED,
+                IssueState.FIX_PENDING,
+                "reproduced; Devin's fix automation takes over",
+            )
         self._enqueue(ctx, JobKind.ESCALATE_OWNER, run_after=ctx.now + timedelta(days=2))
         return _Outcome(
             TransitionName.REPRODUCTION_COMPLETED,
             IssueState.NEEDS_OWNER_DECISION,
-            f"reproduction {summary}; awaiting owner decision",
+            "not reproduced; awaiting owner decision",
         )
 
     def _on_environment_blocked(self, ctx: _Context) -> _Outcome:
@@ -1200,9 +1246,11 @@ class TransitionService:
             decision.expires_at = ctx.now + self.fix_authorization_ttl
             ctx.uow.add_decision(decision)
             self._queue_fix_session(
-                ctx, decision, f"{ctx.event.actor.login} confirmed expected behavior"
+                ctx,
+                f"{ctx.event.actor.login} confirmed expected behavior",
+                authorization=decision,
             )
-            return _Outcome(TransitionName.CONFIRM_BUG, IssueState.FIX_AUTHORIZED, rationale)
+            return _Outcome(TransitionName.CONFIRM_BUG, IssueState.FIX_PENDING, rationale)
         if kind == DecisionKind.REQUEST_DISCRIMINATOR:
             field = self._payload_str(ctx, "field")
             prompt = self._payload_str(ctx, "prompt")
@@ -1422,24 +1470,29 @@ class TransitionService:
         )
 
     def _requeue_fix_after_changes(self, ctx: _Context, reviewer: str) -> None:
-        """Requested changes re-queue one bounded fix session under the live authorization.
+        """Requested changes re-queue one bounded fix session under the live mandate.
 
-        If the confirm_bug authorization has expired nothing is queued; a later
+        If an owner mandate has expired nothing is queued; a later
         FIX_SESSION_STARTED is then rejected with human_gate_required.
         """
         try:
-            authorization = self._active_fix_authorization(ctx)
+            authorization = self._fix_mandate(ctx)
         except DomainError:
             return
         self._queue_fix_session(
             ctx,
-            authorization,
             f"{reviewer} requested changes on #{self._pr_ref(ctx).number}",
+            authorization=authorization,
             job_suffix=f"changes:{ctx.issue.version}",
         )
 
     def _queue_fix_session(
-        self, ctx: _Context, authorization: HumanDecision, trigger: str, *, job_suffix: str = ""
+        self,
+        ctx: _Context,
+        trigger: str,
+        *,
+        authorization: HumanDecision | None = None,
+        job_suffix: str = "",
     ) -> AgentSession:
         """Queue the single bounded FIX session for the current revision + START_FIX job."""
         revision = self._latest_revision(ctx)
@@ -1454,15 +1507,33 @@ class TransitionService:
             ),
             target_commit=revision.target_commit if revision else None,
         )
-        self._enqueue(
-            ctx,
-            JobKind.START_FIX,
-            suffix=job_suffix,
-            payload={"session_id": str(session.id), "authorization_id": str(authorization.id)},
-        )
+        payload: dict[str, object] = {"session_id": str(session.id)}
+        if authorization is not None:
+            payload["authorization_id"] = str(authorization.id)
+        self._enqueue(ctx, JobKind.START_FIX, suffix=job_suffix, payload=payload)
         return session
 
-    def _active_fix_authorization(self, ctx: _Context) -> HumanDecision:
+    def _reproduction_confirmed(self, ctx: _Context) -> bool:
+        """True when an accepted reproduction result for this revision says ``reproduced``."""
+        for session in ctx.uow.list_sessions(issue_id=ctx.issue.id):
+            if session.kind != SessionKind.REPRODUCTION:
+                continue
+            for output in ctx.uow.list_outputs(session.id):
+                if (
+                    output.schema_name == "reproduction_result.v1"
+                    and output.accepted
+                    and output.issue_revision == ctx.issue.revision
+                    and output.payload.get("reproduced") is True
+                ):
+                    return True
+        return False
+
+    def _fix_mandate(self, ctx: _Context) -> HumanDecision | None:
+        """What lets a fix session code on this revision.
+
+        A reproduced defect is mandate enough (``None``); otherwise an owner's
+        unexpired ``confirm_bug`` decision is required.
+        """
         for decision in reversed(list(ctx.uow.list_decisions(ctx.issue.id))):
             if (
                 decision.kind == DecisionKind.CONFIRM_BUG
@@ -1471,9 +1542,11 @@ class TransitionService:
                 and (decision.expires_at is None or decision.expires_at > ctx.now)
             ):
                 return decision
+        if self._reproduction_confirmed(ctx):
+            return None
         raise DomainError(
             ErrorCode.HUMAN_GATE_REQUIRED,
-            "an unexpired confirm_bug decision is required before coding",
+            "a reproduced defect or an unexpired confirm_bug decision is required before coding",
         )
 
     def _queued_fix_session(self, ctx: _Context) -> AgentSession:
@@ -1513,7 +1586,7 @@ class TransitionService:
         return session
 
     def _on_fix_session_started(self, ctx: _Context) -> _Outcome:
-        authorization = self._active_fix_authorization(ctx)
+        authorization = self._fix_mandate(ctx)
         session = self._queued_fix_session(ctx)
         session.state = SessionState.RUNNING
         session.workspace_released = False
@@ -1526,8 +1599,12 @@ class TransitionService:
         ctx.uow.add_session_event(
             SessionEvent(
                 session_id=session.id,
-                label="Fix authorized",
-                detail=f"Scope: {authorization.scope}",
+                label="Fix started",
+                detail=(
+                    "Scope: regression test plus minimal fix; mandate: reproduced defect"
+                    if authorization is None
+                    else f"Scope: {authorization.scope}; mandate: {authorization.actor.login}"
+                ),
                 created_at=ctx.now,
             )
         )
@@ -1928,25 +2005,30 @@ class TransitionService:
                 )
         if target == IssueState.REPRODUCING:
             return self._start_reproduction(ctx, "operator retried after automation failure")
-        if target in (IssueState.FIXING, IssueState.FIX_AUTHORIZED):
+        if target in (IssueState.FIXING, IssueState.FIX_PENDING):
             try:
-                authorization = self._active_fix_authorization(ctx)
+                authorization = self._fix_mandate(ctx)
             except DomainError:
                 return _Outcome(
                     TransitionName.RETRY,
                     IssueState.NEEDS_OWNER_DECISION,
-                    "fix authorization expired; owner must confirm again",
+                    "fix mandate expired; owner must confirm again",
                 )
+            mandate = (
+                "the reproduced defect"
+                if authorization is None
+                else f"{authorization.actor.login}'s authorization"
+            )
             self._queue_fix_session(
                 ctx,
-                authorization,
-                f"operator retry under {authorization.actor.login}'s authorization",
+                f"operator retry under {mandate}",
+                authorization=authorization,
                 job_suffix=f"retry:{ctx.issue.version}",
             )
             return _Outcome(
                 TransitionName.RETRY,
-                IssueState.FIX_AUTHORIZED,
-                "bounded fix session re-queued under the existing authorization",
+                IssueState.FIX_PENDING,
+                "bounded fix session re-queued under the existing mandate",
             )
         if target not in TRANSITIONS[TransitionName.RETRY].destinations:
             raise DomainError(

@@ -76,7 +76,7 @@ import {
   useLiveIssueList,
   type IssueListFilter,
 } from './components';
-import { OPERATOR_TOKEN_STORAGE_KEY, type Heartbeat, type ProviderStatus } from './api';
+import { OPERATOR_TOKEN_STORAGE_KEY, type AgentSessionStatus, type Heartbeat, type ProviderStatus } from './api';
 import { HealthDashboard, formatAgo } from './components/HealthDashboard';
 
 const navItems: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[] = [
@@ -86,6 +86,9 @@ const navItems: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[] 
   { key: 'issues', label: 'Issue workbench', icon: Inbox },
   { key: 'settings', label: 'Connections', icon: Settings2 },
 ];
+
+/** Sessions still needing Devin or an operator; the nav badge counts these. */
+const ACTIVE_SESSION_STATUSES = new Set<AgentSessionStatus>(['queued', 'running', 'needs_attention']);
 
 const stateClass: Record<Issue['state'], string> = {
   'Needs information': 'amber',
@@ -129,7 +132,7 @@ function App() {
   const attention = useLiveIssueList('attention', '', live);
   const now = useNow(1000);
   const runningSessionCount = live
-    ? liveSessions.data?.items.filter(session => session.status === 'running').length ?? 0
+    ? liveSessions.data?.items.filter(session => ACTIVE_SESSION_STATUSES.has(session.status)).length ?? 0
     : demo
       ? devinSessions.filter(session => session.status === 'Running').length
       : null;
@@ -950,14 +953,14 @@ function OwnerHandoff({ issue, notify }: { issue: Issue; notify: (message: strin
         <div className="handoff-icon"><FileCheck2 size={24} /></div>
         <div>
           <p className="eyebrow">Decision requested</p>
-          <h3>Does this evidence establish a supported product defect?</h3>
-          <p>Owner review starts only after a portable reproduction exists, so code owners see a decision—not a raw support thread.</p>
+          <h3>Reproduction was inconclusive — is this still a supported product defect?</h3>
+          <p>A confirmed reproduction starts the fix on its own; owners are only asked when reproduction fails, and again before a PR merges.</p>
         </div>
       </div>
       <div className="decision-context">
         <div>
           <span>Recommendation</span>
-          <strong><CircleDot size={15} /> Confirm as bug</strong>
+          <strong><CircleDot size={15} /> Likely defect</strong>
           <p>Dashboard-scoped filter state is lost during an in-app refresh on a supported release.</p>
         </div>
         <div>
@@ -972,9 +975,9 @@ function OwnerHandoff({ issue, notify }: { issue: Issue; notify: (message: strin
         </div>
       </div>
       <div className="decision-actions">
-        <button className="decision-button confirm" onClick={() => notify('Demo mode: in live mode this calls POST /issues/{id}/decisions (confirm_bug), which authorizes the Devin fix session')}>
+        <button className="decision-button confirm" onClick={() => notify('Demo mode: in live mode this calls POST /issues/{id}/decisions (confirm_bug) to override a failed reproduction and start the fix session')}>
           <Check size={18} />
-          <span><strong>Confirm bug & authorize fix</strong><small>Launches the owner-authorized Devin fix session</small></span>
+          <span><strong>Treat as defect · start fix anyway</strong><small>Overrides the failed reproduction and opens a PR</small></span>
         </button>
         <button className="decision-button" onClick={() => notify('Returned to reporter context')}>
           <HelpCircle size={18} />
@@ -1117,7 +1120,7 @@ function connectionCards(heartbeat: Heartbeat | null, live: boolean, now: number
       icon: <Zap size={22} />,
       badge: devinBadge,
       tone: devinTone,
-      copy: 'Two Relay-managed Devin Automations: reproduction on a native github:issues trigger (repo/labeled/bug), fix on an inbox fired only by owner authorization.',
+      copy: 'Two Relay-managed Devin Automations, both on native GitHub triggers: triage + reproduction on github:issues (opened) and reporter replies; fix on the “reproduced” comment Devin itself posts. They run without Relay.',
       detail: heartbeat
         ? `Last session launched ${formatAgo(heartbeat.last_session_launched_at, now)}${heartbeat.automations.length ? ` · ${heartbeat.automations.map((a) => `${a.kind} ${a.automation_id}${a.enabled ? '' : ' (disabled)'}`).join(', ')}` : ' · automations not provisioned'}`
         : 'No session has been launched.',

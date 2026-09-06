@@ -488,7 +488,7 @@ class SessionHealth(ApiModel):
 
 class RecentSession(ApiModel):
     id: uuid.UUID
-    kind: Literal["reproduction", "fix"]
+    kind: Literal["triage", "reproduction", "fix"]
     issue_id: uuid.UUID
     issue_key: str
     issue_title: str

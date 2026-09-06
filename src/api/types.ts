@@ -18,7 +18,7 @@ export type LifecycleState =
   | 'reproducing'
   | 'blocked_environment'
   | 'needs_owner_decision'
-  | 'fix_authorized'
+  | 'fix_pending'
   | 'fixing'
   | 'pr_open'
   | 'awaiting_owner'
@@ -399,7 +399,7 @@ export interface SessionHealth {
 
 export interface RecentSession {
   id: UUID;
-  kind: SessionKind;
+  kind: 'triage' | SessionKind;
   issue_id: UUID;
   issue_key: string;
   issue_title: string;

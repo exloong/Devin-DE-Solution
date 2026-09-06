@@ -122,14 +122,14 @@ class Harness:
         assert sessions
         return sessions[-1].id
 
-    def reproduce(self, issue: Issue) -> Issue:
+    def reproduce(self, issue: Issue, *, reproduced: bool = True) -> Issue:
         result = self.apply(
             self.event(
                 EventType.REPRODUCTION_RESULT,
                 issue_id=issue.id,
                 role=ActorRole.AGENT,
                 session_id=str(self.latest_session_id(issue.id)),
-                reproduced=True,
+                reproduced=reproduced,
                 evidence=[{"kind": "result_matrix", "title": "Matrix"}],
             )
         )
@@ -297,7 +297,6 @@ class Harness:
         issue = self.open_issue()
         issue = self.classify(issue)
         issue = self.reproduce(issue)
-        issue = self.confirm(issue)
         issue = self.start_fix(issue)
         return self.open_pr(issue)
 

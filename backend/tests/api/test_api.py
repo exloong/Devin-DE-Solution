@@ -102,7 +102,7 @@ def test_health_and_ready(client: TestClient) -> None:
         "database": "ok",
         "worker": "unavailable",
         "last_worker_heartbeat_at": None,
-        "migrations": "0004",
+        "migrations": "0006",
         "dry_run": True,
     }
 
@@ -318,9 +318,7 @@ def test_issue_detail_is_flat_redacted_and_typed(client: TestClient) -> None:
     detail = _detail(client, issue["id"]).json()
     assert "body" not in detail and detail.get("body_excerpt") is None
     assert detail["state"] == "awaiting_owner" and detail["target_commit"] is not None
-    assert [d["kind"] for d in detail["decisions"]] == ["confirm_bug"]
-    decision = detail["decisions"][0]
-    assert decision["actor"]["kind"] == "owner" and decision["authorization"]["scope"]
+    assert [d["kind"] for d in detail["decisions"]] == []
     pr = detail["pull_requests"][0]
     assert pr["repository"] == TARGET_REPOSITORY and pr["state"] == "open"
     assert pr["review"] == "requested" and pr["human_approver"] is None
@@ -530,7 +528,7 @@ def test_if_match_precondition(client: TestClient) -> None:
     )
     assert weak.status_code == 200, weak.text
     accepted = weak.json()
-    assert accepted["to_state"] == "fix_authorized" and accepted["processing"] == "complete"
+    assert accepted["to_state"] == "fix_pending" and accepted["processing"] == "complete"
     assert accepted["resource_id"] == issue["id"]
     assert accepted["resource_version"] == version + 1
     assert _detail(client, issue["id"]).json()["version"] == version + 1

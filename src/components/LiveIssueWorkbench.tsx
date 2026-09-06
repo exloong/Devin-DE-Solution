@@ -48,8 +48,8 @@ export const lifecycleLabel: Record<LifecycleState, string> = {
   awaiting_reporter: 'Needs information',
   reproducing: 'Reproducing',
   blocked_environment: 'Blocked · environment',
-  needs_owner_decision: 'Owner decision',
-  fix_authorized: 'Fix authorized',
+  needs_owner_decision: 'Not reproduced · owner review',
+  fix_pending: 'Reproduced · fix starting',
   fixing: 'Fix in progress',
   pr_open: 'PR open',
   awaiting_owner: 'PR in review',
@@ -70,7 +70,7 @@ export const lifecycleTone: Record<LifecycleState, string> = {
   reproducing: 'violet',
   blocked_environment: 'rose',
   needs_owner_decision: 'green',
-  fix_authorized: 'blue',
+  fix_pending: 'blue',
   fixing: 'blue',
   pr_open: 'blue',
   awaiting_owner: 'blue',
@@ -91,8 +91,7 @@ const trackSteps: { label: string; states: LifecycleState[] }[] = [
   { label: 'Classify', states: ['triage'] },
   { label: 'Context', states: ['awaiting_reporter'] },
   { label: 'Reproduce', states: ['reproducing', 'blocked_environment'] },
-  { label: 'Confirm', states: ['needs_owner_decision'] },
-  { label: 'Fix', states: ['fix_authorized', 'fixing'] },
+  { label: 'Fix', states: ['needs_owner_decision', 'fix_pending', 'fixing'] },
   { label: 'Review', states: ['pr_open', 'awaiting_owner', 'changes_requested'] },
 ];
 
@@ -225,7 +224,7 @@ const sessionStatusLabel: Record<SessionSummary['status'], string> = {
 /**
  * Surfaces both Devin trigger points for one issue: the reproduction session
  * Relay auto-launches once context is complete, and the fix session that only
- * exists after an owner authorized it.
+ * exists after a reproduction confirmed the defect.
  */
 function IssueSessionsPanel({ issue, sessions, now }: { issue: IssueSummary; sessions: Resource<SessionPage>; now: number }) {
   const items = sessions.data?.items ?? [];
@@ -233,14 +232,14 @@ function IssueSessionsPanel({ issue, sessions, now }: { issue: IssueSummary; ses
   const reproduction = byKind('reproduction');
   const fix = byKind('fix');
   const reproductionExpected = issue.state === 'reproducing' || issue.state === 'blocked_environment';
-  const fixExpected = issue.state === 'fix_authorized' || issue.state === 'fixing';
+  const fixExpected = issue.state === 'fix_pending' || issue.state === 'fixing';
   const render = (kind: SessionSummary['kind'], list: SessionSummary[], expected: boolean, idle: string) => {
     const latest = list[0];
     return (
       <div className={`live-session-panel ${kind}`} key={kind}>
         <header>
           <strong>
-            <Bot size={15} /> {kind === 'reproduction' ? 'Reproduction session · auto-launched' : 'Fix session · owner-authorized'}
+            <Bot size={15} /> {kind === 'reproduction' ? 'Reproduction session · auto-launched' : 'Fix session · auto-launched after reproduction'}
           </strong>
           {latest ? (
             <span className={`session-status ${latest.status.replace('needs_attention', 'attention')}`}>
@@ -283,7 +282,7 @@ function IssueSessionsPanel({ issue, sessions, now }: { issue: IssueSummary; ses
   return (
     <div className="issue-sessions">
       {render('reproduction', reproduction, reproductionExpected, 'Relay launches this automatically once triage marks the report a likely defect with complete context (≥ 80%).')}
-      {render('fix', fix, fixExpected, 'Launched only after the component owner confirms the bug and authorizes a fix on the Owner handoff tab.')}
+      {render('fix', fix, fixExpected, 'Starts automatically once the reproduction session confirms the defect; it opens a PR that links back to this issue.')}
     </div>
   );
 }
@@ -717,7 +716,7 @@ function LiveEvidence({ issue }: { issue: IssueDetail }) {
         </div>
         <div>
           <p className="eyebrow">Evidence quality</p>
-          <h3>{evidence.reproduction_ready ? 'Ready for owner review' : 'Not yet reproducible'}</h3>
+          <h3>{evidence.reproduction_ready ? 'Reproduced — fix underway' : 'Not yet reproducible'}</h3>
           <p>
             {evidence.reproduction_ready
               ? 'The report can be recreated without access to the reporter’s environment.'
@@ -819,12 +818,12 @@ function LiveHandoff({
           <p className="eyebrow">{bugDecisionOpen || prDecisionOpen ? 'Decision requested' : 'Owner routing'}</p>
           <h3>
             {bugDecisionOpen
-              ? 'Does this evidence establish a supported product defect?'
+              ? 'Reproduction was inconclusive — is this still a supported product defect?'
               : prDecisionOpen
                 ? `Review pull request #${pullRequest?.number ?? '—'} at its exact head`
                 : `No decision is open (${lifecycleLabel[issue.state]})`}
           </h3>
-          <p>Owner review starts only after a portable reproduction exists. Devin Review output is evidence for the owner, never a substitute for this decision.</p>
+          <p>A confirmed reproduction starts the fix on its own. Owners are only asked when reproduction fails, and again before a PR merges — Relay never merges.</p>
         </div>
       </div>
 
@@ -858,8 +857,8 @@ function LiveHandoff({
                 <button className="decision-button confirm" disabled={pending} onClick={() => run({ kind: 'confirm_bug' })}>
                   {pending ? <Loader2 size={18} className="spin" /> : <Check size={18} />}
                   <span>
-                    <strong>Confirm bug & authorize fix</strong>
-                    <small>Starts a bounded coding session on {issue.repository.full_name}</small>
+                    <strong>Treat as defect · start fix anyway</strong>
+                    <small>Overrides the failed reproduction; opens a PR on {issue.repository.full_name}</small>
                   </span>
                 </button>
                 <div className="decision-follow-up">

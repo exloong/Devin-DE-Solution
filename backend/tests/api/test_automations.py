@@ -53,19 +53,22 @@ def test_list_shows_relay_automations_without_inbox_details(api: TestClient) -> 
         assert item["managed_by_relay"] is True
     repro, fix = by_kind["reproduction"], by_kind["fix"]
     assert repro["has_inbox"] is False
-    assert repro["event_types"] == ["github:issues"]
+    assert repro["event_types"] == ["github:issues", "github:issue_comment"]
     assert repro["triggers"][0]["conditions"]["any"][0]["all"] == [
         {"field": "repository.full_name", "operator": "eq", "value": "exloong/superset"},
-        {"field": "action", "operator": "eq", "value": "labeled"},
-        {"field": "label.name", "operator": "eq", "value": "bug"},
+        {"field": "action", "operator": "eq", "value": "opened"},
     ]
     assert "task_id" not in repro["prompt"]
-    assert fix["has_inbox"] is True
-    assert fix["event_types"] == ["webhook:incoming"]
-    assert fix["triggers"] == [{"event_type": "webhook:incoming", "conditions": None}]
-    assert "task_id" in fix["prompt"]
+    assert fix["has_inbox"] is False
+    assert fix["event_types"] == ["github:issue_comment"]
+    assert fix["triggers"][0]["conditions"]["any"][0]["all"][-1] == {
+        "field": "comment.body",
+        "operator": "contains",
+        "value": "<!-- relay:reproduced -->",
+    }
+    assert "Fixes #<issue.number>" in fix["prompt"]
     text = resp.text
-    assert "fake-secret" not in text and "webhooks/inbox" not in text
+    assert "webhooks/inbox" not in text and "app.devin.ai/sessions" not in text
 
 
 def test_reads_require_operator_class_and_writes_require_operator(api: TestClient) -> None:

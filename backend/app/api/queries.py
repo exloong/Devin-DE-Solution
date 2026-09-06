@@ -98,8 +98,14 @@ _WORKFLOW_STEPS: tuple[tuple[str, str, StepKind, tuple[IssueState, ...], str], .
         (IssueState.REPRODUCING, IssueState.BLOCKED_ENVIRONMENT),
         "devin",
     ),
-    ("confirm", "Owner bug confirmation", "human", (IssueState.NEEDS_OWNER_DECISION,), "owner"),
-    ("fix", "Authorized fix", "ai", (IssueState.FIX_AUTHORIZED, IssueState.FIXING), "devin"),
+    (
+        "confirm",
+        "Not reproduced · owner review",
+        "human",
+        (IssueState.NEEDS_OWNER_DECISION,),
+        "owner",
+    ),
+    ("fix", "Automatic fix", "ai", (IssueState.FIX_PENDING, IssueState.FIXING), "devin"),
     (
         "review",
         "Review & merge approval",
@@ -130,8 +136,8 @@ _NEXT_ACTION: dict[IssueState, str] = {
     IssueState.AWAITING_REPORTER: "Waiting for reporter answers",
     IssueState.REPRODUCING: "Bounded reproduction session running",
     IssueState.BLOCKED_ENVIRONMENT: "Operator: unblock environment and retry",
-    IssueState.NEEDS_OWNER_DECISION: "Owner: confirm bug or reclassify",
-    IssueState.FIX_AUTHORIZED: "Start bounded fix session",
+    IssueState.NEEDS_OWNER_DECISION: "Not reproduced — owner: fix anyway or reclassify",
+    IssueState.FIX_PENDING: "Reproduced — Devin's fix automation starting",
     IssueState.FIXING: "Bounded fix session running",
     IssueState.PR_OPEN: "Waiting for Devin Review and reviewer routing",
     IssueState.AWAITING_OWNER: "Owner: review and approve or request changes",
@@ -753,6 +759,19 @@ def _initials(name: str) -> str:
     return "".join(p[0] for p in parts[:2]).upper() or name[:2].upper()
 
 
+_FIX_STATES: frozenset[IssueState] = frozenset(
+    {
+        IssueState.FIX_PENDING,
+        IssueState.FIXING,
+        IssueState.PR_OPEN,
+        IssueState.AWAITING_OWNER,
+        IssueState.CHANGES_REQUESTED,
+        IssueState.COMPLETED,
+    }
+)
+_POST_REPRODUCTION_STATES: frozenset[IssueState] = _FIX_STATES | {IssueState.NEEDS_OWNER_DECISION}
+
+
 def analytics(uow: UnitOfWork, now: datetime) -> AnalyticsSummary:
     issues = list(uow.list_issues())
     sessions = list(uow.list_sessions())
@@ -779,23 +798,16 @@ def analytics(uow: UnitOfWork, now: datetime) -> AnalyticsSummary:
         decisions = uow.list_decisions(issue.id)
         confirmations = [d for d in decisions if d.kind == DecisionKind.CONFIRM_BUG]
         if confirmations:
-            confirmed += 1
             owner_decision_hours.append(
                 (confirmations[0].created_at - issue.created_at).total_seconds() / 3600
             )
-        if any(s.kind == SessionKind.REPRODUCTION for s in sessions if s.issue_id == issue.id) and (
-            issue.state
-            in (
-                IssueState.NEEDS_OWNER_DECISION,
-                IssueState.FIX_AUTHORIZED,
-                IssueState.FIXING,
-                IssueState.PR_OPEN,
-                IssueState.AWAITING_OWNER,
-                IssueState.CHANGES_REQUESTED,
-                IssueState.COMPLETED,
-            )
-        ):
+        has_reproduction = any(
+            s.kind == SessionKind.REPRODUCTION for s in sessions if s.issue_id == issue.id
+        )
+        if has_reproduction and issue.state in _POST_REPRODUCTION_STATES:
             reproduced += 1
+        if confirmations or (has_reproduction and issue.state in _FIX_STATES):
+            confirmed += 1
         if issue.owner_team:
             load = owner_load.setdefault(
                 issue.owner_team,

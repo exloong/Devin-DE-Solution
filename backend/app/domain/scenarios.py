@@ -167,8 +167,8 @@ SCENARIOS: tuple[Scenario, ...] = (
                 ActorRole.AGENT,
                 {
                     "session_id": SESSION_PLACEHOLDER,
-                    "reproduced": True,
-                    "summary": "500 reproduced on target; control passes.",
+                    "reproduced": False,
+                    "summary": "No 500 on target or control with 25 tags; owner input needed.",
                     "evidence": [
                         {"kind": "reproduction_plan", "title": "Reproduction plan"},
                         {"kind": "fixture_manifest", "title": "Fixture manifest"},
@@ -203,15 +203,6 @@ SCENARIOS: tuple[Scenario, ...] = (
                 },
                 login="devin-repro",
                 revision=1,
-            ),
-            Step(
-                EventType.OWNER_DECISION,
-                ActorRole.OWNER,
-                {
-                    "decision": "confirm_bug",
-                    "rationale": "Configured limit must apply to CSV exports.",
-                },
-                login="core-platform-lead",
             ),
             Step(EventType.FIX_SESSION_STARTED, ActorRole.SYSTEM, {}),
             Step(

@@ -523,12 +523,14 @@ class FakeDevinSessionAdapter:
         session_id: str,
         status: SessionStatus = SessionStatus.RUNNING,
         structured_output: JsonObject | None = None,
+        messages: Sequence[ConversationMessage] = (),
     ) -> SessionSnapshot:
         """Register a session Devin started on its own (native automation trigger).
 
         ``task`` only lends the kind, commit and budget the snapshot needs;
         ``structured_output`` is returned verbatim instead of the deterministic
-        payload so tests can drive the native triage contract.
+        payload so tests can drive the native triage contract. ``messages``
+        seeds the conversation (the automation prompt, Devin's replies).
         """
         normalized = normalize_session_id(session_id)
         with self._lock:
@@ -545,10 +547,30 @@ class FakeDevinSessionAdapter:
                 ),
                 created_at=task.created_at,
                 updated_at=task.created_at,
+                messages=list(messages),
                 structured_output=structured_output,
             )
             self._sessions[normalized] = session
             self._order.append(normalized)
+        return self._snapshot(session)
+
+    def post_devin_message(self, session_id: str, text: str) -> SessionSnapshot:
+        """Append a message authored by Devin (as the messages API reports it)."""
+        with self._lock:
+            session = self._require(session_id)
+            session.updated_at = session.updated_at + timedelta(seconds=30)
+            session.messages.append(
+                ConversationMessage(author="devin", created_at=session.updated_at, text=text)
+            )
+        return self._snapshot(session)
+
+    def set_status(self, session_id: str, status: SessionStatus) -> SessionSnapshot:
+        with self._lock:
+            session = self._require(session_id)
+            session.status = status
+            if status.is_terminal:
+                session.workspace_status = WorkspaceStatus.RELEASED
+            session.updated_at = session.updated_at + timedelta(seconds=30)
         return self._snapshot(session)
 
     def set_structured_output(

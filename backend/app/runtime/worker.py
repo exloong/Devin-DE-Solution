@@ -15,7 +15,7 @@ from app.domain.ports import UnitOfWork
 from app.domain.states import ActorRole, EventType
 from app.domain.transitions import TransitionService
 from app.persistence import runtime_status
-from app.persistence.automation_registry import DatabaseAutomationSecretStore
+from app.persistence.automation_registry import DatabaseAutomationRegistry
 from app.persistence.database import make_engine, upgrade
 from app.persistence.sqlalchemy_uow import SqlAlchemyUnitOfWorkFactory
 from app.runtime.live_worker import LiveWorkerRuntime, live_runtime_from_env
@@ -345,7 +345,7 @@ def main() -> None:
         live_runtime = live_runtime_from_env(
             service,
             uow_factory,
-            automation_secrets=DatabaseAutomationSecretStore(engine, clock=service.clock),
+            automation_registry=DatabaseAutomationRegistry(engine, clock=service.clock),
         )
         for kind, handle in live_runtime.automation_handles().items():
             LOGGER.info("devin %s automation %s ready", kind.value, handle.automation_id)

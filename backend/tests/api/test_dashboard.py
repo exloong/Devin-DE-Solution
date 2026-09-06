@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from app.api import dashboard
 from app.api.schemas import DashboardSummary
+from app.domain.models import AgentSession, SessionBudget
 from app.domain.states import IssueState, SessionKind, SessionState
 from app.persistence import runtime_status
 from app.persistence.runtime_status import StatusRow
@@ -34,13 +35,8 @@ def test_reproduction_is_auto_launched_and_fix_waits_for_owner(h: Harness) -> No
 
     h.clock.advance(minutes=10)
     issue = h.reproduce(issue)
-    assert issue.state == IssueState.NEEDS_OWNER_DECISION
-    with h.uow() as uow:
-        summary = dashboard.summary(uow, h.clock.now(), _rows(h))
-    assert _by_kind(summary, "fix")["total"] == 0
-
-    h.clock.advance(minutes=5)
-    issue = h.confirm(issue)
+    # A reproduced defect authorizes the fix session without an owner click.
+    assert issue.state == IssueState.FIX_PENDING
     with h.uow() as uow:
         summary = dashboard.summary(uow, h.clock.now(), _rows(h))
     fix = _by_kind(summary, "fix")
@@ -52,6 +48,36 @@ def test_reproduction_is_auto_launched_and_fix_waits_for_owner(h: Harness) -> No
         summary = dashboard.summary(uow, h.clock.now(), _rows(h))
     assert _by_kind(summary, "fix")["running"] == 1
     assert [s.kind for s in summary.recent_sessions] == ["fix", "reproduction"]
+
+
+def test_native_triage_sessions_are_listed(h: Harness) -> None:
+    issue = h.open_issue()
+    with h.uow() as uow:
+        uow.add_session(
+            AgentSession(
+                issue_id=issue.id,
+                issue_revision=issue.revision,
+                kind=SessionKind.TRIAGE,
+                title=f"Triage {issue.key}",
+                state=SessionState.RUNNING,
+                target_commit="0" * 40,
+                budget=SessionBudget(
+                    wall_clock_seconds=5_400,
+                    max_retries=1,
+                    allowed_capabilities=["read_issue_context"],
+                    max_output_bytes=262_144,
+                ),
+                workspace_released=False,
+                workspace_name="superset-triage-1",
+                trigger="github:issues",
+                correlation_id=issue.correlation_id,
+                created_at=h.clock.now(),
+                updated_at=h.clock.now(),
+            )
+        )
+    with h.uow() as uow:
+        summary = dashboard.summary(uow, h.clock.now(), _rows(h))
+    assert [(s.kind, s.status) for s in summary.recent_sessions] == [("triage", "running")]
 
 
 def test_success_rate_and_median_duration_are_derived_from_sessions(h: Harness) -> None:
@@ -67,12 +93,14 @@ def test_success_rate_and_median_duration_are_derived_from_sessions(h: Harness) 
     assert repro["completed"] == 2 and repro["failed"] == 0
     assert repro["success_rate_pct"] == 100.0
     assert repro["median_duration_seconds"] == 1200.0
-    durations = sorted(s.duration_seconds for s in summary.recent_sessions)
-    assert durations == [600.0, 1800.0]
+    repro_rows = [s for s in summary.recent_sessions if s.kind == "reproduction"]
+    assert sorted(s.duration_seconds or 0 for s in repro_rows) == [600.0, 1800.0]
     with h.uow() as uow:
         sessions = uow.list_sessions()
-        assert all(s.kind == SessionKind.REPRODUCTION for s in sessions)
-        assert all(s.state == SessionState.COMPLETED for s in sessions)
+        repro_sessions = [s for s in sessions if s.kind == SessionKind.REPRODUCTION]
+        assert all(s.state == SessionState.COMPLETED for s in repro_sessions)
+        # Each reproduced defect auto-queued its fix session.
+        assert len([s for s in sessions if s.kind == SessionKind.FIX]) == 2
 
 
 def test_throughput_and_in_flight_counts_come_from_issue_records(h: Harness) -> None:
