@@ -70,6 +70,7 @@ def _webhook(
     payload: dict[str, object],
     delivery: str,
     *,
+    event: str = "issues",
     valid_signature: bool = True,
 ) -> Response:
     body = json.dumps(payload, separators=(",", ":")).encode()
@@ -82,7 +83,7 @@ def _webhook(
         headers={
             "Content-Type": "application/json",
             "X-GitHub-Delivery": delivery,
-            "X-GitHub-Event": "issues",
+            "X-GitHub-Event": event,
             "X-Hub-Signature-256": f"sha256={signature}",
         },
     )
@@ -154,6 +155,27 @@ def test_github_webhook_is_signed_scoped_and_idempotent(
     )
     assert unsigned.status_code == 401
     assert unsigned.json()["error"]["code"] == "invalid_signature"
+
+
+def test_github_webhook_accepts_ping_without_creating_an_issue(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    payload: dict[str, object] = {
+        "repository": {"full_name": TARGET_REPOSITORY},
+        "sender": {"login": "github"},
+        "zen": "Keep it logically awesome.",
+    }
+
+    accepted = _webhook(client, payload, "webhook-ping-1", event="ping")
+
+    assert accepted.status_code == 202
+    assert accepted.json() == {
+        "accepted": True,
+        "delivery": "webhook-ping-1",
+        "action": "ignored",
+    }
+    assert _get(client, f"{API}/issues").json()["total"] == len(SCENARIO_NAMES)
 
 
 def test_github_webhook_secret_can_be_loaded_from_file(

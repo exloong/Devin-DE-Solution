@@ -897,14 +897,22 @@ class LiveDevinSessionClient:
                 ValidationCode.MALFORMED_RESPONSE,
                 "session belongs to another organization",
             )
+        status_detail = optional_str(payload, "status_detail", action=action)
         status = map_session_status(
             require_str(payload, "status", action=action),
-            optional_str(payload, "status_detail", action=action),
+            status_detail,
         )
         is_archived = _optional_bool(payload, "is_archived", action=action) or False
         if is_archived and not status.is_terminal:
             status = SessionStatus.CANCELLED
         structured_output = optional_object(payload, "structured_output", action=action)
+        if (
+            status is SessionStatus.NEEDS_ATTENTION
+            and status_detail is not None
+            and status_detail.strip().lower() == "waiting_for_user"
+            and structured_output is not None
+        ):
+            status = SessionStatus.COMPLETED
         tags = string_tuple(payload.get("tags"), action=action)
         target_commit = _commit_from_tags(tags, task)
         created_at = parse_timestamp(
