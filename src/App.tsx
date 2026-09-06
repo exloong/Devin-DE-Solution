@@ -47,11 +47,13 @@ import {
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import {
+  devinSessions,
   flowSteps,
   issues,
   outcomeData,
   ownerLoad,
   weeklyVolume,
+  type DevinSession,
   type FlowStep,
   type Issue,
   type ViewKey,
@@ -60,6 +62,8 @@ import {
 const navItems: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[] = [
   { key: 'overview', label: 'Overview', icon: LayoutDashboard },
   { key: 'workflow', label: 'Flow designer', icon: Network },
+  { key: 'experience', label: 'Human experience', icon: Users },
+  { key: 'sessions', label: 'Devin sessions', icon: Activity },
   { key: 'issues', label: 'Issue workbench', icon: Inbox },
   { key: 'settings', label: 'Configuration', icon: Settings2 },
 ];
@@ -72,6 +76,14 @@ const stateClass: Record<Issue['state'], string> = {
   'PR in review': 'blue',
   Redirected: 'gray',
   'Closed · inactive': 'rose',
+};
+
+const sessionStateClass: Record<DevinSession['status'], string> = {
+  Running: 'running',
+  Queued: 'queued',
+  'Needs attention': 'attention',
+  'Waiting on owner': 'waiting',
+  Completed: 'completed',
 };
 
 function Logo() {
@@ -90,6 +102,7 @@ function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [mobileNav, setMobileNav] = useState(false);
   const selectedIssue = issues.find(issue => issue.id === selectedIssueId) ?? issues[0];
+  const runningSessionCount = devinSessions.filter(session => session.status === 'Running').length;
 
   const notify = (message: string) => {
     setToast(message);
@@ -130,6 +143,7 @@ function App() {
               >
                 <Icon size={18} strokeWidth={1.9} />
                 <span>{item.label}</span>
+                {item.key === 'sessions' && <b>{runningSessionCount}</b>}
                 {item.key === 'issues' && <b>6</b>}
               </button>
             );
@@ -198,7 +212,13 @@ function App() {
               <Bell size={18} />
               <span className="notification-dot" />
             </button>
-            <button className="primary-button" onClick={() => goToIssue(43218)}>
+            <button
+              className="primary-button"
+              onClick={() => {
+                setView('sessions');
+                notify('Dry-run reproduction session queued');
+              }}
+            >
               <Play size={16} fill="currentColor" />
               Run dry test
             </button>
@@ -208,6 +228,8 @@ function App() {
         <div className="page">
           {view === 'overview' && <Overview goToIssue={goToIssue} />}
           {view === 'workflow' && <Workflow notify={notify} />}
+          {view === 'experience' && <ExperiencePreview notify={notify} />}
+          {view === 'sessions' && <DevinSessions goToIssue={goToIssue} notify={notify} />}
           {view === 'issues' && (
             <IssueWorkbench
               selected={selectedIssue}
@@ -315,7 +337,16 @@ function Overview({ goToIssue }: { goToIssue: (id: number) => void }) {
           <CardHeader
             title="Pipeline throughput"
             subtitle="Issues entering and leaving the pipeline each week"
-            action={<button className="text-button">View report <ArrowRight size={14} /></button>}
+            action={
+              <a
+                className="text-button"
+                href="/reports/apache-superset/issue-intake-2025-09-05-to-2026-09-04.html"
+                target="_blank"
+                rel="noreferrer"
+              >
+                View research <ArrowRight size={14} />
+              </a>
+            }
           />
           <LineChart />
           <div className="chart-legend">
@@ -556,6 +587,650 @@ function StateBadge({ state }: { state: Issue['state'] }) {
 
 function Avatar({ initials, size = 'normal' }: { initials: string; size?: 'normal' | 'small' }) {
   return <span className={`avatar ${size}`}>{initials}</span>;
+}
+
+function SessionStatus({ status }: { status: DevinSession['status'] }) {
+  return (
+    <span className={`session-status ${sessionStateClass[status]}`}>
+      <i />
+      {status}
+    </span>
+  );
+}
+
+function DevinSessions({
+  goToIssue,
+  notify,
+}: {
+  goToIssue: (id: number) => void;
+  notify: (message: string) => void;
+}) {
+  const [selectedSessionId, setSelectedSessionId] = useState(devinSessions[0].id);
+  const [filter, setFilter] = useState<'live' | 'attention' | 'all'>('live');
+  const [detailTab, setDetailTab] = useState<'activity' | 'artifacts' | 'guardrails'>('activity');
+  const visibleSessions = devinSessions.filter(session => {
+    if (filter === 'attention') return session.status === 'Needs attention';
+    if (filter === 'all') return true;
+    return session.status !== 'Completed';
+  });
+  const selected = visibleSessions.find(session => session.id === selectedSessionId) ?? visibleSessions[0] ?? devinSessions[0];
+  const runningCount = devinSessions.filter(session => session.status === 'Running').length;
+  const queuedCount = devinSessions.filter(session => session.status === 'Queued').length;
+  const attentionCount = devinSessions.filter(session => session.status === 'Needs attention').length;
+  const waitingCount = devinSessions.filter(session => session.status === 'Waiting on owner').length;
+
+  const selectSession = (id: string) => {
+    setSelectedSessionId(id);
+    setDetailTab('activity');
+  };
+
+  return (
+    <>
+      <PageHeader
+        eyebrow="Bounded agent execution"
+        title="Devin sessions"
+        description="See every agent run created by the issue flow, what triggered it, and where human attention is required."
+        actions={
+          <>
+            <button className="secondary-button" onClick={() => notify('Session data refreshed')}>
+              <RefreshCw size={15} /> Live · 18s ago
+            </button>
+            <button className="primary-button" onClick={() => notify('Dry-run reproduction session queued')}>
+              <Plus size={15} /> Run dry test
+            </button>
+          </>
+        }
+      />
+
+      <section className="session-summary" aria-label="Devin session summary">
+        <div className="card">
+          <span className="session-summary-icon running"><Activity size={17} /></span>
+          <div><strong>{runningCount}</strong><span>Agents running</span></div>
+          <small>of 6 workspace slots</small>
+        </div>
+        <div className="card">
+          <span className="session-summary-icon queued"><Clock3 size={17} /></span>
+          <div><strong>{queuedCount}</strong><span>Queued trigger</span></div>
+          <small>next slot in ~4 min</small>
+        </div>
+        <div className="card">
+          <span className="session-summary-icon attention"><AlertTriangle size={17} /></span>
+          <div><strong>{attentionCount}</strong><span>Needs attention</span></div>
+          <small>environment recovery</small>
+        </div>
+        <div className="card">
+          <span className="session-summary-icon released"><Pause size={17} /></span>
+          <div><strong>{waitingCount}</strong><span>Waiting on human</span></div>
+          <small>workspace already released</small>
+        </div>
+      </section>
+
+      <section className="session-monitor card">
+        <aside className="session-list-panel">
+          <div className="session-list-head">
+            <div>
+              <p className="eyebrow">Flow-triggered runs</p>
+              <strong>Session queue</strong>
+            </div>
+            <span className="live-indicator"><i /> Live</span>
+          </div>
+          <div className="session-filters">
+            <button className={filter === 'live' ? 'active' : ''} onClick={() => setFilter('live')}>Live & waiting</button>
+            <button className={filter === 'attention' ? 'active' : ''} onClick={() => setFilter('attention')}>Attention</button>
+            <button className={filter === 'all' ? 'active' : ''} onClick={() => setFilter('all')}>All</button>
+          </div>
+          <div className="session-list">
+            {visibleSessions.map(session => (
+              <button
+                className={`session-list-item ${selected.id === session.id ? 'selected' : ''}`}
+                onClick={() => selectSession(session.id)}
+                key={session.id}
+              >
+                <div className="session-list-row">
+                  <SessionStatus status={session.status} />
+                  <small>{session.id}</small>
+                </div>
+                <strong>{session.title}</strong>
+                <span>{session.issueKey} · {session.flowStep}</span>
+                <div className="session-mini-progress">
+                  <i style={{ width: `${session.progress}%` }} />
+                </div>
+                <div className="session-list-foot">
+                  <span><Clock3 size={11} /> {session.elapsed}</span>
+                  <span>{session.updated}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+          <div className="session-list-policy">
+            <ShieldCheck size={15} />
+            <span><strong>No idle agents.</strong> Human waits release the workspace and resume through a new event.</span>
+          </div>
+        </aside>
+
+        <div className="session-detail">
+          <div className="session-detail-head">
+            <div className="session-title">
+              <span className={`session-agent-icon ${sessionStateClass[selected.status]}`}><Bot size={21} /></span>
+              <div>
+                <span>{selected.id} · {selected.actor}</span>
+                <h2>{selected.title}</h2>
+                <button onClick={() => goToIssue(selected.issueId)}>{selected.issueKey} · {selected.issueTitle} <ChevronRight size={13} /></button>
+              </div>
+            </div>
+            <div className="session-head-actions">
+              <SessionStatus status={selected.status} />
+              {selected.status === 'Running' && (
+                <button className="icon-button" onClick={() => notify(`${selected.id} pause requested`)} aria-label="Pause session">
+                  <Pause size={16} />
+                </button>
+              )}
+              <button className="secondary-button" onClick={() => notify(`${selected.id} opened in Devin`)}>
+                Open session <ArrowRight size={14} />
+              </button>
+            </div>
+          </div>
+
+          <div className={`session-current-work ${sessionStateClass[selected.status]}`}>
+            <span>
+              {selected.status === 'Running' ? <Activity size={17} /> : selected.status === 'Needs attention' ? <AlertTriangle size={17} /> : <Clock3 size={17} />}
+            </span>
+            <div>
+              <small>{selected.status === 'Running' ? 'Working on' : selected.status === 'Needs attention' ? 'Blocked at' : 'Current state'}</small>
+              <strong>{selected.currentAction}</strong>
+            </div>
+            <div className="session-elapsed">
+              <small>Elapsed / budget</small>
+              <strong>{selected.elapsed} <span>/ {selected.budget}</span></strong>
+            </div>
+          </div>
+
+          <div className="session-progress-block">
+            <div>
+              <span>Session progress</span>
+              <strong>{selected.progress}%</strong>
+            </div>
+            <div className="session-progress-track"><i style={{ width: `${selected.progress}%` }} /></div>
+            <small>Next checkpoint: {selected.nextCheckpoint}</small>
+          </div>
+
+          <div className="session-tabs" role="tablist" aria-label="Session details">
+            {[
+              ['activity', 'Activity'],
+              ['artifacts', `Artifacts · ${selected.artifacts.length}`],
+              ['guardrails', 'Guardrails'],
+            ].map(([key, label]) => (
+              <button
+                className={detailTab === key ? 'active' : ''}
+                onClick={() => setDetailTab(key as typeof detailTab)}
+                role="tab"
+                aria-selected={detailTab === key}
+                key={key}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <div className="session-detail-body">
+            <div className="session-detail-primary">
+              {detailTab === 'activity' && (
+                <div className="session-timeline">
+                  <div className="session-section-title">
+                    <div><p className="eyebrow">Execution trace</p><h3>What this session has done</h3></div>
+                    <span>Updated {selected.updated}</span>
+                  </div>
+                  {selected.events.map(event => (
+                    <div className={`session-event ${event.state}`} key={`${selected.id}-${event.label}`}>
+                      <i>{event.state === 'complete' ? <Check size={12} /> : event.state === 'blocked' ? <AlertTriangle size={12} /> : <span />}</i>
+                      <div><strong>{event.label}</strong><span>{event.detail}</span></div>
+                      <small>{event.time}</small>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {detailTab === 'artifacts' && (
+                <div className="session-artifacts">
+                  <div className="session-section-title">
+                    <div><p className="eyebrow">Portable evidence</p><h3>Outputs attached to the issue lifecycle</h3></div>
+                  </div>
+                  {selected.artifacts.map((artifact, index) => (
+                    <button onClick={() => notify(`${artifact} preview opened`)} key={artifact}>
+                      <span><FileCheck2 size={17} /></span>
+                      <div><strong>{artifact}</strong><small>{index === 0 ? 'Primary output' : 'Supporting evidence'} · retained with issue state</small></div>
+                      <ChevronRight size={15} />
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {detailTab === 'guardrails' && (
+                <div className="session-guardrails">
+                  <div className="session-section-title">
+                    <div><p className="eyebrow">Execution contract</p><h3>Limits applied to this run</h3></div>
+                  </div>
+                  {[
+                    ['Bounded runtime', `${selected.budget} maximum; no unattended continuation`],
+                    ['Isolated workspace', 'No reporter production data or credentials are available'],
+                    ['Narrow scope', `Only the ${selected.flowStep.toLowerCase()} transition is authorized`],
+                    ['Human gates', 'No merge, issue closure, or expected-behavior decision'],
+                  ].map(([label, copy]) => (
+                    <div className="guardrail-row" key={label}>
+                      <ShieldCheck size={16} />
+                      <div><strong>{label}</strong><span>{copy}</span></div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <aside className="session-context">
+              <div>
+                <p className="eyebrow">Flow linkage</p>
+                <span><small>Triggered by</small><strong>{selected.trigger}</strong></span>
+                <span><small>Flow step</small><strong>{selected.flowStep}</strong></span>
+                <span><small>Started</small><strong>{selected.started}</strong></span>
+                <span><small>Environment</small><strong>{selected.environment}</strong></span>
+                {selected.branch && <span><small>Working branch</small><strong>{selected.branch}</strong></span>}
+              </div>
+              <div>
+                <p className="eyebrow">Operator controls</p>
+                {selected.status === 'Needs attention' ? (
+                  <button className="primary-button" onClick={() => notify('Recovery options opened')}>
+                    Review recovery options
+                  </button>
+                ) : selected.status === 'Waiting on owner' ? (
+                  <button className="primary-button" onClick={() => goToIssue(selected.issueId)}>
+                    Open owner decision
+                  </button>
+                ) : (
+                  <button className="secondary-button" onClick={() => notify('Session logs exported')}>
+                    <TerminalSquare size={14} /> Export run log
+                  </button>
+                )}
+                <button className="text-button" onClick={() => notify('Flow definition opened')}>
+                  View trigger in flow <ArrowRight size={13} />
+                </button>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </section>
+    </>
+  );
+}
+
+function ExperiencePreview({ notify }: { notify: (message: string) => void }) {
+  const [persona, setPersona] = useState<'reporter' | 'owner'>('reporter');
+  const [reporterStep, setReporterStep] = useState<'answering' | 'submitted'>('answering');
+  const [refreshPath, setRefreshPath] = useState('Dashboard refresh icon');
+  const [featureFlagResponse, setFeatureFlagResponse] = useState<'provided' | 'unavailable' | null>(null);
+  const [ownerDecision, setOwnerDecision] = useState<'pending' | 'confirmed' | 'more-info'>('pending');
+
+  const submitReporterResponse = () => {
+    if (featureFlagResponse === null) {
+      notify('Answer the remaining question or choose a safe alternative');
+      return;
+    }
+    setReporterStep('submitted');
+    notify(
+      featureFlagResponse === 'provided'
+        ? 'Reporter response accepted; reproduction queued'
+        : 'Reporter response accepted; alternative evidence review queued',
+    );
+  };
+
+  const decide = (decision: 'confirmed' | 'more-info') => {
+    setOwnerDecision(decision);
+    notify(decision === 'confirmed' ? 'Bug confirmed; bounded fix authorized' : 'One follow-up drafted');
+  };
+
+  return (
+    <>
+      <PageHeader
+        eyebrow="Human-centered automation"
+        title="Experience preview"
+        description="Review exactly what an issue reporter and a code owner see at each human handoff."
+        actions={
+          <a
+            className="secondary-button"
+            href="/reports/apache-superset/issue-intake-2025-09-05-to-2026-09-04.html"
+            target="_blank"
+            rel="noreferrer"
+          >
+            <BarChart3 size={15} /> Research baseline
+          </a>
+        }
+      />
+
+      <div className="experience-switcher card">
+        <div className="persona-tabs" role="tablist" aria-label="Experience persona">
+          <button
+            className={persona === 'reporter' ? 'active' : ''}
+            onClick={() => setPersona('reporter')}
+            role="tab"
+            aria-selected={persona === 'reporter'}
+          >
+            <MessageCircleMore size={17} />
+            <span><strong>Issue reporter</strong><small>Guided evidence, no jargon</small></span>
+          </button>
+          <button
+            className={persona === 'owner' ? 'active' : ''}
+            onClick={() => setPersona('owner')}
+            role="tab"
+            aria-selected={persona === 'owner'}
+          >
+            <FileCheck2 size={17} />
+            <span><strong>Code owner</strong><small>Decision-ready evidence</small></span>
+          </button>
+        </div>
+        <div className="experience-scenario">
+          <span className="micro-badge violet">Scenario</span>
+          <strong>SUP-43218</strong>
+          <span>Incomplete UI regression · reminder day 6</span>
+        </div>
+      </div>
+
+      {persona === 'reporter' ? (
+        <section className="reporter-experience">
+          <div className="reporter-main card">
+            <div className="portal-bar">
+              <div><Logo /><strong>Issue helper</strong></div>
+              <span><ShieldCheck size={14} /> Public-safe guidance</span>
+            </div>
+
+            {reporterStep === 'submitted' ? (
+              <div className="reporter-success">
+                <span className="success-mark"><Check size={23} /></span>
+                <p className="eyebrow">Response received</p>
+                <h2>
+                  {featureFlagResponse === 'provided'
+                    ? 'Thanks—this is ready for a clean reproduction.'
+                    : 'Thanks—we will use a safe alternative.'}
+                </h2>
+                <p>
+                  {featureFlagResponse === 'provided'
+                    ? 'We will test the dashboard refresh path on Superset 6.1 and current master. You will get the result here; no further reply is needed unless one specific discriminator is missing.'
+                    : 'A maintainer will select a public fixture or request one safer discriminator. You do not need to expose private deployment configuration.'}
+                </p>
+                <div className="success-next">
+                  <div>
+                    <span>Next step</span>
+                    <strong>{featureFlagResponse === 'provided' ? 'Reproduction queued' : 'Alternative evidence review'}</strong>
+                  </div>
+                  <div><span>Expected update</span><strong>Within 1 business day</strong></div>
+                  <div><span>Your issue</span><strong>Stays open</strong></div>
+                </div>
+                <button className="secondary-button" onClick={() => setReporterStep('answering')}>
+                  <RotateCcw size={15} /> Review submitted answers
+                </button>
+              </div>
+            ) : (
+              <>
+                <div className="reporter-request">
+                  <div className="request-icon"><MessageCircleMore size={23} /></div>
+                  <div>
+                    <p className="eyebrow">Two details needed</p>
+                    <h2>Help us reproduce the filter reset safely</h2>
+                    <p>Your report looks like a product bug. These answers separate an in-app refresh defect from browser or deployment behavior.</p>
+                  </div>
+                  <span className="due-chip"><Clock3 size={13} /> Reply by Sep 12</span>
+                </div>
+
+                <div className="reporter-progress" aria-label="Reporter progress">
+                  {[
+                    ['Report received', true],
+                    ['Answer 2 questions', false],
+                    ['We reproduce', false],
+                    ['You get an update', false],
+                  ].map(([label, complete], index) => (
+                    <div className={complete ? 'complete' : index === 1 ? 'current' : ''} key={String(label)}>
+                      <i>{complete ? <Check size={12} /> : index + 1}</i>
+                      <span>{label}</span>
+                      {index < 3 && <b />}
+                    </div>
+                  ))}
+                </div>
+
+                <div className="guided-question">
+                  <div className="question-number">1</div>
+                  <div className="question-content">
+                    <div className="question-heading">
+                      <div>
+                        <span>Required · about 10 seconds</span>
+                        <h3>Which refresh action resets the filters?</h3>
+                      </div>
+                      <span className="answered-chip"><Check size={12} /> Answered</span>
+                    </div>
+                    <p className="why-copy"><HelpCircle size={14} /> Why we ask: each refresh path uses different dashboard state code.</p>
+                    <div className="choice-grid">
+                      {['Dashboard refresh icon', 'Browser refresh', 'Both actions'].map(choice => (
+                        <button
+                          className={refreshPath === choice ? 'selected' : ''}
+                          onClick={() => setRefreshPath(choice)}
+                          key={choice}
+                        >
+                          <i>{refreshPath === choice && <Check size={12} />}</i>
+                          {choice}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="guided-question">
+                  <div className="question-number">2</div>
+                  <div className="question-content">
+                    <div className="question-heading">
+                      <div>
+                        <span>Required · about 2 minutes</span>
+                        <h3>Share only the dashboard feature flags involved</h3>
+                      </div>
+                      {featureFlagResponse === null ? (
+                        <span className="needed-chip">Still needed</span>
+                      ) : (
+                        <span className="answered-chip">
+                          <Check size={12} />
+                          {featureFlagResponse === 'provided' ? 'Answered' : 'Alternative requested'}
+                        </span>
+                      )}
+                    </div>
+                    <p className="why-copy"><HelpCircle size={14} /> Why we ask: the report started after an upgrade and may depend on the dashboard state model.</p>
+                    <div className={`safe-command ${featureFlagResponse === 'provided' ? 'selected' : ''}`}>
+                      <code>DASHBOARD_RBAC=true, NATIVE_FILTERS=true</code>
+                      <button
+                        onClick={() => {
+                          setFeatureFlagResponse('provided');
+                          notify('Safe example selected');
+                        }}
+                      >
+                        {featureFlagResponse === 'provided' ? 'Selected' : 'Use safe example'}
+                      </button>
+                    </div>
+                    <div className="privacy-note">
+                      <ShieldCheck size={16} />
+                      <span><strong>Keep private data out.</strong> Do not paste credentials, internal URLs, production records, or your full configuration.</span>
+                    </div>
+                    <button
+                      className={`cannot-answer ${featureFlagResponse === 'unavailable' ? 'selected' : ''}`}
+                      onClick={() => {
+                        setFeatureFlagResponse('unavailable');
+                        notify('Safe alternative selected');
+                      }}
+                    >
+                      {featureFlagResponse === 'unavailable' ? 'Safe alternative selected' : 'I cannot provide this'}
+                      <ChevronRight size={14} />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="reporter-submit">
+                  <div>
+                    <strong>
+                      {featureFlagResponse === null
+                        ? 'One answer is still needed.'
+                        : featureFlagResponse === 'provided'
+                          ? 'That is everything we need.'
+                          : 'We will route around the unavailable detail.'}
+                    </strong>
+                    <span>
+                      {featureFlagResponse === null
+                        ? 'Use the safe example or request an alternative before submitting.'
+                        : 'You can edit these answers later. Submitting does not run code from your environment.'}
+                    </span>
+                  </div>
+                  <button
+                    className="primary-button"
+                    disabled={featureFlagResponse === null}
+                    onClick={submitReporterResponse}
+                  >
+                    {featureFlagResponse === 'unavailable'
+                      ? 'Submit for alternative review'
+                      : 'Submit and queue reproduction'}
+                    <ArrowRight size={15} />
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+
+          <aside className="reporter-aside">
+            <div className="card reporter-policy">
+              <p className="eyebrow">What happens next</p>
+              {[
+                ['1', 'Clean environment', 'We recreate the behavior without your data.'],
+                ['2', 'Target + control', 'We compare 6.1 with current master.'],
+                ['3', 'Clear outcome', 'You receive evidence or one focused follow-up.'],
+              ].map(([number, title, copy]) => (
+                <div className="policy-step" key={number}>
+                  <i>{number}</i>
+                  <div><strong>{title}</strong><span>{copy}</span></div>
+                </div>
+              ))}
+            </div>
+            <div className="card reporter-timing">
+              <p className="eyebrow">If you need more time</p>
+              <h3>No surprise closure</h3>
+              <p>We send a gentle reminder, then a final notice with the planned date. New evidence reopens the issue automatically.</p>
+              <div className="mini-timeline">
+                <span className="active"><i />Today <b>Request</b></span>
+                <span><i />7d <b>Reminder</b></span>
+                <span><i />14d <b>Final notice</b></span>
+                <span><i />21d <b>Inactive</b></span>
+              </div>
+            </div>
+            <div className="card reporter-help">
+              <HelpCircle size={18} />
+              <div><strong>Not sure how to answer?</strong><span>Choose “I cannot provide this” for a safer alternative or maintainer help.</span></div>
+            </div>
+          </aside>
+        </section>
+      ) : (
+        <section className="owner-experience">
+          <div className="owner-main card">
+            <div className="owner-brief-head">
+              <div>
+                <p className="eyebrow">Decision packet · SUP-43218</p>
+                <h2>Confirm expected behavior before code work starts</h2>
+                <p>Relay condensed the reporter thread into portable evidence. No branch or pull request exists yet.</p>
+              </div>
+              <span className="micro-badge green">Evidence ready</span>
+            </div>
+
+            {ownerDecision !== 'pending' && (
+              <div className={`decision-result ${ownerDecision}`}>
+                {ownerDecision === 'confirmed' ? <Check size={18} /> : <HelpCircle size={18} />}
+                <div>
+                  <strong>{ownerDecision === 'confirmed' ? 'Bug confirmed and fix authorized' : 'One targeted follow-up requested'}</strong>
+                  <span>{ownerDecision === 'confirmed' ? 'A bounded Devin session will draft a regression test and minimal fix.' : 'The reporter will see only the missing discriminator, not a repeated checklist.'}</span>
+                </div>
+                <button onClick={() => setOwnerDecision('pending')}>Undo</button>
+              </div>
+            )}
+
+            <div className="owner-question">
+              <span>Decision</span>
+              <h3>Should an in-app dashboard refresh preserve applied native filters?</h3>
+              <p>Current policy and existing tests suggest yes. Confirming authorizes a fix attempt; it does not approve or merge code.</p>
+            </div>
+
+            <div className="behavior-comparison">
+              <div className="observed">
+                <span>Observed on 6.1.0</span>
+                <strong>Filters reset after dashboard refresh</strong>
+                <small><AlertTriangle size={13} /> Failed 3 of 3 isolated runs</small>
+              </div>
+              <ArrowRight size={19} />
+              <div className="expected">
+                <span>Control on 6.0.0</span>
+                <strong>Filter state remains applied</strong>
+                <small><Check size={13} /> Passed 3 of 3 isolated runs</small>
+              </div>
+            </div>
+
+            <div className="owner-facts">
+              {[
+                ['Regression window', '6.0.0 → 6.1.0'],
+                ['Minimal condition', 'DASHBOARD_RBAC + refresh icon'],
+                ['Likely component', 'dashboard / native filters'],
+                ['Reporter data', 'Not required to reproduce'],
+                ['Regression test', 'Drafted; fails before fix'],
+                ['Security signal', 'None detected'],
+              ].map(([label, value]) => (
+                <div key={label}><span>{label}</span><strong>{value}</strong></div>
+              ))}
+            </div>
+
+            <div className="owner-actions">
+              <button className="decision-button confirm" onClick={() => decide('confirmed')}>
+                <Check size={18} />
+                <span><strong>Confirm bug & authorize fix</strong><small>Regression test first · no automatic merge</small></span>
+              </button>
+              <button className="decision-button" onClick={() => decide('more-info')}>
+                <HelpCircle size={18} />
+                <span><strong>Need one more discriminator</strong><small>Draft a single focused reporter question</small></span>
+              </button>
+              <button className="decision-button" onClick={() => notify('Reclassification options opened')}>
+                <ArrowDownRight size={18} />
+                <span><strong>Reclassify outcome</strong><small>Support, expected behavior, duplicate, unsupported</small></span>
+              </button>
+              <button className="decision-button danger" onClick={() => notify('Public processing stopped; private route opened')}>
+                <ShieldCheck size={18} />
+                <span><strong>Route as security-sensitive</strong><small>Stop public analysis immediately</small></span>
+              </button>
+            </div>
+          </div>
+
+          <aside className="owner-aside">
+            <div className="card owner-sla">
+              <p className="eyebrow">Owner attention</p>
+              <div><Avatar initials="DX" /><span><strong>Dashboard Experience</strong><small>Suggested by component map</small></span></div>
+              <hr />
+              <span>Decision requested <strong>2h ago</strong></span>
+              <span>Target response <strong>3 business days</strong></span>
+              <span>Escalation <strong>Triage rotation</strong></span>
+            </div>
+            <div className="card automation-contract">
+              <p className="eyebrow">If you confirm</p>
+              <h3>Bounded fix contract</h3>
+              <ul>
+                <li><Check size={13} /> Create a failing regression test</li>
+                <li><Check size={13} /> Implement the smallest scoped fix</li>
+                <li><Check size={13} /> Run affected checks</li>
+                <li><Check size={13} /> Open a linked draft PR</li>
+                <li><LockKeyhole size={13} /> Wait for owner approval</li>
+              </ul>
+            </div>
+            <div className="card owner-control">
+              <ShieldCheck size={18} />
+              <div><strong>Human authority is preserved</strong><span>Owner silence escalates; it never closes a reproduced bug or merges a change.</span></div>
+            </div>
+          </aside>
+        </section>
+      )}
+    </>
+  );
 }
 
 function Workflow({ notify }: { notify: (message: string) => void }) {
