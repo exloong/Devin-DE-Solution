@@ -17,7 +17,7 @@ import {
   Users,
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import type { InformationRequest, IssueDetail, IssueSummary, LifecycleEvent, LifecycleState, OwnerDecisionCommand } from '../api';
+import type { InformationRequest, IssueDetail, IssueSummary, LifecycleEvent, LifecycleState, OwnerDecisionCommand, SessionSummary } from '../api';
 import {
   formatDateTime,
   formatRelative,
@@ -28,8 +28,13 @@ import {
   useOwnerDecision,
   useReporterResponse,
   useRetryIssue,
+  useSessions,
+  actorLabel,
+  elapsedSeconds,
+  formatDuration,
   type CommandState,
   type Resource,
+  type SessionPage,
 } from '../hooks';
 import type { Page } from '../api';
 import { DataSourceBadge, ResourceNotice } from './DataSourceBadge';
@@ -120,7 +125,7 @@ const listFilterStates: Record<ListFilter, LifecycleState[] | undefined> = {
   waiting: ['awaiting_reporter'],
   decision: ['needs_owner_decision'],
   review: ['pr_open', 'awaiting_owner', 'changes_requested'],
-  attention: ['blocked_environment', 'automation_error'],
+  attention: ['blocked_environment', 'automation_error', 'needs_owner_decision'],
 };
 
 export function LiveIssueWorkbench({
@@ -208,6 +213,81 @@ export function LiveIssueWorkbench({
   );
 }
 
+const sessionStatusLabel: Record<SessionSummary['status'], string> = {
+  queued: 'Queued',
+  running: 'Running',
+  completed: 'Succeeded',
+  failed: 'Failed',
+  needs_attention: 'Needs attention',
+  cancelled: 'Cancelled',
+};
+
+/**
+ * Surfaces both Devin trigger points for one issue: the reproduction session
+ * Relay auto-launches once context is complete, and the fix session that only
+ * exists after an owner authorized it.
+ */
+function IssueSessionsPanel({ issue, sessions, now }: { issue: IssueSummary; sessions: Resource<SessionPage>; now: number }) {
+  const items = sessions.data?.items ?? [];
+  const byKind = (kind: SessionSummary['kind']) => items.filter(session => session.kind === kind).sort((a, b) => b.created_at.localeCompare(a.created_at));
+  const reproduction = byKind('reproduction');
+  const fix = byKind('fix');
+  const reproductionExpected = issue.state === 'reproducing' || issue.state === 'blocked_environment';
+  const fixExpected = issue.state === 'fix_authorized' || issue.state === 'fixing';
+  const render = (kind: SessionSummary['kind'], list: SessionSummary[], expected: boolean, idle: string) => {
+    const latest = list[0];
+    return (
+      <div className={`live-session-panel ${kind}`} key={kind}>
+        <header>
+          <strong>
+            <Bot size={15} /> {kind === 'reproduction' ? 'Reproduction session · auto-launched' : 'Fix session · owner-authorized'}
+          </strong>
+          {latest ? (
+            <span className={`session-status ${latest.status.replace('needs_attention', 'attention')}`}>
+              <i />
+              {sessionStatusLabel[latest.status]}
+              {latest.dry_run ? ' · dry run' : ''}
+            </span>
+          ) : expected ? (
+            <span className="session-status queued">
+              <Loader2 size={12} className="spin" /> Launching
+            </span>
+          ) : (
+            <span className="micro-badge">Not launched</span>
+          )}
+        </header>
+        {latest ? (
+          <>
+            <p>
+              {actorLabel(latest)} · {latest.title} · elapsed {formatDuration(elapsedSeconds(parseTime(latest.started_at), parseTime(latest.ended_at), now) ?? 0)}
+              {latest.current_action ? ` · ${latest.current_action}` : ''}
+            </p>
+            <div className="session-links">
+              <SafeLink
+                href={latest.devin_session_url}
+                policy="devin"
+                className="text-button"
+                fallback={<small>{latest.dry_run ? 'Dry run · no external Devin session' : 'External link pending'}</small>}
+              >
+                Open in Devin <ExternalLink size={13} />
+              </SafeLink>
+              {list.length > 1 && <small>{list.length - 1} earlier attempt{list.length > 2 ? 's' : ''}</small>}
+            </div>
+          </>
+        ) : (
+          <p>{idle}</p>
+        )}
+      </div>
+    );
+  };
+  return (
+    <div className="issue-sessions">
+      {render('reproduction', reproduction, reproductionExpected, 'Relay launches this automatically once triage marks the report a likely defect with complete context (≥ 80%).')}
+      {render('fix', fix, fixExpected, 'Launched only after the component owner confirms the bug and authorizes a fix on the Owner handoff tab.')}
+    </div>
+  );
+}
+
 function LiveIssueDetail({
   detail,
   summary,
@@ -227,9 +307,11 @@ function LiveIssueDetail({
   const head = issue ?? summary;
   const target = useMemo(() => (head ? { id: head.id, version: head.version } : null), [head]);
 
+  const sessions = useSessions(useMemo(() => ({ issue_id: head?.id ?? '' }), [head?.id]), head !== null);
   const accepted = (message: string) => () => {
     notify(message);
     void detail.refresh();
+    void sessions.refresh();
   };
   const respond = useReporterResponse(target, accepted('Reporter response accepted'));
   const decide = useOwnerDecision(target, accepted('Owner decision recorded'));
@@ -318,6 +400,8 @@ function LiveIssueDetail({
             );
           })}
         </div>
+
+        <IssueSessionsPanel issue={head} sessions={sessions} now={now} />
 
         <div className="detail-tabs">
           <button className={tab === 'conversation' ? 'active' : ''} onClick={() => setTab('conversation')}>

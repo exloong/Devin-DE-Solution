@@ -14,7 +14,7 @@ from app.integrations import (
     PostIssueComment,
     TargetCommit,
 )
-from app.persistence import tables
+from app.persistence import runtime_status, tables
 from app.runtime.live_worker import LiveWorkerRuntime, live_runtime_from_env
 from app.runtime.worker import Worker
 from sqlalchemy import select
@@ -34,13 +34,45 @@ def test_worker_executes_pending_job_and_updates_heartbeat() -> None:
     assert all(job.status in {JobStatus.DONE, JobStatus.PENDING} for job in jobs)
 
     with harness.engine.begin() as conn:
-        heartbeat = conn.execute(
-            select(tables.runtime_status).where(
-                tables.runtime_status.c.component == "worker"
+        heartbeat = (
+            conn.execute(
+                select(tables.runtime_status).where(tables.runtime_status.c.component == "worker")
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
     assert heartbeat["instance_id"] == "test-worker"
     assert heartbeat["updated_at"] is not None
+
+
+def test_worker_heartbeat_reports_provider_mode() -> None:
+    harness = Harness()
+    worker = Worker(harness.engine, harness.service, harness.uow, "test-worker")
+    worker.heartbeat()
+    with harness.engine.connect() as conn:
+        rows = runtime_status.read_all(conn)
+    assert rows[runtime_status.PROVIDER_GITHUB].instance_id == "dry_run"
+    assert rows[runtime_status.PROVIDER_DEVIN].instance_id == "dry_run"
+
+    live = Worker(
+        harness.engine,
+        harness.service,
+        harness.uow,
+        "live-worker",
+        live_runtime=LiveWorkerRuntime(
+            service=harness.service,
+            uow_factory=harness.uow,
+            github=FakeGitHubAdapter(),
+            devin=FakeDevinSessionAdapter(),
+            review=FakeDevinReviewAdapter(),
+        ),
+    )
+    live.heartbeat()
+    with harness.engine.connect() as conn:
+        rows = runtime_status.read_all(conn)
+    assert rows[runtime_status.WORKER].instance_id == "live-worker"
+    assert rows[runtime_status.PROVIDER_GITHUB].instance_id == "live"
+    assert rows[runtime_status.PROVIDER_DEVIN].instance_id == "live"
 
 
 def test_scenario_seeding_settles_only_jobs_created_by_seed() -> None:

@@ -4,6 +4,7 @@ import {
   apiClient,
   type AnalyticsSummary,
   type CancelSessionCommand,
+  type DashboardSummary,
   type Health,
   type IssueDetail,
   type IssueFilters,
@@ -155,6 +156,10 @@ export function useWorkflow(enabled = true): Resource<WorkflowDefinition> {
 
 export function useAnalytics(enabled = true): Resource<AnalyticsSummary> {
   return useResource(() => apiClient.analyticsSummary(), [], { pollMs: LIST_POLL_MS * 4, staleAfterMs: STALE_AFTER_MS * 5, enabled });
+}
+
+export function useDashboard(enabled = true): Resource<DashboardSummary> {
+  return useResource(() => apiClient.dashboard(), [], { pollMs: DETAIL_POLL_MS * 2, staleAfterMs: STALE_AFTER_MS, enabled });
 }
 
 export function useReporterResponse(target: MutationTarget | null, onAccepted?: () => void) {

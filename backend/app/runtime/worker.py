@@ -8,14 +8,13 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
 from app.domain.models import Actor, Event, Job, JobKind, JobStatus, PullRequestState
 from app.domain.ports import UnitOfWork
 from app.domain.states import ActorRole, EventType
 from app.domain.transitions import TransitionService
-from app.persistence import tables
+from app.persistence import runtime_status
 from app.persistence.database import make_engine, upgrade
 from app.persistence.sqlalchemy_uow import SqlAlchemyUnitOfWorkFactory
 from app.runtime.live_worker import LiveWorkerRuntime, live_runtime_from_env
@@ -33,25 +32,21 @@ class Worker:
     instance_id: str
     live_runtime: LiveWorkerRuntime | None = None
 
+    @property
+    def provider_mode(self) -> str:
+        return "live" if self.live_runtime is not None else "dry_run"
+
     def heartbeat(self) -> None:
         now = datetime.now(timezone.utc)
-        with self.engine.begin() as conn:
-            existing = conn.execute(
-                select(tables.runtime_status.c.component).where(
-                    tables.runtime_status.c.component == "worker"
-                )
-            ).first()
-            values = {"instance_id": self.instance_id, "updated_at": now}
-            if existing is None:
-                conn.execute(
-                    tables.runtime_status.insert().values(component="worker", **values)
-                )
-            else:
-                conn.execute(
-                    tables.runtime_status.update()
-                    .where(tables.runtime_status.c.component == "worker")
-                    .values(**values)
-                )
+        runtime_status.touch_all(
+            self.engine,
+            {
+                runtime_status.WORKER: self.instance_id,
+                runtime_status.PROVIDER_GITHUB: self.provider_mode,
+                runtime_status.PROVIDER_DEVIN: self.provider_mode,
+            },
+            now,
+        )
 
     def run_once(self) -> int:
         now = self.service.clock.now()
@@ -337,9 +332,7 @@ def main() -> None:
         raise RuntimeError("RELAY_MODE must be demo or live")
     service = TransitionService()
     uow_factory = SqlAlchemyUnitOfWorkFactory(engine)
-    live_runtime = (
-        live_runtime_from_env(service, uow_factory) if mode == "live" else None
-    )
+    live_runtime = live_runtime_from_env(service, uow_factory) if mode == "live" else None
     worker = Worker(
         engine=engine,
         service=service,

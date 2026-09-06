@@ -7,10 +7,11 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 from sqlalchemy import select, text
 
-from app.api import queries
+from app.api import dashboard, queries
 from app.api.deps import Ctx, Reader
 from app.api.schemas import (
     AnalyticsSummary,
+    DashboardSummary,
     HealthResponse,
     IssueDetail,
     IssuePage,
@@ -20,8 +21,8 @@ from app.api.schemas import (
     WorkflowDefinition,
 )
 from app.domain.errors import DomainError, ErrorCode
-from app.domain.states import WORKFLOW_VERSION, IssueState, SessionState
-from app.persistence import tables
+from app.domain.states import WORKFLOW_VERSION, IssueState, SessionKind, SessionState
+from app.persistence import runtime_status, tables
 
 router = APIRouter()
 APP_VERSION = "0.1.0"
@@ -97,10 +98,15 @@ def list_sessions(
     _reader: Reader,
     issue_id: uuid.UUID | None = None,
     status: Annotated[list[SessionState] | None, Query()] = None,
+    kind: SessionKind | None = None,
 ) -> SessionPage:
     with ctx.uow_factory() as uow:
         items = queries.list_sessions(
-            uow, issue_id=issue_id, statuses=status or [], dry_run=ctx.scope.dry_run
+            uow,
+            issue_id=issue_id,
+            statuses=status or [],
+            dry_run=ctx.scope.dry_run,
+            kind=kind,
         )
     return SessionPage(items=items, total=len(items), generated_at=ctx.service.clock.now())
 
@@ -120,3 +126,12 @@ def workflow(ctx: Ctx) -> WorkflowDefinition:
 def analytics(ctx: Ctx, _reader: Reader) -> AnalyticsSummary:
     with ctx.uow_factory() as uow:
         return queries.analytics(uow, ctx.service.clock.now())
+
+
+@router.get("/dashboard", response_model=DashboardSummary)
+def dashboard_summary(ctx: Ctx, _reader: Reader) -> DashboardSummary:
+    now = ctx.service.clock.now()
+    with ctx.engine.connect() as conn:
+        rows = runtime_status.read_all(conn)
+    with ctx.uow_factory() as uow:
+        return dashboard.summary(uow, now, rows)

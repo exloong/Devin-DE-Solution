@@ -89,6 +89,42 @@ Each event is handled as follows:
    approval are bound to the exact PR head SHA, so a new push invalidates
    evidence for the previous head.
 
+### The core flow and the two Devin trigger points
+
+The operator UI shows a single linear path. Only two of its steps launch a
+Devin session; everything else is deterministic policy or a human decision.
+
+| Step | Actor | What happens |
+| --- | --- | --- |
+| Intake & classify | Workflow controller (deterministic) | Verifies the webhook signature, applies the controller gate (repository is `exloong/superset`, issue is open, optional trusted label/actor), and classifies the report. **No Devin session is launched here.** |
+| Reproduce safely | Devin reproducer (`kind = reproduction`) | **Auto-launched** by the worker once triage marks the report a likely defect with context completeness ≥ 80%. Builds an isolated fixture, runs control/failure cases, drafts a regression test. |
+| Confirm the bug | Component owner (human gate) | Reviews the evidence pack and explicitly confirms or rejects the bug. |
+| Prepare the fix | Devin coding agent (`kind = fix`) | Launched **only** after the owner's `confirm_bug` decision (`POST /api/v1/issues/{id}/decisions`). Implements the smallest fix with a regression test and opens a PR. |
+| Review & approve | Owners / Devin Review | PR review; Relay never merges automatically. |
+
+`GET /api/v1/sessions?kind=reproduction|fix` lists sessions of either kind,
+each with status, linked issue, timestamps, and the external Devin URL when
+one exists.
+
+### Health & throughput dashboard
+
+The **Health dashboard** view (`GET /api/v1/dashboard`) exists to prove whether
+the pipeline is working. Every number is aggregated from persisted records:
+
+- Throughput: issues entered vs. completed over the period, per-day buckets,
+  and the current in-flight count per stage (conversion funnel).
+- Devin automation health, separately for reproduction and fix sessions:
+  queued / running / succeeded / failed counts, success rate, median duration,
+  and a recent-sessions table linking to each session.
+- Liveness: last GitHub webhook received, last Devin session launched, worker
+  heartbeat, database probe, and GitHub / Devin provider mode
+  (`connected`, `dry_run`, `stale`, `unconfigured`). These derive a single
+  `healthy` / `degraded` / `down` status with reasons.
+- Needs attention: issues currently waiting on an owner or blocked.
+
+In demo mode the dashboard renders clearly-labelled sample data with the
+heartbeat marked *down*; it never pretends a provider is connected.
+
 ### Services
 
 | Service | Responsibility |
@@ -208,6 +244,9 @@ Vite serves the frontend at `http://127.0.0.1:4173`. The production frontend
 expects `/api/v1` on the same origin; the Docker `web` service provides that
 proxy. A standalone Vite process without a proxying API will show the
 fail-closed API-unavailable state rather than silently loading demo data.
+To point the dev server at a local API instead, set
+`RELAY_API_PROXY=http://127.0.0.1:8000` (in the environment or `.env.local`)
+before `npm run dev`.
 
 Install backend dependencies:
 
@@ -284,6 +323,8 @@ chmod 600 .env
 | `GITHUB_WEBHOOK_SECRET` | API | High-entropy HMAC secret shared only with the GitHub webhook. |
 | `GITHUB_TOKEN` | Worker | Dedicated GitHub App installation token or fine-grained token scoped only to `exloong/superset`. |
 | `GITHUB_DEFAULT_BRANCH` | Worker | Superset branch resolved to the immutable reproduction base; defaults to `master`. |
+| `RELAY_TRUSTED_LABEL` | API | Optional controller-gate label. When set, `issues.opened`/`issues.labeled` events enroll an issue only if it carries (or is being given) this label. |
+| `RELAY_TRUSTED_ACTORS` | API | Optional comma-separated GitHub logins; when set, only these senders can trigger enrollment. |
 | `DEVIN_API_TOKEN` | Worker | Devin service-user API key or personal access token. |
 | `DEVIN_ORG_ID` | Worker | Devin organization identifier used by the v3 session API. |
 | `DEVIN_REVIEW_TOKEN` | Worker | Optional separate Devin Review token; defaults to `DEVIN_API_TOKEN`. |
@@ -302,7 +343,7 @@ curl --fail http://127.0.0.1:4173/api/v1/health
 curl --fail http://127.0.0.1:4173/api/v1/ready
 ```
 
-Open `http://127.0.0.1:4173`, go to **Configuration → Connections**, and enter
+Open `http://127.0.0.1:4173`, go to **Connections**, and enter
 the Relay operator token. The browser keeps it in `sessionStorage`; provider
 credentials remain server-side.
 
