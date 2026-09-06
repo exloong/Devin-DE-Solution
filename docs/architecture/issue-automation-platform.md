@@ -6,10 +6,18 @@ Proposed architecture for the first implementation behind the Relay mockup.
 The mockup remains the product contract; this document defines the services,
 state, controls, and interfaces required to make the demonstrated flows real.
 
-The first implementation is a dry-run system. It may read repository metadata,
-receive allowlisted test events, create local lifecycle records, and run mock
-agent sessions. It must not write to Apache Superset, execute reporter-provided
-scripts, merge pull requests, close confirmed bugs, or publish security reports.
+`exloong/Devin-DE-Solution` contains and runs the standalone control plane,
+dashboard, API, worker, and persistence services. `exloong/superset` is the
+single configured target repository: a new issue there triggers the flow,
+bounded Devin sessions reproduce and fix against its code, and approved fixes
+open pull requests back to that repository.
+
+The first implementation defaults to dry-run adapters. Live mode may receive
+signed issue events, create bounded Devin sessions restricted to
+`exloong/superset`, open a fix pull request after a human confirms the bug,
+trigger Devin Review, and request reviewers. It must never execute
+reporter-provided scripts, merge pull requests, close confirmed bugs, or
+publish security reports.
 
 ## Goals
 
@@ -23,10 +31,12 @@ scripts, merge pull requests, close confirmed bugs, or publish security reports.
 7. Make every transition, retry, reminder, and agent run observable in the UI.
 8. Recover safely from duplicate delivery, restarts, timeouts, and partial
    integration failures.
+9. Give operators one place to inspect each Devin session's conversation,
+   progress, outputs, pull requests, and authenticated Devin session/desktop.
 
 ## Non-goals for the first implementation
 
-- Processing arbitrary public repositories.
+- Processing repositories other than the configured `exloong/superset` fork.
 - Running reporter-supplied commands or downloading untrusted attachments.
 - Automatically deciding security sensitivity after a positive signal.
 - Automatically merging pull requests or closing reproduced bugs.
@@ -37,8 +47,8 @@ scripts, merge pull requests, close confirmed bugs, or publish security reports.
 ## System context
 
 ```text
-GitHub test repository
-        │ signed webhook
+exloong/superset issue/comment/review events
+        │ signed GitHub webhook
         ▼
 ┌────────────────────┐
 │ Relay API           │
@@ -52,13 +62,16 @@ GitHub test repository
 │ lifecycle + outbox │                         │ state controller   │
 │ jobs + audit log   │────────────────────────▶│ agent orchestration│
 └─────────┬──────────┘       writes outcomes   └─────────┬──────────┘
-          │                                               │ adapter
+          │                                               │ Devin v3 API
           ▼                                               ▼
 ┌────────────────────┐                         ┌────────────────────┐
 │ React web app      │                         │ Agent gateway      │
-│ operator/reporter  │                         │ mock first         │
-│ owner/session UX   │                         │ Devin transport    │
+│ flow dashboard     │                         │ session + review   │
+│ Devin session UX   │                         │ mock fallback      │
 └────────────────────┘                         └────────────────────┘
+          │                                               │ isolated checkout
+          │                                               ▼
+          └─────────────────────────────────── exloong/superset
 ```
 
 The API and worker share one backend package but run as separate processes.
@@ -79,6 +92,27 @@ testing demonstrates the need.
 Nginx serves the frontend and proxies `/api/` to the API. Docker Compose is the
 reference local environment. Production deployment details remain outside the
 first implementation, but service boundaries must not depend on Compose.
+
+## Repository boundary
+
+The control plane never becomes part of the Superset runtime. It integrates
+through repository and Devin APIs:
+
+1. GitHub sends issue, comment, pull-request, review, and check events from
+   `exloong/superset` to Relay.
+2. Relay stores the event and advances deterministic lifecycle state.
+3. Relay creates a bounded Devin session with repository access restricted to
+   `exloong/superset`, the issue revision, allowed capabilities, and a budget.
+4. Devin works in its own remote workspace and returns session status, output,
+   artifacts, and pull-request links.
+5. After human bug confirmation, a new bounded fix session creates a branch
+   and pull request against `exloong/superset`.
+6. Relay triggers Devin Review for that pull request and routes the resulting
+   evidence to the selected human owners.
+
+The Superset fork does not need to import Relay code. Its only repository-side
+configuration is the GitHub App installation, optional workflow checks, issue
+templates, and ownership metadata used by Relay.
 
 ## Architectural boundaries
 
@@ -129,8 +163,15 @@ created it. Late or malformed results are retained for audit but cannot advance
 the lifecycle.
 
 The first adapter is a deterministic mock used by local development and tests.
-A Devin transport is added behind the same interface only after its
-authentication, authorization, callback, and rate-limit behavior is confirmed.
+The live adapter uses the documented Devin v3 session operations to create,
+list, inspect, and message sessions, and the Devin Review endpoint to trigger a
+review for a pull request. All API calls retain their request correlation ID
+and raw response metadata after redaction.
+
+Devin session prompts always name `exloong/superset`, the immutable target
+commit, and the exact allowed outcome. Reproduction and fix sessions are
+separate; evidence from one is passed to the next as typed artifacts rather
+than by keeping a workspace alive.
 
 ### Human gates
 
@@ -245,7 +286,7 @@ All endpoints are under `/api/v1`.
 | `GET` | `/issues` | Filtered issue workbench |
 | `GET` | `/issues/{id}` | Issue, revision, questions, evidence, decisions |
 | `GET` | `/sessions` | Filtered agent-session monitor |
-| `GET` | `/sessions/{id}` | Session events, artifacts, guardrails |
+| `GET` | `/sessions/{id}` | Status, conversation, events, outputs, links |
 | `GET` | `/workflow` | Active versioned lifecycle definition |
 | `GET` | `/analytics/summary` | Operational metrics for the dashboard |
 
@@ -280,9 +321,23 @@ mock and live records in one view.
 
 ### Egress
 
-The first implementation writes only to a fake GitHub adapter. A real adapter
-must separately authorize every action and default to dry-run. Public comments,
-labels, branch creation, and pull requests are individual capabilities.
+The fake GitHub adapter is the local default. The live adapter is restricted to
+`exloong/superset` and separately authorizes each comment, label, reviewer
+request, branch, and pull-request capability.
+
+Live flow:
+
+1. `issues.opened` creates or deduplicates an intake flow.
+2. Relay asks only for missing safe context through issue comments.
+3. A reproduction session checks out the recorded Superset commit.
+4. A human owner decides whether the evidence confirms a bug.
+5. A separately authorized fix session creates a branch and pull request in
+   `exloong/superset`, linking the source issue.
+6. Relay triggers Devin Review for the latest pull-request head.
+7. Relay derives reviewer candidates from `.github/CODEOWNERS`, paths changed,
+   prior ownership configuration, and explicit routing policy.
+8. Relay requests human review; it never treats silence or Devin Review as
+   merge approval.
 
 No adapter may:
 
@@ -327,6 +382,11 @@ The decision API accepts `confirm_bug`, `request_discriminator`,
 `reclassify`, and `route_security_private`. Only `confirm_bug` may create a
 coding authorization, and that authorization has a scope and expiration.
 
+Reviewer routing is deterministic and explainable. The dashboard shows every
+candidate, the rule that selected them, and whether GitHub accepted the review
+request. When ownership is ambiguous or no eligible owner is found, the flow
+enters `needs_owner_decision` rather than guessing.
+
 ## Session lifecycle
 
 Agent sessions use:
@@ -346,6 +406,26 @@ Session budgets include wall-clock timeout, retry count, allowed capabilities,
 repository/branch scope, and maximum output size. Heartbeats update liveness,
 not lifecycle state. Lost heartbeats lead to a bounded cancellation and
 operator-visible recovery job.
+
+### Devin-like session detail
+
+The dashboard provides:
+
+- title, status, elapsed time, budget, repository, commit, branch, and trigger;
+- synchronized conversation messages with author, timestamp, and attachments
+  when exposed by the approved Devin API;
+- a progress timeline derived from session status and recorded events;
+- structured outputs, pull requests, review state, and retained artifacts;
+- operator actions such as send message, cancel, retry, and open the issue;
+- an authenticated link to the canonical Devin session;
+- an authenticated link to Devin Desktop/remote computer when the platform
+  exposes one for the session.
+
+Relay does not scrape Devin or proxy remote-desktop credentials. If conversation
+or desktop embedding is not exposed by the approved API, the dashboard shows
+the synchronized fields it can retrieve and opens the authenticated Devin view
+for the rest. This limitation must be explicit rather than simulated as live
+data.
 
 ## Security and privacy
 
@@ -390,14 +470,14 @@ Failures are classified as:
 2. Property tests exercise duplicate and reordered events.
 3. API tests verify auth, idempotency, optimistic versions, and redaction.
 4. Worker tests verify job claims, retries, timeouts, and outbox semantics.
-5. Contract tests run the mock GitHub and mock agent adapters.
+5. Contract tests run mock GitHub, Devin session, and Devin Review adapters.
 6. Integration tests run API, worker, and PostgreSQL in Docker.
 7. UI component tests cover live, demo, loading, empty, and error states.
 8. Browser testing is reserved for the golden reporter and owner paths.
 
 ## Delivery constraints
 
-- Work lands first in `feature/issue-automation-platform`.
+- Work lands first in `feature/superset-issue-automation`.
 - Parallel agents use isolated workspaces and their own branches.
 - Each workstream opens a PR targeting the feature branch, never `main`.
 - The integration owner reviews and merges those changes into the feature
@@ -407,12 +487,14 @@ Failures are classified as:
 
 ## Open decisions before production enablement
 
-1. Which Devin API or Automation interface is approved for session creation,
-   callbacks, cancellation, and artifact retrieval?
-2. Which GitHub App installation and fork policy may be used for the dry run?
+1. Which Devin v3 fields are approved for conversation synchronization and
+   authenticated desktop/session linking?
+2. Which GitHub App installation may receive and write to
+   `exloong/superset`?
 3. Which identity provider protects operator and owner commands?
 4. What data-retention periods apply to issue revisions, logs, and artifacts?
 5. Which security-team destination receives private routing events?
-6. What repository-specific commands and images are approved for reproduction?
+6. Which Superset setup profiles, commands, fixtures, and database connectors
+   are approved for reproduction?
 
 These decisions do not block the local mock-adapter implementation.

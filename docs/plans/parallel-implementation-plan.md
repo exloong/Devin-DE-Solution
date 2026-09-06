@@ -4,7 +4,7 @@
 
 ```text
 main
-  └─ feature/issue-automation-platform
+  └─ feature/superset-issue-automation
        ├─ agent/backend-core
        ├─ agent/integration-adapters
        ├─ agent/frontend-live-data
@@ -12,7 +12,7 @@ main
 ```
 
 Each agent works in an isolated Devin workspace and opens a pull request into
-`feature/issue-automation-platform`. No child branch targets `main`. The
+`feature/superset-issue-automation`. No child branch targets `main`. The
 integration owner reviews, validates, and merges child work. The feature branch
 is exposed for manual verification before its final PR may be approved and
 merged into `main`.
@@ -27,14 +27,17 @@ The initial implementation uses:
 - React/Vite for the existing web app;
 - a typed Python ASGI backend;
 - PostgreSQL as the source of truth and durable job queue;
-- mock GitHub and agent adapters by default;
+- mock GitHub, Devin session, and Devin Review adapters by default;
+- live adapters restricted to `exloong/superset`;
 - `/api/v1` for frontend/backend communication;
 - UUID resource IDs, UTC timestamps, and explicit resource versions;
 - deterministic lifecycle transitions and human gates.
 
-Agents must not connect to Apache Superset, use production credentials, create
-real Devin sessions, execute reporter content, merge pull requests, or close
-issues.
+Agents may implement live adapter clients, but tests must not require network
+access or credentials. Live configuration must restrict issue intake,
+reproduction checkouts, branches, pull requests, and review requests to
+`exloong/superset`. No adapter may execute reporter content, merge a pull
+request, close an issue as fixed, or publish a suspected security report.
 
 ## Wave 1: independent workstreams
 
@@ -84,16 +87,21 @@ issues.
    deduplication helpers.
 2. Side-effect command types for comments, labels, branches, and pull requests.
 3. A fake GitHub adapter that records commands without network writes.
-4. Typed agent task/result envelopes and output validation.
-5. A deterministic mock agent adapter for classification, reproduction,
-   evidence-packet, and fix tasks.
-6. Capability, budget, issue-revision, and late-result checks.
-7. Tests for malformed signatures, unauthorized repositories, duplicate
-   deliveries, stale results, and prohibited capabilities.
+4. A GitHub client boundary restricted to `exloong/superset`, including
+   reviewer requests and `.github/CODEOWNERS`-based candidate routing.
+5. Typed Devin session task/result envelopes and a v3 client boundary for
+   create, inspect, list, message, cancel, outputs, and canonical session links.
+6. A Devin Review client boundary for trigger, status, and findings.
+7. Deterministic mock adapters for classification, reproduction, evidence,
+   fix, session progress, conversation, and review results.
+8. Capability, budget, issue-revision, target-commit, and late-result checks.
+9. Tests for malformed signatures, unauthorized repositories, duplicate
+   deliveries, stale results, owner ambiguity, and prohibited capabilities.
 
 **Acceptance criteria**
 
 - no network call is required by tests;
+- all repository operations reject targets other than `exloong/superset`;
 - public writes and agent capabilities are explicit typed commands;
 - merge, issue closure, security publication, and reporter script execution
   have no supported command;
@@ -118,7 +126,11 @@ issues.
 4. Reporter-response and owner-decision commands with pending/error states.
 5. Session filters driven by API data rather than hardcoded counts.
 6. A local demo-data fallback that never mixes with live records.
-7. Focused component tests if the workstream adds a test runner; otherwise
+7. A Devin-like session detail with synchronized conversation, progress,
+   outputs, PR/review state, and authenticated session/desktop links.
+8. Clear disclosure when conversation or remote-computer data is available
+   only through an external Devin link.
+9. Focused component tests if the workstream adds a test runner; otherwise
    typecheck and production build validation.
 
 **Acceptance criteria**
@@ -160,12 +172,16 @@ This work starts only after all Wave 1 work is reviewed and merged.
 1. Compose services for web, API, worker, and PostgreSQL.
 2. Nginx proxying for `/api/`.
 3. Worker job claiming, transition execution, retry, and outbox delivery.
-4. Seeded scenarios matching the mockup.
-5. One end-to-end dry run:
+4. GitHub webhook processing restricted to `exloong/superset`.
+5. Seeded scenarios matching the mockup.
+6. One end-to-end dry run:
    `new → triage → awaiting_reporter → reproducing →
    needs_owner_decision → fix_authorized`.
-6. Explicit proof that no workspace remains during reporter/owner waits.
-7. Health checks and repeatable local startup.
+7. One adapter contract run that proves a confirmed flow would create a
+   Superset-targeted fix PR, trigger Devin Review, and request owners without
+   performing those network writes.
+8. Explicit proof that no workspace remains during reporter/owner waits.
+9. Health checks and repeatable local startup.
 
 **Acceptance criteria**
 
@@ -174,6 +190,7 @@ This work starts only after all Wave 1 work is reviewed and merged.
 - restarting the worker preserves jobs and lifecycle state;
 - browser data comes from the API when healthy and shows demo mode otherwise;
 - no real GitHub or Devin credentials are needed;
+- every generated repository reference is `exloong/superset`;
 - integration tests, frontend typecheck, and production build pass.
 
 ## Wave 3: hardening and human verification
@@ -197,10 +214,14 @@ The final preview must let a reviewer:
 4. choose `I cannot provide this` and observe safe-alternative routing;
 5. advance a complete report to a bounded mock reproduction session;
 6. inspect session trigger, budget, events, artifacts, and guardrails;
-7. confirm that the workspace is released before an owner wait;
-8. approve or reject the expected-behavior decision;
-9. confirm that owner approval authorizes work but does not merge it;
-10. restart the stack and observe preserved lifecycle state.
+7. inspect synchronized conversation, progress, outputs, PR/review state, and
+   the authenticated Devin session/desktop links;
+8. confirm that the workspace is released before an owner wait;
+9. approve or reject the expected-behavior decision;
+10. confirm that a fix PR targets `exloong/superset`, Devin Review is requested,
+    and the correct owner-routing rationale is displayed;
+11. confirm that owner approval authorizes work but does not merge it;
+12. restart the stack and observe preserved lifecycle state.
 
 ## Review ownership
 
