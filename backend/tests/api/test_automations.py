@@ -72,7 +72,6 @@ def test_create_get_update_delete_round_trip(api: TestClient) -> None:
         json={
             "name": "Nightly flaky-test sweep",
             "prompt": "Find flaky tests in @exloong/superset and report them.",
-            "description": "Operator-defined",
             "metadata": {"team": "qa"},
         },
         headers=OPERATOR,

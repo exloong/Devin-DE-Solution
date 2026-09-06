@@ -210,7 +210,6 @@ function AutomationDetailPanel({
             <h2>
               <KindIcon automation={automation} /> {automation.name}
             </h2>
-            <p>{automation.description ?? 'No description'}</p>
           </div>
           <div className="automation-actions">
             <button className="secondary-button" onClick={onToggle} disabled={pending}>
@@ -455,7 +454,6 @@ function AutomationEditor({
 }) {
   const existing = editor.mode === 'edit' ? editor.automation : null;
   const [name, setName] = useState(existing?.name ?? '');
-  const [description, setDescription] = useState(existing?.description ?? '');
   const [prompt, setPrompt] = useState(existing?.prompt ?? '');
   const [enabled, setEnabled] = useState(existing?.enabled ?? true);
   const [metadata, setMetadata] = useState('');
@@ -468,7 +466,6 @@ function AutomationEditor({
     if (existing) {
       const patch: AutomationUpdate = {};
       if (name !== existing.name) patch.name = name;
-      if ((description || null) !== existing.description) patch.description = description || null;
       if (prompt !== (existing.prompt ?? '')) patch.prompt = prompt;
       if (enabled !== existing.enabled) patch.enabled = enabled;
       if (Object.keys(patch).length === 0) return setValidation('Nothing changed.');
@@ -484,7 +481,7 @@ function AutomationEditor({
       if (key === 'relay_kind' || key === 'relay_repo') return setValidation(`Metadata key ${key} is reserved for Relay.`);
       meta[key] = trimmed.slice(eq + 1).trim();
     }
-    void onSubmit({ name, prompt, description: description || null, enabled, event_type: 'webhook:incoming', metadata: meta });
+    void onSubmit({ name, prompt, enabled, event_type: 'webhook:incoming', metadata: meta });
   };
 
   return (
@@ -506,10 +503,6 @@ function AutomationEditor({
         <label>
           <span>Name</span>
           <input value={name} onChange={e => setName(e.target.value)} maxLength={200} disabled={pending} />
-        </label>
-        <label>
-          <span>Description</span>
-          <input value={description} onChange={e => setDescription(e.target.value)} maxLength={2000} disabled={pending} />
         </label>
         <label>
           <span>Prompt (start_session action)</span>

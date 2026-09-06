@@ -423,7 +423,6 @@ export interface AutomationStatus {
 export interface Automation {
   automation_id: string;
   name: string;
-  description: string | null;
   enabled: boolean;
   event_types: string[];
   prompt: string | null;
@@ -447,7 +446,6 @@ export interface AutomationPage {
 export interface AutomationCreate {
   name: string;
   prompt: string;
-  description?: string | null;
   enabled?: boolean;
   event_type?: 'webhook:incoming';
   metadata?: Record<string, string>;
@@ -456,7 +454,6 @@ export interface AutomationCreate {
 export interface AutomationUpdate {
   name?: string;
   prompt?: string;
-  description?: string | null;
   enabled?: boolean;
 }
 

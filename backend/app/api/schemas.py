@@ -637,7 +637,6 @@ class AutomationOut(ApiModel):
 
     automation_id: str
     name: str
-    description: str | None = None
     enabled: bool
     event_types: list[str]
     prompt: str | None = None
@@ -661,7 +660,6 @@ class AutomationPage(ApiModel):
 class AutomationCreate(ApiModel):
     name: str = Field(min_length=1, max_length=200)
     prompt: str = Field(min_length=1, max_length=20_000)
-    description: str | None = Field(default=None, max_length=2_000)
     enabled: bool = True
     event_type: AutomationEventType = "webhook:incoming"
     metadata: dict[str, str] = Field(default_factory=dict)
@@ -678,12 +676,11 @@ class AutomationCreate(ApiModel):
 class AutomationUpdate(ApiModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     prompt: str | None = Field(default=None, min_length=1, max_length=20_000)
-    description: str | None = Field(default=None, max_length=2_000)
     enabled: bool | None = None
 
     @model_validator(mode="after")
     def _not_empty(self) -> AutomationUpdate:
-        if all(v is None for v in (self.name, self.prompt, self.description, self.enabled)):
+        if all(v is None for v in (self.name, self.prompt, self.enabled)):
             raise ValueError("nothing to update")
         return self
 

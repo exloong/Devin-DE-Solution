@@ -49,7 +49,6 @@ def automation_out(summary: AutomationSummary) -> AutomationOut:
     return AutomationOut(
         automation_id=summary.automation_id,
         name=summary.name,
-        description=summary.description,
         enabled=summary.enabled,
         event_types=list(summary.event_types),
         prompt=summary.prompt,
@@ -112,7 +111,6 @@ def create_automation(body: AutomationCreate, ctx: Ctx, _manager: Manager) -> Au
         AutomationSpec(
             name=body.name,
             prompt=body.prompt,
-            description=body.description,
             enabled=body.enabled,
             event_type=body.event_type,
             metadata=dict(body.metadata),
@@ -144,7 +142,6 @@ def update_automation(
         automation_id,
         AutomationPatch(
             name=body.name,
-            description=body.description,
             prompt=body.prompt,
             enabled=body.enabled,
         ),

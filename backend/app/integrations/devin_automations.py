@@ -135,7 +135,6 @@ class AutomationSummary:
 
     automation_id: str
     name: str
-    description: str | None
     enabled: bool
     event_types: tuple[str, ...]
     prompt: str | None
@@ -182,7 +181,6 @@ class AutomationSpec:
 
     name: str
     prompt: str
-    description: str | None = None
     enabled: bool = True
     event_type: str = "webhook:incoming"
     metadata: dict[str, str] = field(default_factory=dict)
@@ -191,12 +189,11 @@ class AutomationSpec:
 @dataclass(frozen=True)
 class AutomationPatch:
     name: str | None = None
-    description: str | None = None
     prompt: str | None = None
     enabled: bool | None = None
 
     def is_empty(self) -> bool:
-        return all(v is None for v in (self.name, self.description, self.prompt, self.enabled))
+        return all(v is None for v in (self.name, self.prompt, self.enabled))
 
 
 class AutomationSecretStore(Protocol):
@@ -256,7 +253,7 @@ class DevinAutomationClient(Protocol):
         """Create an operator-defined automation."""
 
     def update_automation(self, automation_id: str, patch: AutomationPatch) -> AutomationSummary:
-        """Patch name/description/prompt/enabled."""
+        """Patch name/prompt/enabled."""
 
     def delete_automation(self, automation_id: str) -> None:
         """Soft-delete an automation."""
@@ -343,7 +340,6 @@ class FakeDevinAutomationClient:
             summary = AutomationSummary(
                 automation_id=handle.automation_id,
                 name=automation_name(kind),
-                description="Managed by Relay.",
                 enabled=True,
                 event_types=("webhook:incoming",),
                 prompt=automation_prompt(kind),
@@ -397,7 +393,6 @@ class FakeDevinAutomationClient:
             summary = AutomationSummary(
                 automation_id=f"auto-fake-{self._counter:04d}",
                 name=spec.name,
-                description=spec.description,
                 enabled=spec.enabled,
                 event_types=(spec.event_type,),
                 prompt=spec.prompt,
@@ -419,9 +414,6 @@ class FakeDevinAutomationClient:
             updated = AutomationSummary(
                 automation_id=current.automation_id,
                 name=patch.name if patch.name is not None else current.name,
-                description=(
-                    patch.description if patch.description is not None else current.description
-                ),
                 enabled=patch.enabled if patch.enabled is not None else current.enabled,
                 event_types=current.event_types,
                 prompt=patch.prompt if patch.prompt is not None else current.prompt,
@@ -688,7 +680,6 @@ class LiveDevinAutomationClient:
         action = "create automation"
         body: JsonObject = {
             "name": spec.name,
-            "description": spec.description,
             "triggers": [{"event_type": spec.event_type, "conditions": None}],
             "actions": [
                 {
@@ -714,8 +705,6 @@ class LiveDevinAutomationClient:
         body: dict[str, JsonValue] = {}
         if patch.name is not None:
             body["name"] = patch.name
-        if patch.description is not None:
-            body["description"] = patch.description
         if patch.enabled is not None:
             body["enabled"] = patch.enabled
         if patch.prompt is not None:
@@ -753,10 +742,6 @@ class LiveDevinAutomationClient:
     def _desired_body(self, kind: TaskKind) -> JsonObject:
         return {
             "name": automation_name(kind),
-            "description": (
-                "Managed by Relay. Triggered by Relay's deterministic controller "
-                "via the webhook inbox; do not edit by hand."
-            ),
             "triggers": [{"event_type": "webhook:incoming", "conditions": None}],
             "actions": [
                 {
@@ -898,7 +883,6 @@ def _summary(payload: JsonObject, *, action: str) -> AutomationSummary:
     return AutomationSummary(
         automation_id=require_str(payload, "automation_id", action=action),
         name=require_str(payload, "name", action=action),
-        description=optional_str(payload, "description", action=action),
         enabled=_enabled(payload),
         event_types=tuple(
             et

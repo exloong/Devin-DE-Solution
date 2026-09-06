@@ -123,7 +123,6 @@ def test_management_list_get_create_update_delete_redact_secrets() -> None:
     created.update(
         {
             "name": "Nightly triage",
-            "description": "desc",
             "created_at": 1_767_268_800,
             "updated_at": 1_767_268_900,
             "created_by": {"id": "u1", "name": "Ops"},
