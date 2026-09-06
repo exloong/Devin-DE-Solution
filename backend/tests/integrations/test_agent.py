@@ -124,6 +124,14 @@ class AgentTaskValidationTests(AgentContractTestCase):
 
         self.assertEqual(raised.exception.code, ValidationCode.OUTPUT_SCHEMA_MISMATCH)
 
+    def test_rejects_untyped_task_kind(self) -> None:
+        task = replace(self.task(), kind="classification")
+
+        with self.assertRaises(ContractValidationError) as raised:
+            validate_agent_task(task)
+
+        self.assertEqual(raised.exception.code, ValidationCode.MALFORMED_ENVELOPE)
+
     def test_rejects_nil_task_identity(self) -> None:
         with self.assertRaises(ValueError):
             replace(self.task(), task_id=UUID(int=0))

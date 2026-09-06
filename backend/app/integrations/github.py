@@ -186,6 +186,11 @@ def verify_sha256_signature(
 
 class RepositoryAllowlist:
     def __init__(self, repositories: set[RepositoryIdentity] | frozenset[RepositoryIdentity]):
+        if any(
+            not isinstance(repository, RepositoryIdentity)
+            for repository in repositories
+        ):
+            raise TypeError("repositories must contain RepositoryIdentity values")
         self._repositories = frozenset(repositories)
 
     def allows(self, repository: RepositoryIdentity) -> bool:
@@ -332,6 +337,14 @@ class FakeGitHubAdapter:
         self,
         allowed_capabilities: frozenset[GitHubCapability] | None = None,
     ) -> None:
+        if allowed_capabilities is not None and any(
+            not isinstance(capability, GitHubCapability)
+            for capability in allowed_capabilities
+        ):
+            raise ContractValidationError(
+                ValidationCode.PROHIBITED_CAPABILITY,
+                "GitHub capability allowlist contains an unsupported value",
+            )
         self._allowed_capabilities = (
             frozenset(GitHubCapability)
             if allowed_capabilities is None

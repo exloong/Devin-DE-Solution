@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from types import MappingProxyType
-from typing import Mapping, TypeAlias
+from typing import Mapping, Protocol, TypeAlias
 from uuid import UUID, uuid5
 
 from .errors import ContractValidationError, ValidationCode
@@ -78,7 +78,7 @@ def _require_utc(value: datetime, field_name: str) -> None:
 
 
 def _require_non_nil_uuid(value: UUID, field_name: str) -> None:
-    if value.int == 0:
+    if not isinstance(value, UUID) or value.int == 0:
         raise ValueError(f"{field_name} cannot be the nil UUID")
 
 
@@ -240,6 +240,11 @@ def validate_agent_task(
     task: AgentTaskEnvelope,
     policy: AgentPolicy = AgentPolicy(),
 ) -> None:
+    if not isinstance(task.kind, AgentTaskKind):
+        raise ContractValidationError(
+            ValidationCode.MALFORMED_ENVELOPE,
+            "agent task kind is unsupported",
+        )
     if task.envelope_schema != TASK_ENVELOPE_SCHEMA:
         raise ContractValidationError(
             ValidationCode.OUTPUT_SCHEMA_MISMATCH,
@@ -281,6 +286,11 @@ def validate_result(
     _require_utc(received_at, "received_at")
     validate_agent_task(task)
 
+    if not isinstance(result.kind, AgentTaskKind):
+        raise ContractValidationError(
+            ValidationCode.MALFORMED_ENVELOPE,
+            "agent result kind is unsupported",
+        )
     if (
         result.task_id != task.task_id
         or result.issue_id != task.issue_id
@@ -327,6 +337,11 @@ def validate_result(
         issue_revision=task.issue_revision,
         accepted_at=received_at,
     )
+
+
+class AgentAdapter(Protocol):
+    def run(self, task: AgentTaskEnvelope) -> AgentResultEnvelope:
+        """Run one bounded task and return its typed result envelope."""
 
 
 class DeterministicMockAgentAdapter:

@@ -1,8 +1,10 @@
 """Safe, network-free integration contracts for Relay."""
 
 from .agent import (
+    AgentAdapter,
     AgentBudget,
     AgentCapability,
+    AgentPolicy,
     AgentResultEnvelope,
     AgentTaskEnvelope,
     AgentTaskKind,
@@ -20,9 +22,11 @@ from .github import (
     AddLabels,
     CreateBranch,
     CreateDraftPullRequest,
+    DeliveryDeduplicator,
     DeliveryIdentity,
     FakeGitHubAdapter,
     GitHubCapability,
+    GitHubDryRunCommand,
     GitHubWebhookEnvelope,
     InMemoryDeliveryDeduplicator,
     PostIssueComment,
@@ -33,8 +37,10 @@ from .github import (
 
 __all__ = [
     "AddLabels",
+    "AgentAdapter",
     "AgentBudget",
     "AgentCapability",
+    "AgentPolicy",
     "AgentResultEnvelope",
     "AgentTaskEnvelope",
     "AgentTaskKind",
@@ -42,11 +48,13 @@ __all__ = [
     "ContractValidationError",
     "CreateBranch",
     "CreateDraftPullRequest",
+    "DeliveryDeduplicator",
     "DeliveryIdentity",
     "DeterministicMockAgentAdapter",
     "EvidencePacketResult",
     "FakeGitHubAdapter",
     "GitHubCapability",
+    "GitHubDryRunCommand",
     "GitHubWebhookEnvelope",
     "InMemoryDeliveryDeduplicator",
     "PostIssueComment",

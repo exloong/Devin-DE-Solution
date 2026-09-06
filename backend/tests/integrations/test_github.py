@@ -178,6 +178,12 @@ class FakeGitHubAdapterTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, ValidationCode.PROHIBITED_CAPABILITY)
         self.assertEqual(adapter.commands, ())
 
+    def test_rejects_untyped_capability_allowlist(self) -> None:
+        with self.assertRaises(ContractValidationError) as raised:
+            FakeGitHubAdapter(allowed_capabilities=frozenset({"comment"}))
+
+        self.assertEqual(raised.exception.code, ValidationCode.PROHIBITED_CAPABILITY)
+
     def test_rejects_unknown_command_type(self) -> None:
         adapter = FakeGitHubAdapter(frozenset(GitHubCapability))
 
