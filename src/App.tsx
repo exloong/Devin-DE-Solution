@@ -22,14 +22,12 @@ import {
   Menu,
   MessageCircleMore,
   MoreHorizontal,
-  Network,
   Pause,
   Play,
   Plus,
   RefreshCw,
   Loader2,
   ShieldAlert,
-  RotateCcw,
   Search,
   Send,
   Settings2,
@@ -47,9 +45,7 @@ import {
 import { useState } from 'react';
 import {
   devinSessions,
-  flowSteps,
   issues,
-  type FlowStep,
   type Issue,
   type ViewKey,
 } from './data';
@@ -85,7 +81,6 @@ import { HealthDashboard, formatAgo } from './components/HealthDashboard';
 
 const navItems: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[] = [
   { key: 'overview', label: 'Health dashboard', icon: LayoutDashboard },
-  { key: 'workflow', label: 'Core workflow', icon: Network },
   { key: 'sessions', label: 'Devin sessions', icon: Activity },
   { key: 'automations', label: 'Devin Automations', icon: Zap },
   { key: 'issues', label: 'Issue workbench', icon: Inbox },
@@ -284,7 +279,7 @@ function App() {
         </header>
 
         <div className="page">
-          {gated && view !== 'workflow' && view !== 'settings' && <ApiGate api={api} />}
+          {gated && view !== 'settings' && <ApiGate api={api} />}
           {!gated && view === 'overview' && (
             <HealthDashboard
               dashboard={dashboard}
@@ -296,7 +291,6 @@ function App() {
               goToIssues={() => setView('issues')}
             />
           )}
-          {view === 'workflow' && <Workflow notify={notify} />}
           {!gated && view === 'sessions' && <DevinSessions goToIssue={goToIssue} notify={notify} live={live} sessions={liveSessions} onRunDryTest={runDryTest} />}
           {!gated && view === 'automations' && <AutomationsView live={live} goToIssue={goToIssue} notify={notify} />}
           {view === 'issues' && demo && (
@@ -578,181 +572,6 @@ function DevinSessions({
         )}
       </section>
     </>
-  );
-}
-
-function Workflow({ notify }: { notify: (message: string) => void }) {
-  const [selectedId, setSelectedId] = useState('reproduce');
-  const [running, setRunning] = useState(false);
-  const selected = flowSteps.find(step => step.id === selectedId) ?? flowSteps[0];
-
-  return (
-    <>
-      <PageHeader
-        eyebrow="Workflow v0.3 · Draft"
-        title="Issue-to-fix lifecycle"
-        description="Deterministic intake and classification, an auto-launched reproduction session, an explicit owner gate, an owner-authorized fix session, and human review."
-        actions={
-          <>
-            <button className="secondary-button" onClick={() => notify('Draft duplicated')}>
-              <RotateCcw size={15} /> Duplicate draft
-            </button>
-            <button className="primary-button" onClick={() => {
-              setRunning(!running);
-              notify(running ? 'Simulation paused' : 'Simulation started at intake');
-            }}>
-              {running ? <Pause size={16} /> : <Play size={16} fill="currentColor" />}
-              {running ? 'Pause simulation' : 'Simulate flow'}
-            </button>
-          </>
-        }
-      />
-
-      <div className="workflow-summary">
-        <span><i className="kind-dot automation" /> Deterministic <b>{flowSteps.filter(step => step.kind === 'automation').length}</b></span>
-        <span><i className="kind-dot ai" /> Devin sessions <b>{flowSteps.filter(step => step.kind === 'ai').length}</b></span>
-        <span><i className="kind-dot human" /> Human gates <b>{flowSteps.filter(step => step.kind === 'human').length}</b></span>
-        <span className="workflow-divider" />
-        <span><ShieldCheck size={15} /> No upstream writes</span>
-        <span><LockKeyhole size={15} /> Never auto-merge</span>
-      </div>
-
-      <section className="workflow-layout">
-        <div className={`flow-card card ${running ? 'flow-running' : ''}`}>
-          <div className="flow-toolbar">
-            <div>
-              <strong>Primary lifecycle</strong>
-              <span>Click a node to inspect its contract</span>
-            </div>
-            <div>
-              <button className="tool-button"><Box size={15} /> Fit view</button>
-              <button className="tool-button"><Plus size={15} /> Add step</button>
-              <button className="icon-button" aria-label="More lifecycle actions"><MoreHorizontal size={17} /></button>
-            </div>
-          </div>
-          <div className="flow-scroll">
-            <div className="flow-canvas">
-              <svg viewBox="0 0 1000 1000" preserveAspectRatio="none" className="flow-connectors" aria-hidden="true">
-                <defs>
-                  <marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
-                    <path d="M0,0 L7,3.5 L0,7 z" fill="#bac2d1" />
-                  </marker>
-                  <marker id="arrow-active" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
-                    <path d="M0,0 L7,3.5 L0,7 z" fill="#6558e8" />
-                  </marker>
-                </defs>
-                <path d="M176 460 L224 460" className="connector primary" />
-                <path d="M376 460 L424 460" className="connector primary" />
-                <path d="M576 460 L624 460" className="connector primary" />
-                <path d="M776 460 L824 460" className="connector primary" />
-              </svg>
-              <span className="branch-label branch-middle">Likely defect · context ≥ 80%</span>
-              {flowSteps.map((step, index) => (
-                <FlowNode
-                  key={step.id}
-                  step={step}
-                  active={selectedId === step.id}
-                  running={running && index <= 1}
-                  onClick={() => setSelectedId(step.id)}
-                />
-              ))}
-            </div>
-          </div>
-          <div className="flow-footer">
-            <span><TimerReset size={15} /> Classification is deterministic; only “Reproduce safely” and “Prepare the fix” launch Devin sessions</span>
-            <span>Last edited 18 minutes ago by XZ</span>
-          </div>
-        </div>
-
-        <aside className="inspector card">
-          <div className="inspector-header">
-            <div className={`step-icon ${selected.kind}`}>
-              {selected.kind === 'automation' && <Zap size={19} />}
-              {selected.kind === 'ai' && <BrainCircuit size={19} />}
-              {selected.kind === 'human' && <Users size={19} />}
-              {selected.kind === 'terminal' && <ArrowDownRight size={19} />}
-            </div>
-            <button className="icon-button" aria-label="More step actions"><MoreHorizontal size={17} /></button>
-          </div>
-          <p className="eyebrow">{selected.eyebrow}</p>
-          <h2>{selected.label}</h2>
-          <p className="inspector-description">{selected.description}</p>
-          <div className="contract-grid">
-            <div><span>Primary actor</span><strong>{selected.actor}</strong></div>
-            <div><span>Response target</span><strong>{selected.sla}</strong></div>
-            <div><span>Entry condition</span><strong>{selected.entry}</strong></div>
-            <div><span>Exit condition</span><strong>{selected.exit}</strong></div>
-          </div>
-          <div className="inspector-section">
-            <h3>Actions</h3>
-            <ul>
-              {selected.actions.map(action => <li key={action}><Check size={14} /> {action}</li>)}
-            </ul>
-          </div>
-          <div className="fallback-box">
-            <AlertTriangle size={16} />
-            <div><span>Fallback path</span><strong>{selected.fallback}</strong></div>
-          </div>
-          <button className="secondary-button wide" onClick={() => notify(`${selected.label} opened in configuration`)}>
-            <SlidersHorizontal size={15} /> Configure this step
-          </button>
-        </aside>
-      </section>
-
-      <section className="edge-case-strip card">
-        <div className="edge-case-intro">
-          <ShieldCheck size={20} />
-          <div>
-            <strong>Exception paths are first-class</strong>
-            <span>The flow fails closed and always leaves a recovery path.</span>
-          </div>
-        </div>
-        {[
-          ['Security signal', 'Route privately; stop public analysis'],
-          ['No reporter reply', '2 reminders → close with reopen path'],
-          ['Cannot reproduce', 'Return one discriminating question'],
-          ['No code owner', 'Escalate to triage rotation; never close'],
-        ].map(([title, copy]) => (
-          <div className="edge-case" key={title}>
-            <strong>{title}</strong>
-            <span>{copy}</span>
-          </div>
-        ))}
-      </section>
-    </>
-  );
-}
-
-function FlowNode({
-  step,
-  active,
-  running,
-  onClick,
-}: {
-  step: FlowStep;
-  active: boolean;
-  running: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      className={`flow-node ${step.kind} ${active ? 'selected' : ''} ${running ? 'run-active' : ''}`}
-      style={{ left: `${step.x}%`, top: `${step.y}%` }}
-      onClick={onClick}
-    >
-      <span className="node-topline">
-        <i>
-          {step.kind === 'automation' && <Zap size={14} />}
-          {step.kind === 'ai' && <Bot size={14} />}
-          {step.kind === 'human' && <Users size={14} />}
-          {step.kind === 'terminal' && <ArrowDownRight size={14} />}
-        </i>
-        <small>{step.eyebrow}</small>
-      </span>
-      <strong>{step.label}</strong>
-      <span>{step.actor}</span>
-      {running && <b className="run-pulse" />}
-    </button>
   );
 }
 

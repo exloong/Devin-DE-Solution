@@ -14,7 +14,7 @@ returned once at creation time and is persisted server-side by the worker.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from threading import Lock
@@ -73,6 +73,22 @@ def automation_tags(kind: TaskKind) -> list[str]:
     return [RELAY_TAG, f"kind:{kind.value}", f"repo:{SUPERSET_FULL_NAME}", "launcher:automation"]
 
 
+def automation_output_schema(kind: TaskKind) -> JsonObject:
+    """The task result schema plus the echoed ``task_id`` that links the
+    automation-spawned session back to its Relay dispatch."""
+    base = output_json_schema(kind)
+    base_properties = base["properties"]
+    base_required = base["required"]
+    if not isinstance(base_properties, Mapping) or not isinstance(base_required, Sequence):
+        raise ContractValidationError(
+            ValidationCode.MALFORMED_RESPONSE, f"{kind.value} output schema is not an object"
+        )
+    properties: dict[str, JsonValue] = dict(base_properties)
+    properties["task_id"] = {"type": "string", "format": "uuid"}
+    required: list[JsonValue] = [*base_required, "task_id"]
+    return {**base, "properties": properties, "required": required}
+
+
 def automation_prompt(kind: TaskKind) -> str:
     """The static ``start_session`` prompt; the per-task envelope arrives as the event."""
     _require_automation_kind(kind)
@@ -89,7 +105,7 @@ def automation_prompt(kind: TaskKind) -> str:
             "never modify another repository."
         ),
     }[kind]
-    schema = json.dumps(dict(output_json_schema(kind)), sort_keys=True)
+    schema = json.dumps(automation_output_schema(kind), sort_keys=True)
     return "\n".join(
         [
             f"You are Relay's Devin {kind.value} agent for @{SUPERSET_FULL_NAME}.",

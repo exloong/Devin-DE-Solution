@@ -1,4 +1,4 @@
-export type ViewKey = 'overview' | 'workflow' | 'sessions' | 'automations' | 'issues' | 'settings';
+export type ViewKey = 'overview' | 'sessions' | 'automations' | 'issues' | 'settings';
 
 export type IssueState =
   | 'Needs information'
@@ -27,22 +27,6 @@ export interface Issue {
   nextAction: string;
   due: string;
   missing: string[];
-}
-
-export interface FlowStep {
-  id: string;
-  label: string;
-  description: string;
-  kind: 'automation' | 'ai' | 'human' | 'terminal';
-  eyebrow: string;
-  x: number;
-  y: number;
-  sla: string;
-  actor: string;
-  entry: string;
-  exit: string;
-  fallback: string;
-  actions: string[];
 }
 
 export type DevinSessionStatus =
@@ -198,84 +182,6 @@ export const issues: Issue[] = [
     nextAction: 'Reporter may reopen',
     due: 'Closed after 2 reminders',
     missing: ['Worker logs', 'Reliable trigger'],
-  },
-];
-
-export const flowSteps: FlowStep[] = [
-  {
-    id: 'intake',
-    label: 'Intake & classify',
-    description: 'Verify the webhook, apply the deterministic gate, and classify the report without launching an agent.',
-    kind: 'automation',
-    eyebrow: 'Deterministic',
-    x: 10,
-    y: 46,
-    sla: '< 1 min',
-    actor: 'Workflow controller',
-    entry: 'Signed GitHub issue event',
-    exit: 'Likely defect with context completeness ≥ 80%',
-    fallback: 'Ask the reporter for the smallest missing fact; redirect non-defects',
-    actions: ['Verify HMAC signature', 'Check repository, actor, label, and state', 'Classify and score context'],
-  },
-  {
-    id: 'reproduce',
-    label: 'Reproduce safely',
-    description: 'Build a clean fixture, execute the reported path, and capture repeatable evidence.',
-    kind: 'ai',
-    eyebrow: 'Devin · auto-launched',
-    x: 30,
-    y: 46,
-    sla: '< 60 min',
-    actor: 'Devin reproducer',
-    entry: 'Context completeness ≥ 80%',
-    exit: 'Repeatable failure or control result',
-    fallback: 'Request one missing discriminator',
-    actions: ['Create isolated environment', 'Run control and failure cases', 'Draft regression test'],
-  },
-  {
-    id: 'validate',
-    label: 'Confirm the bug',
-    description: 'Give the code owner a compact evidence pack and an explicit decision.',
-    kind: 'human',
-    eyebrow: 'Human gate',
-    x: 50,
-    y: 46,
-    sla: '3 business days',
-    actor: 'Component owner',
-    entry: 'Reproduced or high-confidence intermittent',
-    exit: 'Fix authorized or reclassified',
-    fallback: 'Escalate to triage rotation',
-    actions: ['Review evidence pack', 'Confirm expected behavior', 'Authorize code changes'],
-  },
-  {
-    id: 'fix',
-    label: 'Prepare the fix',
-    description: 'Write the regression test, implement the smallest fix, and verify affected suites.',
-    kind: 'ai',
-    eyebrow: 'Devin · owner-authorized',
-    x: 70,
-    y: 46,
-    sla: 'Bounded session',
-    actor: 'Devin coding agent',
-    entry: 'Owner-authorized defect',
-    exit: 'Reviewable, tested branch',
-    fallback: 'Return with blocker summary',
-    actions: ['Regression test first', 'Focused implementation', 'Lint, typecheck, affected tests'],
-  },
-  {
-    id: 'review',
-    label: 'Review & approve',
-    description: 'Open a linked PR, summarize evidence, and wait for code-owner approval.',
-    kind: 'human',
-    eyebrow: 'Human gate',
-    x: 90,
-    y: 46,
-    sla: 'Owner policy',
-    actor: 'Code owner',
-    entry: 'Checks passed',
-    exit: 'Approved or changes requested',
-    fallback: 'Track review aging; never auto-merge',
-    actions: ['PR template + issue link', 'Respond to scoped feedback', 'No automatic merge'],
   },
 ];
 

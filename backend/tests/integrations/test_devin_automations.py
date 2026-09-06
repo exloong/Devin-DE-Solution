@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -14,6 +15,7 @@ from app.integrations.devin_automations import (
     InMemoryAutomationSecretStore,
     LiveDevinAutomationClient,
     automation_metadata,
+    automation_output_schema,
     automation_prompt,
     dispatch_payload,
 )
@@ -72,6 +74,15 @@ def test_prompt_requires_task_id_echo_and_forbids_merging() -> None:
     assert "Do not modify the repository" in repro
     with pytest.raises(ContractValidationError):
         automation_prompt(TaskKind.CLASSIFICATION)
+
+
+def test_prompt_schema_admits_the_echoed_task_id() -> None:
+    for kind in (TaskKind.REPRODUCTION, TaskKind.FIX):
+        schema = automation_output_schema(kind)
+        assert schema["additionalProperties"] is False
+        assert "task_id" in schema["properties"]  # type: ignore[operator]
+        assert "task_id" in schema["required"]  # type: ignore[operator]
+        assert json.dumps(schema, sort_keys=True) in automation_prompt(kind)
 
 
 def test_ensure_creates_automation_when_none_exists_and_keeps_secret() -> None:
