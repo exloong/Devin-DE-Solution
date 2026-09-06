@@ -24,6 +24,7 @@ from app.integrations import (
     require_superset_repository,
     validate_branch_name,
 )
+from app.integrations.json_values import JsonValue
 
 
 def test_requests_must_use_https() -> None:
@@ -113,7 +114,7 @@ def test_secret_shaped_text_is_redacted(text: str) -> None:
 
 
 def test_redaction_traverses_nested_structures() -> None:
-    payload = {
+    payload: dict[str, JsonValue] = {
         "issue": {"body": "token: ghp_0123456789abcdefghij"},
         "headers": [{"x-hub-signature-256": "sha256=deadbeef"}],
         "password": "hunter2",

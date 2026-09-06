@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from types import MappingProxyType
@@ -11,10 +11,12 @@ from uuid import UUID
 
 from .errors import ContractValidationError, ValidationCode
 from .repository import (
-    SUPERSET_FULL_NAME,
+    SUPERSET_REPOSITORY,
     RepositoryIdentity,
     TargetCommit,
     require_superset_repository,
+    validate_pull_request_url,
+    validate_superset_repository_field,
 )
 
 TASK_ENVELOPE_SCHEMA = "relay_agent_task.v1"
@@ -181,10 +183,7 @@ class TaskEnvelope:
     allowed_capabilities: frozenset[AgentCapability]
     objective: str
     input_artifact_ids: tuple[UUID, ...] = ()
-    repository: RepositoryIdentity = field(
-        default_factory=lambda: require_superset_repository(SUPERSET_FULL_NAME)
-    )
-    output_schema: str = ""
+    repository: RepositoryIdentity = SUPERSET_REPOSITORY
     envelope_schema: str = TASK_ENVELOPE_SCHEMA
 
     def __post_init__(self) -> None:
@@ -215,14 +214,17 @@ class TaskEnvelope:
                 ValidationCode.MALFORMED_ENVELOPE,
                 "input_artifact_ids must be unique",
             )
-        object.__setattr__(
-            self, "repository", require_superset_repository(self.repository)
-        )
-        object.__setattr__(
-            self, "allowed_capabilities", frozenset(self.allowed_capabilities)
-        )
-        if not self.output_schema:
-            object.__setattr__(self, "output_schema", OUTPUT_SCHEMAS[self.kind])
+        if not isinstance(self.allowed_capabilities, frozenset):
+            raise ContractValidationError(
+                ValidationCode.MALFORMED_ENVELOPE,
+                "allowed_capabilities must be a frozenset",
+            )
+        validate_superset_repository_field(self.repository)
+
+    @property
+    def output_schema(self) -> str:
+        """The result schema this task kind must return."""
+        return OUTPUT_SCHEMAS[self.kind]
 
     @property
     def deadline(self) -> datetime:
@@ -297,25 +299,25 @@ class PullRequestLink:
     repository: RepositoryIdentity
     number: int
     html_url: str
-    head_branch: str
+    head_branch: str | None = None
+    state: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "repository", require_superset_repository(self.repository)
-        )
-        if not isinstance(self.number, int) or self.number < 1:
+        validate_superset_repository_field(self.repository)
+        if isinstance(self.number, bool) or (
+            not isinstance(self.number, int) or self.number < 1
+        ):
             raise ContractValidationError(
                 ValidationCode.MALFORMED_RESPONSE,
                 "pull request number must be positive",
             )
-        expected_prefix = f"https://github.com/{SUPERSET_FULL_NAME}/pull/"
-        if not isinstance(self.html_url, str) or not self.html_url.startswith(
-            expected_prefix
-        ):
-            raise ContractValidationError(
-                ValidationCode.UNAUTHORIZED_REPOSITORY,
-                "pull request link must target the Superset repository",
-            )
+        validate_pull_request_url(self.html_url, pull_request_number=self.number)
+        for name, value in (("head_branch", self.head_branch), ("state", self.state)):
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ContractValidationError(
+                    ValidationCode.MALFORMED_RESPONSE,
+                    f"pull request {name} must be non-empty text when present",
+                )
 
 
 @dataclass(frozen=True)
@@ -362,9 +364,7 @@ class ResultEnvelope:
     output_schema: str
     output_size_bytes: int
     payload: ResultPayload
-    repository: RepositoryIdentity = field(
-        default_factory=lambda: require_superset_repository(SUPERSET_FULL_NAME)
-    )
+    repository: RepositoryIdentity = SUPERSET_REPOSITORY
 
     def __post_init__(self) -> None:
         _require_uuid(self.task_id, "task_id")
@@ -387,9 +387,7 @@ class ResultEnvelope:
                 ValidationCode.MALFORMED_RESPONSE,
                 "output_size_bytes cannot be negative",
             )
-        object.__setattr__(
-            self, "repository", require_superset_repository(self.repository)
-        )
+        validate_superset_repository_field(self.repository)
 
 
 @dataclass(frozen=True)
@@ -411,11 +409,6 @@ def validate_task(task: TaskEnvelope, policy: TaskPolicy | None = None) -> None:
         raise ContractValidationError(
             ValidationCode.OUTPUT_SCHEMA_MISMATCH,
             "task envelope schema is unsupported",
-        )
-    if task.output_schema != OUTPUT_SCHEMAS[task.kind]:
-        raise ContractValidationError(
-            ValidationCode.OUTPUT_SCHEMA_MISMATCH,
-            "task output schema does not match its kind",
         )
     require_superset_repository(task.repository)
     if (

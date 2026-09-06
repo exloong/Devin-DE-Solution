@@ -54,7 +54,6 @@ from .github_client import (
     LiveGitHubClient,
     RecordedCommand,
     StaticTokenProvider,
-    TokenProvider,
 )
 from .github_commands import (
     PROHIBITED_COMMANDS,
@@ -124,6 +123,7 @@ from .transport import (
     HttpResponse,
     HttpTransport,
     RecordedTransport,
+    TokenProvider,
     parse_timestamp,
     require_field,
     require_json_array,

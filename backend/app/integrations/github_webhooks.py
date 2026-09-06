@@ -10,9 +10,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from threading import Lock
-from typing import Any, Protocol
+from typing import Protocol
 
 from .errors import ContractValidationError, ValidationCode
+from .json_values import JsonObject, JsonValue
 from .redaction import redact_mapping
 from .repository import (
     SUPERSET_FULL_NAME,
@@ -145,7 +146,7 @@ class AcceptedWebhookEvent:
     repository: RepositoryIdentity
     issue_number: int | None
     pull_request_number: int | None
-    redacted_payload: Mapping[str, Any]
+    redacted_payload: JsonObject
 
 
 class DeliveryDeduplicator(Protocol):
@@ -247,15 +248,15 @@ class GitHubWebhookVerifier:
         )
 
 
-def _parse_json_object(raw_body: bytes) -> Mapping[str, Any]:
+def _parse_json_object(raw_body: bytes) -> JsonObject:
     try:
-        payload = json.loads(raw_body)
+        payload: JsonValue = json.loads(raw_body)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ContractValidationError(
             ValidationCode.MALFORMED_ENVELOPE,
             "GitHub webhook body is not valid JSON",
         ) from error
-    if not isinstance(payload, dict):
+    if not isinstance(payload, Mapping):
         raise ContractValidationError(
             ValidationCode.MALFORMED_ENVELOPE,
             "GitHub webhook body must be a JSON object",

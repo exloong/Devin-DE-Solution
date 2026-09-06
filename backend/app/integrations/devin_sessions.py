@@ -2,18 +2,27 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from threading import Lock
-from typing import Any, Protocol
+from typing import Protocol
 from uuid import uuid5
 
 from .errors import ContractValidationError, ValidationCode
 from .github_commands import quote_untrusted_text
+from .json_values import JsonObject, JsonValue
 from .redaction import redact_mapping, redact_text
-from .repository import SUPERSET_FULL_NAME, TargetCommit, require_superset_repository
+from .repository import (
+    SUPERSET_FULL_NAME,
+    SUPERSET_REPOSITORY,
+    TargetCommit,
+    require_superset_repository,
+    superset_pull_request_url,
+    validate_pull_request_url,
+)
 from .tasks import (
     ClassificationOutput,
     EvidencePacketOutput,
@@ -30,15 +39,46 @@ from .tasks import (
 )
 from .transport import (
     HttpRequest,
+    HttpResponse,
     HttpTransport,
+    TokenProvider,
+    object_array,
+    optional_object,
+    optional_str,
     parse_timestamp,
-    require_field,
+    require_array,
+    require_bool,
+    require_int,
     require_json_object,
+    require_number,
+    require_str,
     require_success,
+    string_tuple,
 )
 
-DEVIN_API_ROOT = "https://api.devin.ai/v1"
+DEVIN_API_ROOT = "https://api.devin.ai/v3"
 DEVIN_APP_ROOT = "https://app.devin.ai"
+DEVIN_SESSION_PAGE_SIZE = 50
+DEVIN_MESSAGE_PAGE_SIZE = 100
+MAX_SESSION_PAGES = 20
+MAX_MESSAGE_PAGES = 20
+
+_ORG_ID_PATTERN = re.compile(r"^org-[A-Za-z0-9]{8,64}$")
+
+
+def validate_organization_id(org_id: object) -> str:
+    """Validate the organization that scopes every v3 session request.
+
+    The v3 session API is organization-scoped, so a missing or malformed
+    organization identifier is rejected before any request is sent rather than
+    producing a request against an unintended URL.
+    """
+    if not isinstance(org_id, str) or not _ORG_ID_PATTERN.fullmatch(org_id.strip()):
+        raise ContractValidationError(
+            ValidationCode.MALFORMED_ENVELOPE,
+            "Devin organization id must look like org-<identifier>",
+        )
+    return org_id.strip()
 
 
 class SessionStatus(str, Enum):
@@ -61,33 +101,59 @@ class SessionStatus(str, Enum):
 
 
 _DEVIN_STATUS_MAP: Mapping[str, SessionStatus] = {
-    "queued": SessionStatus.QUEUED,
-    "pending": SessionStatus.QUEUED,
+    "new": SessionStatus.QUEUED,
+    "claimed": SessionStatus.QUEUED,
     "running": SessionStatus.RUNNING,
-    "working": SessionStatus.RUNNING,
-    "resumed": SessionStatus.RUNNING,
-    "blocked": SessionStatus.NEEDS_ATTENTION,
+    "resuming": SessionStatus.RUNNING,
     "suspended": SessionStatus.NEEDS_ATTENTION,
-    "expired": SessionStatus.FAILED,
-    "failed": SessionStatus.FAILED,
-    "finished": SessionStatus.COMPLETED,
-    "completed": SessionStatus.COMPLETED,
-    "stopped": SessionStatus.CANCELLED,
-    "cancelled": SessionStatus.CANCELLED,
+    "error": SessionStatus.FAILED,
 }
 
+_EXIT_DETAIL_MAP: Mapping[str, SessionStatus] = {
+    "finished": SessionStatus.COMPLETED,
+    "user_request": SessionStatus.CANCELLED,
+    "inactivity": SessionStatus.NEEDS_ATTENTION,
+    "error": SessionStatus.FAILED,
+    "usage_limit_exceeded": SessionStatus.FAILED,
+    "out_of_credits": SessionStatus.FAILED,
+    "out_of_quota": SessionStatus.FAILED,
+    "no_quota_allocation": SessionStatus.FAILED,
+    "payment_declined": SessionStatus.FAILED,
+    "org_usage_limit_exceeded": SessionStatus.FAILED,
+    "user_usage_limit_exceeded": SessionStatus.FAILED,
+    "total_session_limit_exceeded": SessionStatus.FAILED,
+}
 
-def map_session_status(value: object) -> SessionStatus:
-    """Map a platform status string onto a Relay session state.
+_ATTENTION_DETAILS: frozenset[str] = frozenset(
+    {"waiting_for_user", "waiting_for_approval"}
+)
 
-    An unrecognized status becomes ``needs_attention`` so an operator reviews
-    it rather than the lifecycle advancing on an assumption.
+
+def map_session_status(value: object, status_detail: object = None) -> SessionStatus:
+    """Map a v3 ``status``/``status_detail`` pair onto a Relay session state.
+
+    ``exit`` only says the session stopped, so the detail decides whether that
+    was completion, an operator cancellation, or an error. An unrecognized
+    status or detail becomes ``needs_attention`` so an operator reviews it
+    rather than the lifecycle advancing on an assumption.
     """
     if not isinstance(value, str) or not value.strip():
         raise ContractValidationError(
             ValidationCode.MALFORMED_RESPONSE, "session status is missing"
         )
-    return _DEVIN_STATUS_MAP.get(value.strip().lower(), SessionStatus.NEEDS_ATTENTION)
+    if status_detail is not None and not isinstance(status_detail, str):
+        raise ContractValidationError(
+            ValidationCode.MALFORMED_RESPONSE, "session status detail is malformed"
+        )
+    status = value.strip().lower()
+    detail = None if status_detail is None else status_detail.strip().lower()
+    if status == "exit":
+        if detail is None:
+            return SessionStatus.NEEDS_ATTENTION
+        return _EXIT_DETAIL_MAP.get(detail, SessionStatus.NEEDS_ATTENTION)
+    if detail in _ATTENTION_DETAILS:
+        return SessionStatus.NEEDS_ATTENTION
+    return _DEVIN_STATUS_MAP.get(status, SessionStatus.NEEDS_ATTENTION)
 
 
 class ConversationAvailability(str, Enum):
@@ -148,6 +214,7 @@ class ConversationMessage:
     created_at: datetime
     text: str
     attachment_urls: tuple[str, ...] = ()
+    event_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -167,8 +234,9 @@ class SessionSnapshot:
     updated_at: datetime
     links: SessionLinks
     conversation_availability: ConversationAvailability
-    structured_output: Mapping[str, Any] | None = None
+    structured_output: JsonObject | None = None
     pull_requests: tuple[PullRequestLink, ...] = ()
+    is_archived: bool = False
 
     def __post_init__(self) -> None:
         require_superset_repository(self.repository_full_name)
@@ -308,7 +376,7 @@ def _deterministic_payload(task: TaskEnvelope) -> ResultPayload:
 
 
 def parse_result_payload(
-    kind: TaskKind, structured_output: Mapping[str, Any]
+    kind: TaskKind, structured_output: JsonObject
 ) -> ResultPayload:
     """Parse a session's structured output into its typed payload."""
     if not isinstance(structured_output, Mapping):
@@ -319,60 +387,50 @@ def parse_result_payload(
     action = f"{kind.value} structured output"
     if kind is TaskKind.CLASSIFICATION:
         return ClassificationOutput(
-            classification=require_field(
-                structured_output, "classification", str, action=action
+            classification=require_str(
+                structured_output, "classification", action=action
             ),
-            confidence=float(
-                require_field(
-                    structured_output, "confidence", (int, float), action=action
-                )
-            ),
-            rationale=require_field(structured_output, "rationale", str, action=action),
+            confidence=require_number(structured_output, "confidence", action=action),
+            rationale=require_str(structured_output, "rationale", action=action),
         )
     if kind is TaskKind.REPRODUCTION:
         return ReproductionOutput(
-            reproduced=require_field(
-                structured_output, "reproduced", bool, action=action
+            reproduced=require_bool(structured_output, "reproduced", action=action),
+            attempts=require_int(structured_output, "attempts", action=action),
+            observed_behavior=require_str(
+                structured_output, "observed_behavior", action=action
             ),
-            attempts=require_field(structured_output, "attempts", int, action=action),
-            observed_behavior=require_field(
-                structured_output, "observed_behavior", str, action=action
+            target_behavior=require_str(
+                structured_output, "target_behavior", action=action
             ),
-            target_behavior=require_field(
-                structured_output, "target_behavior", str, action=action
-            ),
-            control_behavior=require_field(
-                structured_output, "control_behavior", str, action=action
+            control_behavior=require_str(
+                structured_output, "control_behavior", action=action
             ),
         )
     if kind is TaskKind.EVIDENCE_PACKET:
         return EvidencePacketOutput(
-            observed_behavior=require_field(
-                structured_output, "observed_behavior", str, action=action
+            observed_behavior=require_str(
+                structured_output, "observed_behavior", action=action
             ),
-            expected_behavior_evidence=require_field(
-                structured_output, "expected_behavior_evidence", str, action=action
+            expected_behavior_evidence=require_str(
+                structured_output, "expected_behavior_evidence", action=action
             ),
-            environment=require_field(
-                structured_output, "environment", str, action=action
+            environment=require_str(structured_output, "environment", action=action),
+            minimal_condition=require_str(
+                structured_output, "minimal_condition", action=action
             ),
-            minimal_condition=require_field(
-                structured_output, "minimal_condition", str, action=action
-            ),
-            repeat_count=require_field(
-                structured_output, "repeat_count", int, action=action
-            ),
-            remaining_uncertainty=require_field(
-                structured_output, "remaining_uncertainty", str, action=action
+            repeat_count=require_int(structured_output, "repeat_count", action=action),
+            remaining_uncertainty=require_str(
+                structured_output, "remaining_uncertainty", action=action
             ),
         )
-    pull_requests = _pull_requests(structured_output)
+    pull_requests = _structured_pull_requests(structured_output)
     return FixOutput(
-        summary=require_field(structured_output, "summary", str, action=action),
-        branch_name=require_field(structured_output, "branch_name", str, action=action),
+        summary=require_str(structured_output, "summary", action=action),
+        branch_name=require_str(structured_output, "branch_name", action=action),
         pull_request=pull_requests[0] if pull_requests else None,
-        regression_test_paths=_string_tuple(
-            structured_output.get("regression_test_paths")
+        regression_test_paths=string_tuple(
+            structured_output.get("regression_test_paths"), action=action
         ),
     )
 
@@ -398,11 +456,9 @@ class FakeDevinSessionAdapter:
         conversation_availability: ConversationAvailability = (
             ConversationAvailability.SYNCHRONIZED
         ),
-        desktop_available: bool = True,
     ) -> None:
         self._policy = policy
         self._conversation_availability = conversation_availability
-        self._desktop_available = desktop_available
         self._sessions: dict[str, _FakeSession] = {}
         self._order: list[str] = []
         self._lock = Lock()
@@ -548,7 +604,7 @@ class FakeDevinSessionAdapter:
     def _snapshot(self, session: _FakeSession) -> SessionSnapshot:
         task = session.task
         pull_requests: tuple[PullRequestLink, ...] = ()
-        structured_output: Mapping[str, Any] | None = None
+        structured_output: JsonObject | None = None
         if session.status is SessionStatus.COMPLETED:
             payload = _deterministic_payload(task)
             structured_output = {"schema": task.output_schema}
@@ -566,15 +622,7 @@ class FakeDevinSessionAdapter:
             budget_seconds=task.budget.wall_seconds,
             created_at=session.created_at,
             updated_at=session.updated_at,
-            links=SessionLinks(
-                session_url=canonical_session_url(session.session_id),
-                desktop_url=(
-                    f"{DEVIN_APP_ROOT}/sessions/"
-                    f"{session.session_id.removeprefix('devin-')}/desktop"
-                    if self._desktop_available
-                    else None
-                ),
-            ),
+            links=SessionLinks(session_url=canonical_session_url(session.session_id)),
             conversation_availability=self._conversation_availability,
             structured_output=structured_output,
             pull_requests=pull_requests,
@@ -586,11 +634,19 @@ class LiveDevinSessionClient:
     """Devin v3 session client built on an injected transport."""
 
     transport: HttpTransport
-    token_provider: Any
+    token_provider: TokenProvider
+    org_id: str
     policy: TaskPolicy = field(default_factory=TaskPolicy)
     api_root: str = DEVIN_API_ROOT
     correlation_id: str | None = None
-    conversation_enabled: bool = False
+
+    def __post_init__(self) -> None:
+        self.org_id = validate_organization_id(self.org_id)
+
+    @property
+    def sessions_path(self) -> str:
+        """The organization-scoped session collection path."""
+        return f"/organizations/{self.org_id}/sessions"
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -603,9 +659,9 @@ class LiveDevinSessionClient:
         method: str,
         path: str,
         *,
-        json_body: Mapping[str, Any] | None = None,
+        json_body: JsonObject | None = None,
         query: Mapping[str, str] | None = None,
-    ) -> Any:
+    ) -> HttpResponse:
         return self.transport.send(
             HttpRequest(
                 method=method,
@@ -625,10 +681,13 @@ class LiveDevinSessionClient:
         payload = require_json_object(
             self._send(
                 "POST",
-                "/sessions",
+                self.sessions_path,
                 json_body={
                     "prompt": prompt,
-                    "idempotent": True,
+                    "title": (
+                        f"Relay {task.kind.value} for issue revision "
+                        f"{task.issue_revision}"
+                    ),
                     "max_acu_limit": max(task.budget.wall_seconds // 60, 1),
                     "tags": [
                         "relay",
@@ -646,34 +705,40 @@ class LiveDevinSessionClient:
     def get_session(self, session_id: str) -> SessionSnapshot:
         normalized = normalize_session_id(session_id)
         payload = require_json_object(
-            self._send("GET", f"/session/{normalized}"), action="get session"
+            self._send("GET", f"{self.sessions_path}/{normalized}"),
+            action="get session",
         )
         return self._snapshot_from_payload(payload)
 
     def list_sessions(self, *, limit: int = 20) -> tuple[SessionSnapshot, ...]:
+        """List sessions, following the documented ``first``/``after`` cursor."""
         if limit < 1:
             raise ContractValidationError(
                 ValidationCode.MALFORMED_ENVELOPE, "limit must be positive"
             )
-        payload = require_json_object(
-            self._send("GET", "/sessions", query={"limit": str(limit)}),
-            action="list sessions",
-        )
-        sessions = payload.get("sessions")
-        if not isinstance(sessions, list):
-            raise ContractValidationError(
-                ValidationCode.MALFORMED_RESPONSE,
-                "list sessions response is malformed",
-            )
+        action = "list sessions"
         snapshots: list[SessionSnapshot] = []
-        for entry in sessions:
-            if not isinstance(entry, Mapping):
-                raise ContractValidationError(
-                    ValidationCode.MALFORMED_RESPONSE,
-                    "list sessions entry is malformed",
-                )
-            snapshots.append(self._snapshot_from_payload(entry))
-        return tuple(snapshots)
+        cursor: str | None = None
+        for _page in range(MAX_SESSION_PAGES):
+            query = {"first": str(min(limit - len(snapshots), DEVIN_SESSION_PAGE_SIZE))}
+            if cursor is not None:
+                query["after"] = cursor
+            payload = require_json_object(
+                self._send("GET", self.sessions_path, query=query), action=action
+            )
+            for entry in object_array(
+                require_array(payload, "items", action=action), action=action
+            ):
+                snapshots.append(self._snapshot_from_payload(entry))
+            if len(snapshots) >= limit or not require_bool(
+                payload, "has_next_page", action=action
+            ):
+                return tuple(snapshots[:limit])
+            cursor = require_str(payload, "end_cursor", action=action)
+        raise ContractValidationError(
+            ValidationCode.MALFORMED_RESPONSE,
+            f"session listing did not terminate within {MAX_SESSION_PAGES} pages",
+        )
 
     def send_message(self, session_id: str, message: str) -> SessionSnapshot:
         if not isinstance(message, str) or not message.strip():
@@ -684,7 +749,7 @@ class LiveDevinSessionClient:
         require_success(
             self._send(
                 "POST",
-                f"/session/{normalized}/message",
+                f"{self.sessions_path}/{normalized}/messages",
                 json_body={"message": message},
             ),
             action="send session message",
@@ -692,51 +757,55 @@ class LiveDevinSessionClient:
         return self.get_session(normalized)
 
     def cancel_session(self, session_id: str) -> SessionSnapshot:
+        """Archive the session, which also puts a running session to sleep.
+
+        Archiving is the documented bounded stop request; Relay treats the
+        archived session as cancelled once the platform confirms it.
+        """
         normalized = normalize_session_id(session_id)
-        require_success(
-            self._send(
-                "PATCH",
-                f"/session/{normalized}",
-                json_body={"status_enum": "stopped"},
-            ),
-            action="cancel session",
-        )
+        action = "archive session"
+        response = self._send("POST", f"{self.sessions_path}/{normalized}/archive")
+        require_success(response, action=action)
+        if isinstance(response.json_body, Mapping):
+            archived = response.json_body.get("is_archived")
+            if archived is not None and archived is not True:
+                raise ContractValidationError(
+                    ValidationCode.MALFORMED_RESPONSE,
+                    "archive request did not archive the session",
+                )
         return self.get_session(normalized)
 
     def fetch_conversation(
         self, session_id: str
     ) -> tuple[ConversationAvailability, tuple[ConversationMessage, ...]]:
+        """Read the documented message list, following its cursor to the end."""
         normalized = normalize_session_id(session_id)
-        if not self.conversation_enabled:
-            return ConversationAvailability.EXTERNAL_ONLY, ()
-        payload = require_json_object(
-            self._send("GET", f"/session/{normalized}"), action="get session"
+        action = "list session messages"
+        messages: list[ConversationMessage] = []
+        cursor: str | None = None
+        for _page in range(MAX_MESSAGE_PAGES):
+            query = {"first": str(DEVIN_MESSAGE_PAGE_SIZE)}
+            if cursor is not None:
+                query["after"] = cursor
+            payload = require_json_object(
+                self._send(
+                    "GET",
+                    f"{self.sessions_path}/{normalized}/messages",
+                    query=query,
+                ),
+                action=action,
+            )
+            for entry in object_array(
+                require_array(payload, "items", action=action), action=action
+            ):
+                messages.append(_conversation_message(entry, action=action))
+            if not require_bool(payload, "has_next_page", action=action):
+                return ConversationAvailability.SYNCHRONIZED, tuple(messages)
+            cursor = require_str(payload, "end_cursor", action=action)
+        raise ContractValidationError(
+            ValidationCode.MALFORMED_RESPONSE,
+            f"message listing did not terminate within {MAX_MESSAGE_PAGES} pages",
         )
-        messages = payload.get("messages")
-        if messages is None:
-            return ConversationAvailability.EXTERNAL_ONLY, ()
-        if not isinstance(messages, list):
-            raise ContractValidationError(
-                ValidationCode.MALFORMED_RESPONSE, "session messages are malformed"
-            )
-        parsed: list[ConversationMessage] = []
-        for entry in messages:
-            if not isinstance(entry, Mapping):
-                raise ContractValidationError(
-                    ValidationCode.MALFORMED_RESPONSE,
-                    "session message entry is malformed",
-                )
-            parsed.append(
-                ConversationMessage(
-                    author=str(entry.get("type", "unknown")),
-                    created_at=parse_timestamp(
-                        entry.get("timestamp"), "message timestamp"
-                    ),
-                    text=redact_text(str(entry.get("message", ""))),
-                    attachment_urls=_string_tuple(entry.get("attachment_urls")),
-                )
-            )
-        return ConversationAvailability.SYNCHRONIZED, tuple(parsed)
 
     def collect_result(self, session_id: str, task: TaskEnvelope) -> ResultEnvelope:
         snapshot = self.get_session(session_id)
@@ -765,8 +834,11 @@ class LiveDevinSessionClient:
             completed_at=snapshot.updated_at,
             target_commit=snapshot.target_commit,
             workspace_status=snapshot.workspace_status,
-            output_schema=str(
-                snapshot.structured_output.get("schema", task.output_schema)
+            output_schema=(
+                optional_str(
+                    snapshot.structured_output, "schema", action="structured output"
+                )
+                or task.output_schema
             ),
             output_size_bytes=len(repr(snapshot.structured_output).encode("utf-8")),
             payload=payload,
@@ -774,20 +846,27 @@ class LiveDevinSessionClient:
         )
 
     def _snapshot_from_payload(
-        self, payload: Mapping[str, Any], *, task: TaskEnvelope | None = None
+        self, payload: JsonObject, *, task: TaskEnvelope | None = None
     ) -> SessionSnapshot:
         action = "session response"
         session_id = normalize_session_id(
-            require_field(payload, "session_id", str, action=action)
+            require_str(payload, "session_id", action=action)
         )
-        status = map_session_status(payload.get("status_enum", payload.get("status")))
-        structured_output = payload.get("structured_output")
-        if structured_output is not None and not isinstance(structured_output, Mapping):
+        payload_org_id = optional_str(payload, "org_id", action=action)
+        if payload_org_id is not None and payload_org_id != self.org_id:
             raise ContractValidationError(
                 ValidationCode.MALFORMED_RESPONSE,
-                "structured_output must be a JSON object",
+                "session belongs to another organization",
             )
-        tags = _string_tuple(payload.get("tags"))
+        status = map_session_status(
+            require_str(payload, "status", action=action),
+            optional_str(payload, "status_detail", action=action),
+        )
+        is_archived = _optional_bool(payload, "is_archived", action=action) or False
+        if is_archived and not status.is_terminal:
+            status = SessionStatus.CANCELLED
+        structured_output = optional_object(payload, "structured_output", action=action)
+        tags = string_tuple(payload.get("tags"), action=action)
         target_commit = _commit_from_tags(tags, task)
         created_at = parse_timestamp(
             payload.get("created_at"), "created_at", default=_task_created_at(task)
@@ -811,7 +890,10 @@ class LiveDevinSessionClient:
             kind=_kind_from_tags(tags, task),
             status=status,
             workspace_status=workspace_status,
-            title=str(payload.get("title") or f"Devin session {session_id}"),
+            title=(
+                optional_str(payload, "title", action=action)
+                or f"Devin session {session_id}"
+            ),
             repository_full_name=SUPERSET_FULL_NAME,
             target_commit=target_commit,
             budget_seconds=(
@@ -823,17 +905,12 @@ class LiveDevinSessionClient:
                 session_url=canonical_session_url(session_id),
                 desktop_url=_optional_https(payload.get("desktop_url")),
             ),
-            conversation_availability=(
-                ConversationAvailability.SYNCHRONIZED
-                if self.conversation_enabled
-                else ConversationAvailability.EXTERNAL_ONLY
-            ),
+            conversation_availability=ConversationAvailability.SYNCHRONIZED,
             structured_output=(
-                None
-                if structured_output is None
-                else redact_mapping(dict(structured_output))
+                None if structured_output is None else redact_mapping(structured_output)
             ),
-            pull_requests=_pull_requests(structured_output),
+            pull_requests=_session_pull_requests(payload.get("pull_requests")),
+            is_archived=is_archived,
         )
 
 
@@ -841,11 +918,38 @@ def _task_created_at(task: TaskEnvelope | None) -> datetime | None:
     return None if task is None else task.created_at
 
 
-def _budget(payload: Mapping[str, Any]) -> int:
+def _budget(payload: JsonObject) -> int:
     value = payload.get("max_acu_limit")
     if isinstance(value, int) and not isinstance(value, bool) and value > 0:
         return value * 60
     return 3_600
+
+
+def _optional_bool(payload: JsonObject, key: str, *, action: str) -> bool | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise ContractValidationError(
+            ValidationCode.MALFORMED_RESPONSE, f"{action} field {key} must be a boolean"
+        )
+    return value
+
+
+def _conversation_message(entry: JsonObject, *, action: str) -> ConversationMessage:
+    """Parse one documented message-list entry."""
+    source = require_str(entry, "source", action=action)
+    if source not in {"devin", "user"}:
+        raise ContractValidationError(
+            ValidationCode.MALFORMED_RESPONSE,
+            f"session message source {source!r} is unsupported",
+        )
+    return ConversationMessage(
+        author=source,
+        created_at=parse_timestamp(entry.get("created_at"), "message created_at"),
+        text=redact_text(require_str(entry, "message", action=action)),
+        event_id=optional_str(entry, "event_id", action=action),
+    )
 
 
 def _tag_value(tags: Sequence[str], prefix: str) -> str | None:
@@ -882,18 +986,6 @@ def _commit_from_tags(tags: Sequence[str], task: TaskEnvelope | None) -> TargetC
     )
 
 
-def _string_tuple(value: object) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    if not isinstance(value, list) or any(
-        not isinstance(entry, str) for entry in value
-    ):
-        raise ContractValidationError(
-            ValidationCode.MALFORMED_RESPONSE, "expected a list of strings"
-        )
-    return tuple(str(entry) for entry in value)
-
-
 def _optional_https(value: object) -> str | None:
     if value is None:
         return None
@@ -904,36 +996,45 @@ def _optional_https(value: object) -> str | None:
     return value
 
 
-def _pull_requests(structured_output: object) -> tuple[PullRequestLink, ...]:
+def _structured_pull_requests(
+    structured_output: JsonValue,
+) -> tuple[PullRequestLink, ...]:
+    """Parse pull-request links a session reported in its structured output."""
     if not isinstance(structured_output, Mapping):
         return ()
-    entries = structured_output.get("pull_requests")
-    if entries is None:
-        return ()
-    if not isinstance(entries, list):
-        raise ContractValidationError(
-            ValidationCode.MALFORMED_RESPONSE, "pull_requests must be a list"
-        )
+    action = "session pull request"
     links: list[PullRequestLink] = []
-    for entry in entries:
-        if not isinstance(entry, Mapping):
-            raise ContractValidationError(
-                ValidationCode.MALFORMED_RESPONSE, "pull request entry is malformed"
-            )
+    for entry in object_array(structured_output.get("pull_requests"), action=action):
         links.append(
             PullRequestLink(
                 repository=require_superset_repository(
-                    str(entry.get("repository", ""))
+                    require_str(entry, "repository", action=action)
                 ),
-                number=require_field(
-                    entry, "number", int, action="session pull request"
-                ),
-                html_url=require_field(
-                    entry, "html_url", str, action="session pull request"
-                ),
-                head_branch=require_field(
-                    entry, "head_branch", str, action="session pull request"
-                ),
+                number=require_int(entry, "number", action=action),
+                html_url=require_str(entry, "html_url", action=action),
+                head_branch=require_str(entry, "head_branch", action=action),
+            )
+        )
+    return tuple(links)
+
+
+def _session_pull_requests(value: JsonValue) -> tuple[PullRequestLink, ...]:
+    """Parse the documented ``pull_requests`` entries of a session response.
+
+    Each entry carries only ``pr_url`` and ``pr_state``, so the number comes
+    from the validated Superset URL and no head branch is invented.
+    """
+    action = "session pull request"
+    links: list[PullRequestLink] = []
+    for entry in object_array(value, action=action):
+        pr_url = require_str(entry, "pr_url", action=action)
+        number = validate_pull_request_url(pr_url)
+        links.append(
+            PullRequestLink(
+                repository=SUPERSET_REPOSITORY,
+                number=number,
+                html_url=superset_pull_request_url(number),
+                state=optional_str(entry, "pr_state", action=action),
             )
         )
     return tuple(links)

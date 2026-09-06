@@ -6,11 +6,14 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from fnmatch import fnmatchcase
+from functools import lru_cache
 
 from .errors import ContractValidationError, ValidationCode
 
 CODEOWNERS_PATH = ".github/CODEOWNERS"
+
+_SUPPORTED_PATTERN_CHARACTERS = re.compile(r"^[A-Za-z0-9._*/-]+$")
+_SEGMENT_WILDCARD = "[^/]*"
 
 _USER_PATTERN = re.compile(r"^@([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))$")
 _TEAM_PATTERN = re.compile(
@@ -74,8 +77,7 @@ def _normalize_path(path: str) -> str:
         raise ContractValidationError(
             ValidationCode.MALFORMED_ENVELOPE, "changed path must be non-empty text"
         )
-    normalized = path.strip().lstrip("./")
-    normalized = normalized.removeprefix("/")
+    normalized = path.strip().removeprefix("./").removeprefix("/")
     if ".." in normalized.split("/"):
         raise ContractValidationError(
             ValidationCode.MALFORMED_ENVELOPE, "changed path may not traverse upward"
@@ -83,45 +85,73 @@ def _normalize_path(path: str) -> str:
     return normalized
 
 
+def _segment_regex(segment: str) -> str:
+    """Translate one pattern segment, where ``*`` never crosses ``/``."""
+    parts: list[str] = []
+    for character in segment:
+        parts.append(_SEGMENT_WILDCARD if character == "*" else re.escape(character))
+    return "".join(parts)
+
+
+@lru_cache(maxsize=512)
+def compile_codeowners_pattern(pattern: str) -> re.Pattern[str]:
+    """Compile a CODEOWNERS pattern using gitignore segment semantics.
+
+    Only the syntax GitHub applies to Superset's file is supported: anchored
+    and unanchored paths, directory patterns (``/dir/``), single-segment
+    wildcards, and ``**`` as a whole segment. Anything else - character
+    classes, ``?``, negation, escapes - fails closed rather than being matched
+    by looser Python glob rules that let ``*`` cross ``/``.
+    """
+    if not isinstance(pattern, str) or not pattern.strip():
+        raise ContractValidationError(
+            ValidationCode.MALFORMED_ENVELOPE, "CODEOWNERS pattern is empty"
+        )
+    if pattern != pattern.strip() or not _SUPPORTED_PATTERN_CHARACTERS.fullmatch(
+        pattern
+    ):
+        raise ContractValidationError(
+            ValidationCode.MALFORMED_ENVELOPE,
+            f"CODEOWNERS pattern {pattern!r} uses unsupported syntax",
+        )
+    directory_only = pattern.endswith("/")
+    core = pattern.rstrip("/")
+    anchored = pattern.startswith("/") or "/" in core.strip("/")
+    segments = [segment for segment in core.strip("/").split("/") if segment]
+    if not segments:
+        raise ContractValidationError(
+            ValidationCode.MALFORMED_ENVELOPE,
+            f"CODEOWNERS pattern {pattern!r} has no path segments",
+        )
+    for segment in segments:
+        if segment == "..":
+            raise ContractValidationError(
+                ValidationCode.MALFORMED_ENVELOPE,
+                f"CODEOWNERS pattern {pattern!r} may not traverse upward",
+            )
+        if "**" in segment and segment != "**":
+            raise ContractValidationError(
+                ValidationCode.MALFORMED_ENVELOPE,
+                f"CODEOWNERS pattern {pattern!r} uses ** inside a segment",
+            )
+
+    body = ""
+    for index, segment in enumerate(segments):
+        last = index == len(segments) - 1
+        if segment == "**":
+            body += ".*" if last else "(?:[^/]+/)*"
+            continue
+        body += _segment_regex(segment) + ("" if last else "/")
+    prefix = "" if anchored else "(?:.*/)?"
+    suffix = "/.+" if directory_only else "(?:/.+)?"
+    return re.compile(f"^{prefix}{body}{suffix}$")
+
+
 def _pattern_matches(pattern: str, path: str) -> bool:
     """Match a CODEOWNERS pattern against a repository-relative path."""
-    normalized_path = _normalize_path(path)
-    anchored = pattern.startswith("/")
-    cleaned = pattern.lstrip("/")
-
-    if cleaned in {"*", "**"}:
-        return True
-    if cleaned.endswith("/"):
-        prefix = cleaned
-        if anchored:
-            return normalized_path.startswith(prefix)
-        return (
-            normalized_path.startswith(prefix) or f"/{prefix}" in f"/{normalized_path}"
-        )
-    if cleaned.endswith("/**"):
-        prefix = cleaned[:-2]
-        return normalized_path.startswith(prefix)
-
-    if "*" in cleaned or "?" in cleaned or "[" in cleaned:
-        if fnmatchcase(normalized_path, cleaned):
-            return True
-        if not anchored:
-            segments = normalized_path.split("/")
-            return any(
-                fnmatchcase("/".join(segments[index:]), cleaned)
-                for index in range(1, len(segments))
-            )
-        return False
-
-    if normalized_path == cleaned:
-        return True
-    if normalized_path.startswith(f"{cleaned}/"):
-        return True
-    if not anchored:
-        return f"/{cleaned}" in f"/{normalized_path}" or f"/{cleaned}/" in (
-            f"/{normalized_path}/"
-        )
-    return False
+    return (
+        compile_codeowners_pattern(pattern).fullmatch(_normalize_path(path)) is not None
+    )
 
 
 @dataclass(frozen=True)
@@ -142,9 +172,10 @@ class CodeownersFile:
             if not line:
                 continue
             tokens = line.split()
-            if len(tokens) < 2:
-                continue
+            # A pattern without owners clears ownership for matching paths,
+            # which routing then reports as unowned rather than guessing.
             pattern, owner_tokens = tokens[0], tokens[1:]
+            compile_codeowners_pattern(pattern)
             owners = tuple(Owner.parse(token) for token in owner_tokens)
             rules.append(
                 CodeownersRule(pattern=pattern, owners=owners, line_number=line_number)

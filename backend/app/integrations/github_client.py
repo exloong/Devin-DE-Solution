@@ -9,10 +9,10 @@ from __future__ import annotations
 from base64 import b64decode
 from binascii import Error as BinasciiError
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from itertools import count
 from threading import Lock
-from typing import Any, Protocol
+from typing import Protocol
 
 from .codeowners import CODEOWNERS_PATH, CodeownersFile
 from .errors import ContractValidationError, ValidationCode
@@ -34,22 +34,33 @@ from .github_commands import (
     RequestReviewers,
     ReviewersRequested,
 )
+from .json_values import JsonObject, JsonValue
 from .repository import (
     SUPERSET_FULL_NAME,
+    SUPERSET_REPOSITORY,
     RepositoryIdentity,
     TargetCommit,
     require_superset_repository,
+    validate_issue_comment_url,
+    validate_pull_request_url,
 )
 from .transport import (
     HttpRequest,
     HttpResponse,
     HttpTransport,
-    require_field,
+    TokenProvider,
+    object_array,
+    require_int,
+    require_json_array,
     require_json_object,
+    require_str,
     require_success,
 )
 
 GITHUB_API_ROOT = "https://api.github.com"
+PULL_REQUEST_FILE_PAGE_SIZE = 100
+MAX_PULL_REQUEST_FILE_PAGES = 30
+MAX_PULL_REQUEST_FILES = PULL_REQUEST_FILE_PAGE_SIZE * MAX_PULL_REQUEST_FILE_PAGES
 
 
 class GitHubClient(Protocol):
@@ -244,9 +255,7 @@ class LiveGitHubClient:
     allowed_capabilities: frozenset[GitHubCapability] = frozenset(GitHubCapability)
     api_root: str = GITHUB_API_ROOT
     correlation_id: str | None = None
-    repository: RepositoryIdentity = field(
-        default_factory=lambda: require_superset_repository(SUPERSET_FULL_NAME)
-    )
+    repository: RepositoryIdentity = SUPERSET_REPOSITORY
 
     def __post_init__(self) -> None:
         require_superset_repository(self.repository)
@@ -266,7 +275,7 @@ class LiveGitHubClient:
         method: str,
         path: str,
         *,
-        json_body: Mapping[str, Any] | None = None,
+        json_body: JsonObject | None = None,
         query: Mapping[str, str] | None = None,
     ) -> HttpResponse:
         return self.transport.send(
@@ -326,10 +335,12 @@ class LiveGitHubClient:
                 ),
                 action="create pull request",
             )
-            number = require_field(payload, "number", int, action="create pull request")
-            html_url = require_field(
-                payload, "html_url", str, action="create pull request"
+            number = _require_positive(
+                require_int(payload, "number", action="create pull request"),
+                "pull request number",
             )
+            html_url = require_str(payload, "html_url", action="create pull request")
+            validate_pull_request_url(html_url, pull_request_number=number)
             return PullRequestOpened(
                 pull_request_number=number,
                 html_url=html_url,
@@ -361,6 +372,7 @@ class LiveGitHubClient:
             )
             accepted = _accepted_logins(payload.get("requested_reviewers"), "login")
             accepted_teams = _accepted_logins(payload.get("requested_teams"), "slug")
+            _validate_pull_request_number(payload, command.pull_request_number)
             return ReviewersRequested(
                 pull_request_number=command.pull_request_number,
                 accepted_reviewers=accepted,
@@ -382,10 +394,17 @@ class LiveGitHubClient:
             ),
             action="post comment",
         )
+        comment_id = _require_positive(
+            require_int(payload, "id", action="post comment"), "comment id"
+        )
         return CommentPosted(
             issue_number=issue_number,
-            comment_id=require_field(payload, "id", int, action="post comment"),
-            html_url=require_field(payload, "html_url", str, action="post comment"),
+            comment_id=comment_id,
+            html_url=validate_issue_comment_url(
+                require_str(payload, "html_url", action="post comment"),
+                issue_number=issue_number,
+                comment_id=comment_id,
+            ),
         )
 
     def read_codeowners(self, ref: str) -> CodeownersFile:
@@ -401,7 +420,7 @@ class LiveGitHubClient:
             ),
             action="read CODEOWNERS",
         )
-        content = require_field(payload, "content", str, action="read CODEOWNERS")
+        content = require_str(payload, "content", action="read CODEOWNERS")
         encoding = payload.get("encoding", "base64")
         if encoding != "base64":
             raise ContractValidationError(
@@ -411,36 +430,72 @@ class LiveGitHubClient:
         return CodeownersFile.parse(_decode_base64(content))
 
     def list_pull_request_files(self, pull_request_number: int) -> tuple[str, ...]:
-        response = self._send(
-            "GET",
-            f"/pulls/{pull_request_number}/files",
-            query={"per_page": "100"},
-        )
-        require_success(response, action="list pull request files")
-        body = response.json_body
-        if isinstance(body, Mapping) or not isinstance(body, list):
-            raise ContractValidationError(
-                ValidationCode.MALFORMED_RESPONSE,
-                "list pull request files did not return a JSON array",
-            )
+        """List every changed path, paging deterministically to exhaustion.
+
+        Reviewer routing depends on the complete changed-path set, so a
+        truncated first page would silently misroute. Paging stops only when
+        GitHub returns a short page; a pull request larger than the bound
+        fails closed instead of returning a partial answer.
+        """
+        action = "list pull request files"
+        _require_positive(pull_request_number, "pull request number")
         paths: list[str] = []
-        for entry in body:
-            if not isinstance(entry, Mapping):
+        seen: set[str] = set()
+        for page in range(1, MAX_PULL_REQUEST_FILE_PAGES + 1):
+            entries = object_array(
+                require_json_array(
+                    self._send(
+                        "GET",
+                        f"/pulls/{pull_request_number}/files",
+                        query={
+                            "per_page": str(PULL_REQUEST_FILE_PAGE_SIZE),
+                            "page": str(page),
+                        },
+                    ),
+                    action=action,
+                ),
+                action=action,
+            )
+            if len(entries) > PULL_REQUEST_FILE_PAGE_SIZE:
                 raise ContractValidationError(
                     ValidationCode.MALFORMED_RESPONSE,
-                    "pull request file entry is malformed",
+                    "pull request file page exceeded the requested page size",
                 )
-            paths.append(
-                require_field(entry, "filename", str, action="list pull request files")
-            )
-        return tuple(paths)
+            for entry in entries:
+                filename = require_str(entry, "filename", action=action)
+                if filename in seen:
+                    raise ContractValidationError(
+                        ValidationCode.MALFORMED_RESPONSE,
+                        "pull request file pagination repeated a path",
+                    )
+                seen.add(filename)
+                paths.append(filename)
+            if len(entries) < PULL_REQUEST_FILE_PAGE_SIZE:
+                return tuple(paths)
+        raise ContractValidationError(
+            ValidationCode.MALFORMED_RESPONSE,
+            f"pull request changed more than {MAX_PULL_REQUEST_FILES} files",
+        )
 
 
-class TokenProvider(Protocol):
-    """Supplies a short-lived credential from runtime secret management."""
+def _require_positive(value: int, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ContractValidationError(
+            ValidationCode.MALFORMED_RESPONSE,
+            f"{field_name} must be a positive integer",
+        )
+    return value
 
-    def token(self) -> str:
-        """Return the current bearer token."""
+
+def _validate_pull_request_number(payload: JsonObject, expected: int) -> None:
+    value = payload.get("number")
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or value != expected:
+        raise ContractValidationError(
+            ValidationCode.MALFORMED_RESPONSE,
+            "response pull request number does not match the request",
+        )
 
 
 class StaticTokenProvider:
@@ -458,22 +513,19 @@ class StaticTokenProvider:
         return "StaticTokenProvider(token='[redacted]')"
 
 
-def _accepted_logins(value: object, key: str) -> tuple[str, ...]:
+def _accepted_logins(value: JsonValue, key: str) -> tuple[str, ...]:
     if value is None:
         return ()
-    if not isinstance(value, list):
-        raise ContractValidationError(
-            ValidationCode.MALFORMED_RESPONSE,
-            "reviewer response collection is malformed",
-        )
+    entries = object_array(value, action="reviewer response")
     logins: list[str] = []
-    for entry in value:
-        if not isinstance(entry, Mapping) or not isinstance(entry.get(key), str):
+    for entry in entries:
+        login = entry.get(key)
+        if not isinstance(login, str):
             raise ContractValidationError(
                 ValidationCode.MALFORMED_RESPONSE,
                 "reviewer response entry is malformed",
             )
-        logins.append(str(entry[key]))
+        logins.append(login)
     return tuple(logins)
 
 

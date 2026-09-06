@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from typing import Any
+
+from .json_values import JsonObject, JsonValue
 
 REDACTED = "[redacted]"
+_MAX_REDACTION_DEPTH = 12
 
 DEFAULT_REDACTED_KEYS: frozenset[str] = frozenset(
     {
@@ -51,12 +53,16 @@ def _is_redacted_key(key: str, redacted_keys: frozenset[str]) -> bool:
 
 
 def redact_value(
-    value: Any,
+    value: object,
     *,
     redacted_keys: frozenset[str] = DEFAULT_REDACTED_KEYS,
-    max_depth: int = 12,
-) -> Any:
-    """Return a copy of ``value`` with configured keys and secrets removed."""
+    max_depth: int = _MAX_REDACTION_DEPTH,
+) -> JsonValue:
+    """Return a JSON copy of ``value`` with configured keys and secrets gone.
+
+    Anything that is not JSON-shaped is replaced by the redaction marker, so an
+    unexpected object can never leak into a retained audit record.
+    """
     if max_depth <= 0:
         return REDACTED
     if isinstance(value, Mapping):
@@ -72,6 +78,8 @@ def redact_value(
         }
     if isinstance(value, str):
         return redact_text(value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
     if isinstance(value, (bytes, bytearray)):
         return REDACTED
     if isinstance(value, Sequence):
@@ -79,14 +87,14 @@ def redact_value(
             redact_value(item, redacted_keys=redacted_keys, max_depth=max_depth - 1)
             for item in value
         ]
-    return value
+    return REDACTED
 
 
 def redact_mapping(
-    payload: Mapping[str, Any],
+    payload: JsonObject,
     *,
     redacted_keys: frozenset[str] = DEFAULT_REDACTED_KEYS,
-) -> dict[str, Any]:
+) -> dict[str, JsonValue]:
     """Redact a mapping, preserving structure for audit records."""
     redacted = redact_value(payload, redacted_keys=redacted_keys)
     if not isinstance(redacted, dict):  # pragma: no cover - defensive

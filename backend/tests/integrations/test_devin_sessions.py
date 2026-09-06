@@ -28,8 +28,19 @@ from app.integrations import (
     parse_result_payload,
     validate_result,
 )
+from app.integrations.json_values import JsonValue
 
 TOKEN = StaticTokenProvider("test-token")
+ORG_ID = "org-1edbfc26ef2d43d48516023aebe72dab"
+SESSIONS_URL = f"https://api.devin.ai/v3/organizations/{ORG_ID}/sessions"
+CREATED_AT = 1_767_268_800
+UPDATED_AT = 1_767_269_100
+
+
+def live_client(transport: RecordedTransport) -> LiveDevinSessionClient:
+    return LiveDevinSessionClient(
+        transport=transport, token_provider=TOKEN, org_id=ORG_ID
+    )
 
 
 def test_prompt_names_repository_commit_capabilities_and_outcome() -> None:
@@ -96,15 +107,12 @@ def test_fake_session_links_are_canonical(
 
     assert snapshot.links.session_url == canonical_session_url(snapshot.session_id)
     assert snapshot.links.session_url.startswith("https://app.devin.ai/sessions/")
-    assert snapshot.links.desktop_available is True
 
 
-def test_desktop_link_is_absent_when_unavailable(
+def test_desktop_link_is_never_constructed(
     classification_task: TaskEnvelope,
 ) -> None:
-    adapter = FakeDevinSessionAdapter(desktop_available=False)
-
-    snapshot = adapter.create_session(classification_task)
+    snapshot = FakeDevinSessionAdapter().create_session(classification_task)
 
     assert snapshot.links.desktop_url is None
     assert snapshot.links.desktop_available is False
@@ -245,18 +253,54 @@ def test_result_collection_rejects_another_task(
     assert error.value.code is ValidationCode.TASK_IDENTITY_MISMATCH
 
 
+def test_documented_statuses_and_details_map_onto_relay_states() -> None:
+    assert map_session_status("new") is SessionStatus.QUEUED
+    assert map_session_status("claimed") is SessionStatus.QUEUED
+    assert map_session_status("running", "working") is SessionStatus.RUNNING
+    assert (
+        map_session_status("running", "waiting_for_user")
+        is SessionStatus.NEEDS_ATTENTION
+    )
+    assert (
+        map_session_status("running", "waiting_for_approval")
+        is SessionStatus.NEEDS_ATTENTION
+    )
+    assert map_session_status("resuming") is SessionStatus.RUNNING
+    assert map_session_status("suspended") is SessionStatus.NEEDS_ATTENTION
+    assert map_session_status("exit", "finished") is SessionStatus.COMPLETED
+    assert map_session_status("exit", "user_request") is SessionStatus.CANCELLED
+    assert map_session_status("exit", "out_of_credits") is SessionStatus.FAILED
+    assert map_session_status("error") is SessionStatus.FAILED
+
+
 def test_unknown_platform_status_needs_attention_instead_of_advancing() -> None:
     assert map_session_status("some_new_state") is SessionStatus.NEEDS_ATTENTION
+    assert map_session_status("exit") is SessionStatus.NEEDS_ATTENTION
+    assert map_session_status("exit", "some_new_detail") is (
+        SessionStatus.NEEDS_ATTENTION
+    )
     with pytest.raises(ContractValidationError):
         map_session_status(None)
 
 
-def session_payload(**overrides: object) -> dict[str, object]:
-    payload: dict[str, object] = {
+def test_organization_id_is_validated_before_any_request() -> None:
+    transport = RecordedTransport()
+
+    with pytest.raises(ContractValidationError) as error:
+        LiveDevinSessionClient(transport=transport, token_provider=TOKEN, org_id="acme")
+
+    assert error.value.code is ValidationCode.MALFORMED_ENVELOPE
+    assert transport.requests == ()
+
+
+def session_payload(**overrides: JsonValue) -> dict[str, JsonValue]:
+    payload: dict[str, JsonValue] = {
         "session_id": "devin-abc123",
-        "status_enum": "running",
-        "created_at": "2026-01-01T12:00:00Z",
-        "updated_at": "2026-01-01T12:05:00Z",
+        "org_id": ORG_ID,
+        "status": "running",
+        "status_detail": "working",
+        "created_at": CREATED_AT,
+        "updated_at": UPDATED_AT,
         "tags": [
             "relay",
             "kind:classification",
@@ -268,9 +312,9 @@ def session_payload(**overrides: object) -> dict[str, object]:
     return payload
 
 
-def test_live_client_creates_a_session_through_the_injected_transport() -> None:
+def test_live_client_creates_a_session_on_the_organization_scoped_path() -> None:
     transport = RecordedTransport([HttpResponse(200, session_payload())])
-    client = LiveDevinSessionClient(transport=transport, token_provider=TOKEN)
+    client = live_client(transport)
     task = make_task()
 
     snapshot = client.create_session(task)
@@ -278,17 +322,84 @@ def test_live_client_creates_a_session_through_the_injected_transport() -> None:
     assert snapshot.session_id == "devin-abc123"
     assert snapshot.status is SessionStatus.RUNNING
     assert snapshot.repository_full_name == "exloong/superset"
+    assert snapshot.created_at.isoformat() == "2026-01-01T12:00:00+00:00"
     request = transport.requests[0]
-    assert request.url == "https://api.devin.ai/v1/sessions"
+    assert request.method == "POST"
+    assert request.url == SESSIONS_URL
     assert request.json_body is not None
-    assert f"commit:{task.target_commit.sha}" in request.json_body["tags"]
+    assert set(request.json_body) == {"prompt", "title", "max_acu_limit", "tags"}
+    tags = request.json_body["tags"]
+    assert isinstance(tags, list)
+    assert f"commit:{task.target_commit.sha}" in tags
+
+
+def test_live_client_rejects_a_session_from_another_organization() -> None:
+    transport = RecordedTransport(
+        [
+            HttpResponse(
+                200, session_payload(org_id="org-99999999999999999999999999999999")
+            )
+        ]
+    )
+
+    with pytest.raises(ContractValidationError) as error:
+        live_client(transport).get_session("devin-abc123")
+    assert error.value.code is ValidationCode.MALFORMED_RESPONSE
+
+
+def test_live_client_reads_one_session_by_id() -> None:
+    transport = RecordedTransport([HttpResponse(200, session_payload())])
+
+    live_client(transport).get_session("devin-abc123")
+
+    assert transport.requests[0].url == f"{SESSIONS_URL}/devin-abc123"
+
+
+def test_live_client_follows_the_documented_session_cursor() -> None:
+    transport = RecordedTransport(
+        [
+            HttpResponse(
+                200,
+                {
+                    "items": [session_payload()],
+                    "has_next_page": True,
+                    "end_cursor": "cursor-1",
+                },
+            ),
+            HttpResponse(
+                200,
+                {
+                    "items": [session_payload(session_id="devin-def456")],
+                    "has_next_page": False,
+                    "end_cursor": None,
+                },
+            ),
+        ]
+    )
+
+    listed = live_client(transport).list_sessions(limit=5)
+
+    assert [snapshot.session_id for snapshot in listed] == [
+        "devin-abc123",
+        "devin-def456",
+    ]
+    assert transport.requests[0].query == {"first": "5"}
+    assert transport.requests[1].query == {"first": "4", "after": "cursor-1"}
+
+
+def test_live_client_rejects_a_page_that_claims_a_missing_cursor() -> None:
+    transport = RecordedTransport(
+        [HttpResponse(200, {"items": [], "has_next_page": True})]
+    )
+
+    with pytest.raises(ContractValidationError) as error:
+        live_client(transport).list_sessions(limit=5)
+    assert error.value.code is ValidationCode.MALFORMED_RESPONSE
 
 
 def test_live_transport_records_requests_with_the_token_redacted() -> None:
     transport = RecordedTransport([HttpResponse(200, session_payload())])
-    LiveDevinSessionClient(transport=transport, token_provider=TOKEN).create_session(
-        make_task()
-    )
+    live_client(transport).create_session(make_task())
 
     recorded = transport.redacted_requests[0]
 
@@ -297,19 +408,17 @@ def test_live_transport_records_requests_with_the_token_redacted() -> None:
 
 def test_live_client_rejects_a_transport_failure() -> None:
     transport = RecordedTransport([HttpResponse(500, {})])
-    client = LiveDevinSessionClient(transport=transport, token_provider=TOKEN)
 
     with pytest.raises(ContractValidationError) as error:
-        client.create_session(make_task())
+        live_client(transport).create_session(make_task())
     assert error.value.code is ValidationCode.TRANSPORT_FAILURE
 
 
 def test_live_client_rejects_a_malformed_session_response() -> None:
-    transport = RecordedTransport([HttpResponse(200, {"status_enum": "running"})])
-    client = LiveDevinSessionClient(transport=transport, token_provider=TOKEN)
+    transport = RecordedTransport([HttpResponse(200, {"status": "running"})])
 
     with pytest.raises(ContractValidationError) as error:
-        client.create_session(make_task())
+        live_client(transport).create_session(make_task())
     assert error.value.code is ValidationCode.MALFORMED_RESPONSE
 
 
@@ -317,72 +426,200 @@ def test_live_client_rejects_a_naive_timestamp() -> None:
     transport = RecordedTransport(
         [HttpResponse(200, session_payload(created_at="2026-01-01T12:00:00"))]
     )
-    client = LiveDevinSessionClient(transport=transport, token_provider=TOKEN)
 
     with pytest.raises(ContractValidationError):
-        client.get_session("devin-abc123")
+        live_client(transport).get_session("devin-abc123")
 
 
-def test_live_client_cancels_through_a_status_update() -> None:
+def test_live_client_sends_only_the_documented_message_body() -> None:
+    transport = RecordedTransport(
+        [HttpResponse(200, {}), HttpResponse(200, session_payload())]
+    )
+
+    live_client(transport).send_message("devin-abc123", "please continue")
+
+    request = transport.requests[0]
+    assert request.method == "POST"
+    assert request.url == f"{SESSIONS_URL}/devin-abc123/messages"
+    assert request.json_body == {"message": "please continue"}
+
+
+def test_live_client_cancels_through_the_documented_archive_endpoint() -> None:
     transport = RecordedTransport(
         [
-            HttpResponse(200, {}),
-            HttpResponse(200, session_payload(status_enum="stopped")),
+            HttpResponse(200, {"is_archived": True}),
+            HttpResponse(
+                200, session_payload(status="exit", status_detail="user_request")
+            ),
         ]
     )
-    client = LiveDevinSessionClient(transport=transport, token_provider=TOKEN)
 
-    snapshot = client.cancel_session("devin-abc123")
+    snapshot = live_client(transport).cancel_session("devin-abc123")
 
     assert snapshot.status is SessionStatus.CANCELLED
     assert snapshot.workspace_status is WorkspaceStatus.RELEASED
-    assert transport.requests[0].method == "PATCH"
+    archive_request = transport.requests[0]
+    assert archive_request.method == "POST"
+    assert archive_request.url == f"{SESSIONS_URL}/devin-abc123/archive"
+    assert archive_request.json_body is None
 
 
-def test_live_client_reports_external_only_conversation_when_disabled() -> None:
-    client = LiveDevinSessionClient(transport=RecordedTransport(), token_provider=TOKEN)
+def test_live_client_rejects_an_archive_response_that_did_not_archive() -> None:
+    transport = RecordedTransport([HttpResponse(200, {"is_archived": False})])
 
-    availability, messages = client.fetch_conversation("devin-abc123")
+    with pytest.raises(ContractValidationError) as error:
+        live_client(transport).cancel_session("devin-abc123")
+    assert error.value.code is ValidationCode.MALFORMED_RESPONSE
 
-    assert availability is ConversationAvailability.EXTERNAL_ONLY
-    assert messages == ()
+
+def test_live_client_rejects_a_failed_archive_request() -> None:
+    transport = RecordedTransport([HttpResponse(503, {})])
+
+    with pytest.raises(ContractValidationError) as error:
+        live_client(transport).cancel_session("devin-abc123")
+    assert error.value.code is ValidationCode.TRANSPORT_FAILURE
 
 
-def test_live_client_synchronizes_conversation_when_enabled() -> None:
+def test_an_archived_session_is_reported_as_cancelled() -> None:
+    transport = RecordedTransport(
+        [HttpResponse(200, session_payload(is_archived=True))]
+    )
+
+    snapshot = live_client(transport).get_session("devin-abc123")
+
+    assert snapshot.is_archived is True
+    assert snapshot.status is SessionStatus.CANCELLED
+
+
+def test_live_client_reads_conversation_from_the_message_list_endpoint() -> None:
+    transport = RecordedTransport(
+        [
+            HttpResponse(
+                200,
+                {
+                    "items": [
+                        {
+                            "event_id": "event-1",
+                            "source": "devin",
+                            "created_at": CREATED_AT,
+                            "message": "authorization: Bearer abcdef123456",
+                        }
+                    ],
+                    "has_next_page": True,
+                    "end_cursor": "cursor-1",
+                },
+            ),
+            HttpResponse(
+                200,
+                {
+                    "items": [
+                        {
+                            "event_id": "event-2",
+                            "source": "user",
+                            "created_at": UPDATED_AT,
+                            "message": "thanks",
+                        }
+                    ],
+                    "has_next_page": False,
+                },
+            ),
+        ]
+    )
+
+    availability, messages = live_client(transport).fetch_conversation("devin-abc123")
+
+    assert availability is ConversationAvailability.SYNCHRONIZED
+    assert [message.event_id for message in messages] == ["event-1", "event-2"]
+    assert [message.author for message in messages] == ["devin", "user"]
+    assert "abcdef123456" not in messages[0].text
+    assert transport.requests[0].url == f"{SESSIONS_URL}/devin-abc123/messages"
+    assert transport.requests[0].query == {"first": "100"}
+    assert transport.requests[1].query == {"first": "100", "after": "cursor-1"}
+
+
+def test_live_client_rejects_an_unsupported_message_source() -> None:
+    transport = RecordedTransport(
+        [
+            HttpResponse(
+                200,
+                {
+                    "items": [
+                        {
+                            "source": "third_party",
+                            "created_at": CREATED_AT,
+                            "message": "hello",
+                        }
+                    ],
+                    "has_next_page": False,
+                },
+            )
+        ]
+    )
+
+    with pytest.raises(ContractValidationError) as error:
+        live_client(transport).fetch_conversation("devin-abc123")
+    assert error.value.code is ValidationCode.MALFORMED_RESPONSE
+
+
+def test_live_client_exposes_the_canonical_session_url_without_a_desktop_url() -> None:
+    transport = RecordedTransport([HttpResponse(200, session_payload())])
+
+    snapshot = live_client(transport).get_session("devin-abc123")
+
+    assert snapshot.links.session_url == "https://app.devin.ai/sessions/abc123"
+    assert snapshot.links.desktop_url is None
+
+
+def test_live_client_reports_documented_session_pull_requests() -> None:
     transport = RecordedTransport(
         [
             HttpResponse(
                 200,
                 session_payload(
-                    messages=[
+                    pull_requests=[
                         {
-                            "type": "devin_message",
-                            "timestamp": "2026-01-01T12:01:00Z",
-                            "message": "authorization: Bearer abcdef123456",
+                            "pr_url": "https://github.com/exloong/superset/pull/77",
+                            "pr_state": "open",
                         }
                     ]
                 ),
             )
         ]
     )
-    client = LiveDevinSessionClient(
-        transport=transport, token_provider=TOKEN, conversation_enabled=True
+
+    snapshot = live_client(transport).get_session("devin-abc123")
+
+    assert snapshot.pull_requests[0].number == 77
+    assert snapshot.pull_requests[0].state == "open"
+    assert snapshot.pull_requests[0].head_branch is None
+
+
+def test_live_client_rejects_a_pull_request_in_another_repository() -> None:
+    transport = RecordedTransport(
+        [
+            HttpResponse(
+                200,
+                session_payload(
+                    pull_requests=[
+                        {"pr_url": "https://github.com/apache/superset/pull/77"}
+                    ]
+                ),
+            )
+        ]
     )
 
-    availability, messages = client.fetch_conversation("devin-abc123")
-
-    assert availability is ConversationAvailability.SYNCHRONIZED
-    assert "abcdef123456" not in messages[0].text
+    with pytest.raises(ContractValidationError) as error:
+        live_client(transport).get_session("devin-abc123")
+    assert error.value.code is ValidationCode.UNAUTHORIZED_REPOSITORY
 
 
 def test_live_client_rejects_a_completed_session_without_structured_output() -> None:
     transport = RecordedTransport(
-        [HttpResponse(200, session_payload(status_enum="finished"))]
+        [HttpResponse(200, session_payload(status="exit", status_detail="finished"))]
     )
-    client = LiveDevinSessionClient(transport=transport, token_provider=TOKEN)
 
     with pytest.raises(ContractValidationError) as error:
-        client.collect_result("devin-abc123", make_task())
+        live_client(transport).collect_result("devin-abc123", make_task())
     assert error.value.code is ValidationCode.MALFORMED_RESPONSE
 
 
@@ -393,7 +630,8 @@ def test_live_client_collects_a_typed_result_from_structured_output() -> None:
             HttpResponse(
                 200,
                 session_payload(
-                    status_enum="finished",
+                    status="exit",
+                    status_detail="finished",
                     structured_output={
                         "schema": task.output_schema,
                         "classification": "bug",
@@ -404,9 +642,8 @@ def test_live_client_collects_a_typed_result_from_structured_output() -> None:
             )
         ]
     )
-    client = LiveDevinSessionClient(transport=transport, token_provider=TOKEN)
 
-    result = client.collect_result("devin-abc123", task)
+    result = live_client(transport).collect_result("devin-abc123", task)
 
     assert isinstance(result.payload, ClassificationOutput)
     assert result.payload.confidence == pytest.approx(0.8)

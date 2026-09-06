@@ -16,8 +16,8 @@ from .errors import ContractValidationError, ValidationCode
 from .repository import (
     RepositoryIdentity,
     TargetCommit,
-    require_superset_repository,
     validate_branch_name,
+    validate_superset_repository_field,
 )
 
 _LABEL_PATTERN = re.compile(r"^[^\x00-\x1f\x7f]{1,50}$")
@@ -104,9 +104,7 @@ class _SupersetCommand:
     repository: RepositoryIdentity
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "repository", require_superset_repository(self.repository)
-        )
+        validate_superset_repository_field(self.repository)
 
     @property
     def capability(self) -> GitHubCapability:  # pragma: no cover - overridden

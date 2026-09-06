@@ -10,6 +10,7 @@ from app.integrations import (
     ReviewerRouter,
     ReviewerRoutingPolicy,
     RoutingStatus,
+    ValidationCode,
     parse_codeowners,
     routing_summary,
 )
@@ -30,10 +31,62 @@ def test_parses_users_teams_and_email_owners() -> None:
     assert kinds == {OwnerKind.USER, OwnerKind.TEAM, OwnerKind.EMAIL}
 
 
-def test_comments_and_incomplete_lines_are_ignored() -> None:
-    codeowners = parse_codeowners("# only a comment\n/orphan-pattern\n\n")
+def test_comments_and_blank_lines_are_ignored() -> None:
+    assert parse_codeowners("# only a comment\n\n").rules == ()
 
-    assert codeowners.rules == ()
+
+def test_a_pattern_without_owners_clears_ownership() -> None:
+    codeowners = parse_codeowners("*  @exloong/core\n/generated/\n")
+
+    assert codeowners.owners_for_path("superset/app.py")
+    assert codeowners.owners_for_path("generated/schema.py") == ()
+
+
+def test_star_does_not_cross_a_path_separator() -> None:
+    codeowners = parse_codeowners("/superset/*.py  @alice\n")
+
+    assert codeowners.owners_for_path("superset/app.py")
+    assert codeowners.owners_for_path("superset/models/core.py") == ()
+
+
+def test_double_star_matches_recursively() -> None:
+    codeowners = parse_codeowners("**/*.md  @docs\n")
+
+    assert codeowners.owners_for_path("README.md")
+    assert codeowners.owners_for_path("docs/deep/nested/guide.md")
+    assert codeowners.owners_for_path("docs/guide.rst") == ()
+
+
+def test_directory_pattern_matches_only_its_contents() -> None:
+    codeowners = parse_codeowners("/docs/  @docs\n")
+
+    assert codeowners.owners_for_path("docs/guide.md")
+    assert codeowners.owners_for_path("docs") == ()
+    assert codeowners.owners_for_path("superset/docs/guide.md") == ()
+
+
+def test_unanchored_directory_matches_at_any_depth() -> None:
+    codeowners = parse_codeowners("tests/  @qa\n")
+
+    assert codeowners.owners_for_path("tests/unit/test_app.py")
+    assert codeowners.owners_for_path("superset/tests/unit/test_app.py")
+
+
+def test_anchored_file_pattern_matches_exactly_one_path() -> None:
+    codeowners = parse_codeowners("/setup.py  @alice\n")
+
+    assert codeowners.owners_for_path("setup.py")
+    assert codeowners.owners_for_path("superset/setup.py") == ()
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    ["docs/**docs/*", "src/[abc].py", "src/?.py", "!/docs/", "../escape"],
+)
+def test_unsupported_patterns_fail_closed(pattern: str) -> None:
+    with pytest.raises(ContractValidationError) as error:
+        parse_codeowners(f"{pattern}  @alice\n")
+    assert error.value.code is ValidationCode.MALFORMED_ENVELOPE
 
 
 def test_last_matching_rule_wins() -> None:

@@ -1,32 +1,44 @@
-"""Devin Review boundary: trigger, status, and findings for Superset PRs."""
+"""Devin Review boundary: trigger, status, and findings for Superset PRs.
+
+The live client follows the documented enterprise PR-review contract, which
+identifies a review by its pull-request URL and head commit rather than by a
+review identifier, so Relay never invents an id, endpoint, or review URL.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from threading import Lock
-from typing import Any, Protocol
-from uuid import NAMESPACE_URL, uuid5
+from typing import Protocol
 
 from .errors import ContractValidationError, ValidationCode
-from .redaction import redact_text
+from .json_values import JsonObject
 from .repository import (
     SUPERSET_FULL_NAME,
+    SUPERSET_REPOSITORY,
     RepositoryIdentity,
     TargetCommit,
-    require_superset_repository,
+    superset_pull_request_url,
+    validate_pull_request_url,
+    validate_superset_repository_field,
 )
 from .transport import (
     HttpRequest,
+    HttpResponse,
     HttpTransport,
+    TokenProvider,
+    optional_str,
     parse_timestamp,
-    require_field,
+    require_int,
     require_json_object,
+    require_str,
 )
 
-DEVIN_REVIEW_API_ROOT = "https://api.devin.ai/v1"
+DEVIN_REVIEW_API_ROOT = "https://api.devin.ai/v3"
+PR_REVIEWS_PATH = "/enterprise/pr-reviews"
 FAKE_REVIEW_EPOCH = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
@@ -37,25 +49,28 @@ class ReviewStatus(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
     @property
     def is_terminal(self) -> bool:
-        return self in {ReviewStatus.COMPLETED, ReviewStatus.FAILED}
+        return self in {
+            ReviewStatus.COMPLETED,
+            ReviewStatus.FAILED,
+            ReviewStatus.CANCELLED,
+        }
 
 
 _REVIEW_STATUS_MAP: Mapping[str, ReviewStatus] = {
-    "queued": ReviewStatus.QUEUED,
     "pending": ReviewStatus.QUEUED,
     "running": ReviewStatus.RUNNING,
-    "in_progress": ReviewStatus.RUNNING,
     "completed": ReviewStatus.COMPLETED,
-    "finished": ReviewStatus.COMPLETED,
-    "failed": ReviewStatus.FAILED,
-    "error": ReviewStatus.FAILED,
+    "errored": ReviewStatus.FAILED,
+    "cancelled": ReviewStatus.CANCELLED,
 }
 
 
 def map_review_status(value: object) -> ReviewStatus:
+    """Map a documented review status, failing closed on anything else."""
     if not isinstance(value, str) or not value.strip():
         raise ContractValidationError(
             ValidationCode.MALFORMED_RESPONSE, "review status is missing"
@@ -95,16 +110,13 @@ class ReviewRequest:
 
     pull_request_number: int
     head_commit: TargetCommit
-    repository: RepositoryIdentity = field(
-        default_factory=lambda: require_superset_repository(SUPERSET_FULL_NAME)
-    )
+    repository: RepositoryIdentity = SUPERSET_REPOSITORY
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "repository", require_superset_repository(self.repository)
-        )
-        if not isinstance(self.pull_request_number, int) or (
-            isinstance(self.pull_request_number, bool) or self.pull_request_number < 1
+        validate_superset_repository_field(self.repository)
+        if isinstance(self.pull_request_number, bool) or (
+            not isinstance(self.pull_request_number, int)
+            or self.pull_request_number < 1
         ):
             raise ContractValidationError(
                 ValidationCode.MALFORMED_ENVELOPE,
@@ -118,10 +130,7 @@ class ReviewRequest:
 
     @property
     def pull_request_url(self) -> str:
-        return (
-            f"https://github.com/{self.repository.full_name}/pull/"
-            f"{self.pull_request_number}"
-        )
+        return superset_pull_request_url(self.pull_request_number)
 
 
 @dataclass(frozen=True)
@@ -138,28 +147,33 @@ class ReviewFinding:
 
 @dataclass(frozen=True)
 class ReviewRun:
-    """Status of one review run and its findings."""
+    """Status of the review of one pull-request head commit.
 
-    review_id: str
+    The documented contract has no review identifier, so a run is identified
+    by its pull-request URL and immutable head commit.
+    """
+
     request: ReviewRequest
     status: ReviewStatus
     created_at: datetime
     updated_at: datetime
-    review_url: str
     findings: tuple[ReviewFinding, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.review_url, str) or not self.review_url.startswith(
-            "https://"
-        ):
-            raise ContractValidationError(
-                ValidationCode.MALFORMED_RESPONSE, "review URL must be an https link"
-            )
+        validate_superset_repository_field(self.request.repository)
         if self.findings and not self.status.is_terminal:
             raise ContractValidationError(
                 ValidationCode.MALFORMED_RESPONSE,
                 "a non-terminal review may not report findings",
             )
+
+    @property
+    def pull_request_url(self) -> str:
+        return self.request.pull_request_url
+
+    @property
+    def commit_sha(self) -> str:
+        return self.request.head_commit.sha
 
     @property
     def approves_merge(self) -> bool:
@@ -187,19 +201,18 @@ class DevinReviewClient(Protocol):
     def trigger_review(self, request: ReviewRequest) -> ReviewRun:
         """Trigger a review for one Superset pull-request head commit."""
 
-    def get_review(self, review_id: str) -> ReviewRun:
-        """Return the current status of a review run."""
+    def get_review(self, request: ReviewRequest) -> ReviewRun:
+        """Return the latest review of that pull request and commit."""
 
-    def list_findings(self, review_id: str) -> tuple[ReviewFinding, ...]:
-        """Return the findings of a completed review run."""
+    def latest_review(self, request: ReviewRequest) -> ReviewRun | None:
+        """Return the latest review, or ``None`` when none exists yet."""
+
+    def list_findings(self, request: ReviewRequest) -> tuple[ReviewFinding, ...]:
+        """Return the findings of a completed review run, when available."""
 
 
-def _review_url(review_id: str, request: ReviewRequest) -> str:
-    return (
-        f"https://app.devin.ai/review/{request.repository.owner}/"
-        f"{request.repository.name}/pull/{request.pull_request_number}"
-        f"?run={review_id}"
-    )
+def _review_key(request: ReviewRequest) -> tuple[str, str]:
+    return (request.pull_request_url, request.head_commit.sha)
 
 
 class FakeDevinReviewAdapter:
@@ -213,35 +226,24 @@ class FakeDevinReviewAdapter:
     ) -> None:
         self._findings_template = findings
         self._started_at = started_at
-        self._runs: dict[str, ReviewRun] = {}
+        self._runs: dict[tuple[str, str], ReviewRun] = {}
         self._lock = Lock()
 
     def trigger_review(self, request: ReviewRequest) -> ReviewRun:
-        review_id = (
-            "review-"
-            + uuid5(
-                NAMESPACE_URL,
-                f"{request.repository.full_name}/{request.pull_request_number}/"
-                f"{request.head_commit.sha}",
-            ).hex[:16]
-        )
-        created_at = self._started_at
         run = ReviewRun(
-            review_id=review_id,
             request=request,
             status=ReviewStatus.QUEUED,
-            created_at=created_at,
-            updated_at=created_at,
-            review_url=_review_url(review_id, request),
+            created_at=self._started_at,
+            updated_at=self._started_at,
         )
         with self._lock:
-            self._runs[review_id] = run
+            self._runs[_review_key(request)] = run
         return run
 
-    def advance(self, review_id: str) -> ReviewRun:
+    def advance(self, request: ReviewRequest) -> ReviewRun:
         """Move a review run one deterministic step forward."""
         with self._lock:
-            run = self._require(review_id)
+            run = self._require(request)
             if run.status is ReviewStatus.QUEUED:
                 next_status = ReviewStatus.RUNNING
                 findings: tuple[ReviewFinding, ...] = ()
@@ -255,41 +257,46 @@ class FakeDevinReviewAdapter:
             else:
                 return run
             updated = ReviewRun(
-                review_id=run.review_id,
                 request=run.request,
                 status=next_status,
                 created_at=run.created_at,
                 updated_at=run.updated_at + timedelta(seconds=45),
-                review_url=run.review_url,
                 findings=findings,
             )
-            self._runs[review_id] = updated
+            self._runs[_review_key(run.request)] = updated
         return updated
 
-    def run_to_completion(self, review_id: str) -> ReviewRun:
-        run = self.advance(review_id)
+    def run_to_completion(self, request: ReviewRequest) -> ReviewRun:
+        run = self.advance(request)
         while not run.status.is_terminal:
-            run = self.advance(review_id)
+            run = self.advance(request)
         return run
 
-    def get_review(self, review_id: str) -> ReviewRun:
+    def get_review(self, request: ReviewRequest) -> ReviewRun:
         with self._lock:
-            return self._require(review_id)
+            return self._require(request)
 
-    def list_findings(self, review_id: str) -> tuple[ReviewFinding, ...]:
-        run = self.get_review(review_id)
+    def latest_review(self, request: ReviewRequest) -> ReviewRun | None:
+        with self._lock:
+            return self._runs.get(_review_key(request))
+
+    def list_findings(self, request: ReviewRequest) -> tuple[ReviewFinding, ...]:
+        run = self.get_review(request)
         if not run.status.is_terminal:
             raise ContractValidationError(
                 ValidationCode.MALFORMED_RESPONSE,
-                f"review {review_id} is {run.status.value}, not complete",
+                f"review of {run.pull_request_url} is {run.status.value}, "
+                "not complete",
             )
         return run.findings
 
-    def _require(self, review_id: str) -> ReviewRun:
-        run = self._runs.get(review_id)
+    def _require(self, request: ReviewRequest) -> ReviewRun:
+        run = self._runs.get(_review_key(request))
         if run is None:
             raise ContractValidationError(
-                ValidationCode.UNKNOWN_SESSION, f"review {review_id} is unknown"
+                ValidationCode.UNKNOWN_SESSION,
+                f"no review exists for {request.pull_request_url} at "
+                f"{request.head_commit.short_sha}",
             )
         return run
 
@@ -315,7 +322,7 @@ class LiveDevinReviewClient:
     """Devin Review client built on an injected transport."""
 
     transport: HttpTransport
-    token_provider: Any
+    token_provider: TokenProvider
     api_root: str = DEVIN_REVIEW_API_ROOT
     correlation_id: str | None = None
 
@@ -324,8 +331,9 @@ class LiveDevinReviewClient:
         method: str,
         path: str,
         *,
-        json_body: Mapping[str, Any] | None = None,
-    ) -> Any:
+        json_body: JsonObject | None = None,
+        query: Mapping[str, str] | None = None,
+    ) -> HttpResponse:
         return self.transport.send(
             HttpRequest(
                 method=method,
@@ -335,126 +343,102 @@ class LiveDevinReviewClient:
                     "Authorization": f"Bearer {self.token_provider.token()}",
                 },
                 json_body=json_body,
+                query=dict(query or {}),
                 correlation_id=self.correlation_id,
             )
         )
 
     def trigger_review(self, request: ReviewRequest) -> ReviewRun:
-        require_superset_repository(request.repository)
+        validate_superset_repository_field(request.repository)
         payload = require_json_object(
             self._send(
                 "POST",
-                "/reviews",
-                json_body={
-                    "repository": request.repository.full_name,
-                    "pull_request_number": request.pull_request_number,
-                    "head_commit": request.head_commit.sha,
-                },
+                PR_REVIEWS_PATH,
+                json_body={"pr_url": request.pull_request_url},
             ),
             action="trigger review",
         )
-        return self._run_from_payload(payload, request=request)
+        return _run_from_payload(payload, request=request, action="trigger review")
 
-    def get_review(self, review_id: str) -> ReviewRun:
-        payload = require_json_object(
-            self._send("GET", f"/reviews/{_normalize_review_id(review_id)}"),
-            action="get review",
-        )
-        return self._run_from_payload(payload)
+    def get_review(self, request: ReviewRequest) -> ReviewRun:
+        run = self.latest_review(request)
+        if run is None:
+            raise ContractValidationError(
+                ValidationCode.UNKNOWN_SESSION,
+                f"no review exists for {request.pull_request_url} at "
+                f"{request.head_commit.short_sha}",
+            )
+        return run
 
-    def list_findings(self, review_id: str) -> tuple[ReviewFinding, ...]:
-        payload = require_json_object(
-            self._send("GET", f"/reviews/{_normalize_review_id(review_id)}/findings"),
-            action="list review findings",
+    def latest_review(self, request: ReviewRequest) -> ReviewRun | None:
+        """Look up the latest review of the request's immutable head commit."""
+        validate_superset_repository_field(request.repository)
+        action = "get latest review"
+        response = self._send(
+            "GET",
+            PR_REVIEWS_PATH,
+            query={
+                "pr_url": request.pull_request_url,
+                "commit_sha": request.head_commit.sha,
+            },
         )
-        return _findings_from_payload(payload.get("findings"))
+        if response.status_code == 404:
+            return None
+        payload = require_json_object(response, action=action)
+        return _run_from_payload(payload, request=request, action=action)
 
-    def _run_from_payload(
-        self, payload: Mapping[str, Any], *, request: ReviewRequest | None = None
-    ) -> ReviewRun:
-        action = "review response"
-        review_id = _normalize_review_id(
-            require_field(payload, "review_id", str, action=action)
-        )
-        status = map_review_status(payload.get("status"))
-        resolved_request = request or ReviewRequest(
-            pull_request_number=require_field(
-                payload, "pull_request_number", int, action=action
-            ),
-            head_commit=TargetCommit(
-                sha=require_field(payload, "head_commit", str, action=action)
-            ),
-            repository=require_superset_repository(
-                str(payload.get("repository", SUPERSET_FULL_NAME))
-            ),
-        )
-        created_at = parse_timestamp(payload.get("created_at"), "created_at")
-        updated_at = parse_timestamp(
-            payload.get("updated_at"), "updated_at", default=created_at
-        )
-        return ReviewRun(
-            review_id=review_id,
-            request=resolved_request,
-            status=status,
-            created_at=created_at,
-            updated_at=updated_at,
-            review_url=str(
-                payload.get("review_url") or _review_url(review_id, resolved_request)
-            ),
-            findings=(
-                _findings_from_payload(payload.get("findings"))
-                if status.is_terminal
-                else ()
-            ),
-        )
+    def list_findings(self, request: ReviewRequest) -> tuple[ReviewFinding, ...]:
+        """Return no findings: the documented API exposes no findings route.
 
-
-def _normalize_review_id(review_id: object) -> str:
-    if not isinstance(review_id, str) or not review_id.strip():
-        raise ContractValidationError(
-            ValidationCode.MALFORMED_RESPONSE, "review id must be non-empty text"
-        )
-    normalized = review_id.strip()
-    if any(character in normalized for character in "/?#& "):
-        raise ContractValidationError(
-            ValidationCode.MALFORMED_RESPONSE, "review id is malformed"
-        )
-    return normalized
-
-
-def _findings_from_payload(value: object) -> tuple[ReviewFinding, ...]:
-    if value is None:
+        The enterprise contract only triggers a review and reports its latest
+        status, so Relay treats live findings as unavailable rather than
+        calling an invented endpoint. Findings reach operators through the
+        review's own GitHub comments, which a human reads on the pull request.
+        """
+        run = self.get_review(request)
+        if not run.status.is_terminal:
+            raise ContractValidationError(
+                ValidationCode.MALFORMED_RESPONSE,
+                f"review of {run.pull_request_url} is {run.status.value}, "
+                "not complete",
+            )
         return ()
-    if not isinstance(value, list):
+
+
+def _run_from_payload(
+    payload: JsonObject, *, request: ReviewRequest, action: str
+) -> ReviewRun:
+    """Build a run from a documented review payload, validating its identity."""
+    repo_path = require_str(payload, "repo_path", action=action)
+    if repo_path.strip().lower() != SUPERSET_FULL_NAME:
         raise ContractValidationError(
-            ValidationCode.MALFORMED_RESPONSE, "review findings must be a list"
+            ValidationCode.UNAUTHORIZED_REPOSITORY,
+            f"review response targets {repo_path} rather than {SUPERSET_FULL_NAME}",
         )
-    findings: list[ReviewFinding] = []
-    for entry in value:
-        if not isinstance(entry, Mapping):
-            raise ContractValidationError(
-                ValidationCode.MALFORMED_RESPONSE, "review finding is malformed"
-            )
-        line = entry.get("line")
-        if line is not None and (isinstance(line, bool) or not isinstance(line, int)):
-            raise ContractValidationError(
-                ValidationCode.MALFORMED_RESPONSE, "review finding line is malformed"
-            )
-        path = entry.get("path")
-        if path is not None and not isinstance(path, str):
-            raise ContractValidationError(
-                ValidationCode.MALFORMED_RESPONSE, "review finding path is malformed"
-            )
-        findings.append(
-            ReviewFinding(
-                finding_id=require_field(entry, "id", str, action="review finding"),
-                severity=FindingSeverity.parse(entry.get("severity")),
-                title=require_field(entry, "title", str, action="review finding"),
-                path=path,
-                line=line,
-                summary=redact_text(
-                    require_field(entry, "summary", str, action="review finding")
-                ),
-            )
+    pr_number = require_int(payload, "pr_number", action=action)
+    if pr_number != request.pull_request_number:
+        raise ContractValidationError(
+            ValidationCode.MALFORMED_RESPONSE,
+            "review response names a different pull request",
         )
-    return tuple(findings)
+    commit = TargetCommit(sha=require_str(payload, "commit_sha", action=action))
+    if commit != request.head_commit:
+        raise ContractValidationError(
+            ValidationCode.TARGET_COMMIT_MISMATCH,
+            "review response names a different head commit",
+        )
+    pr_url = optional_str(payload, "pr_url", action=action)
+    if pr_url is not None:
+        validate_pull_request_url(pr_url, pull_request_number=pr_number)
+    status = map_review_status(payload.get("status"))
+    created_at = parse_timestamp(payload.get("created_at"), "created_at")
+    updated_at = parse_timestamp(
+        payload.get("updated_at"), "updated_at", default=created_at
+    )
+    # The documented response carries no findings, so none are parsed from it.
+    return ReviewRun(
+        request=request,
+        status=status,
+        created_at=created_at,
+        updated_at=updated_at,
+    )
