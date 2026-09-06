@@ -24,6 +24,7 @@ _LABEL_PATTERN = re.compile(r"^[^\x00-\x1f\x7f]{1,50}$")
 _LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 _TEAM_SLUG_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,99})$")
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_PRIVATE_DEVIN_LINK = re.compile(r"https?://(?:app\.)?devin\.ai(?:[/:?#]|\b)", re.IGNORECASE)
 
 MAX_COMMENT_BYTES = 60_000
 MAX_TITLE_LENGTH = 256
@@ -83,6 +84,33 @@ def safe_public_text(value: object, *, field_name: str, max_length: int) -> str:
     return value
 
 
+def safe_issue_comment_text(value: object, *, field_name: str = "body") -> str:
+    """Validate reporter-facing text without exposing private Devin links."""
+    text = safe_public_text(value, field_name=field_name, max_length=MAX_COMMENT_BYTES)
+    if _PRIVATE_DEVIN_LINK.search(text):
+        raise ContractValidationError(
+            ValidationCode.PROHIBITED_COMMAND,
+            f"{field_name} must not expose private Devin links",
+        )
+    return text
+
+
+def format_reproduction_outcome_comment(
+    *, reproduced: bool, observed_behavior: str, verification: str
+) -> str:
+    """Build a public reproduction update from outcome evidence."""
+    observed = safe_issue_comment_text(observed_behavior, field_name="observed_behavior").strip()
+    verification_text = safe_issue_comment_text(verification, field_name="verification").strip()
+    outcome = (
+        "Relay reproduced the reported behavior."
+        if reproduced
+        else "Relay could not reproduce the reported behavior in the current environment."
+    )
+    return safe_issue_comment_text(
+        f"{outcome}\n\n**Observed behavior**\n{observed}\n\n**Verification**\n{verification_text}"
+    )
+
+
 def quote_untrusted_text(value: str, *, max_length: int = 2_000) -> str:
     """Return reporter-provided text as inert quoted Markdown.
 
@@ -130,7 +158,7 @@ class PostIssueComment(_SupersetCommand):
     def __post_init__(self) -> None:
         super().__post_init__()
         _require_issue_number(self.issue_number, "issue_number")
-        safe_public_text(self.body, field_name="body", max_length=MAX_COMMENT_BYTES)
+        safe_issue_comment_text(self.body)
 
     @property
     def capability(self) -> GitHubCapability:

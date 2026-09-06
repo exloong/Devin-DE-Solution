@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import pytest
-from conftest import OTHER_SHA, TARGET_SHA
-
 from app.integrations import (
     PROHIBITED_COMMANDS,
     SUPERSET_REPOSITORY,
@@ -24,10 +22,14 @@ from app.integrations import (
     TargetCommit,
     ValidationCode,
     assert_command_supported,
+    format_reproduction_outcome_comment,
     github_commands,
     quote_untrusted_text,
+    safe_issue_comment_text,
     safe_public_text,
 )
+
+from conftest import OTHER_SHA, TARGET_SHA
 
 
 def test_only_the_six_authorized_command_types_exist() -> None:
@@ -79,6 +81,67 @@ def test_comment_body_must_be_control_character_free_text() -> None:
         )
     with pytest.raises(ContractValidationError):
         PostIssueComment(repository=SUPERSET_REPOSITORY, issue_number=1, body="  ")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://app.devin.ai/sessions/private",
+        "https://devin.ai/sessions/private",
+        "HTTP://APP.DEVIN.AI/sessions/private",
+    ],
+)
+def test_reporter_facing_comments_reject_private_devin_links(url: str) -> None:
+    with pytest.raises(ContractValidationError) as error:
+        PostIssueComment(
+            repository=SUPERSET_REPOSITORY,
+            issue_number=1,
+            body=f"Reproduction details: {url}",
+        )
+
+    assert error.value.code is ValidationCode.PROHIBITED_COMMAND
+
+
+def test_reproduction_outcome_comment_reports_confirmation_and_behavior() -> None:
+    body = format_reproduction_outcome_comment(
+        reproduced=True,
+        observed_behavior="Whitespace-padded truthy values returned False.",
+        verification="Unpadded equivalents returned True at the target commit.",
+    )
+
+    assert body == (
+        "Relay reproduced the reported behavior.\n\n"
+        "**Observed behavior**\n"
+        "Whitespace-padded truthy values returned False.\n\n"
+        "**Verification**\n"
+        "Unpadded equivalents returned True at the target commit."
+    )
+    assert "devin.ai" not in body
+
+
+def test_unverified_outcome_comment_reports_actual_observation_without_links() -> None:
+    body = format_reproduction_outcome_comment(
+        reproduced=False,
+        observed_behavior="The supplied example completed without the reported error.",
+        verification="The failure could not be verified on the target commit.",
+    )
+
+    assert body.startswith(
+        "Relay could not reproduce the reported behavior in the current environment."
+    )
+    assert "completed without the reported error" in body
+    assert "devin.ai" not in body
+
+
+def test_reproduction_outcome_rejects_a_private_link_in_evidence() -> None:
+    with pytest.raises(ContractValidationError) as error:
+        format_reproduction_outcome_comment(
+            reproduced=True,
+            observed_behavior="See https://app.devin.ai/sessions/private",
+            verification="Confirmed.",
+        )
+
+    assert error.value.code is ValidationCode.PROHIBITED_COMMAND
 
 
 def test_issue_number_must_be_a_positive_non_boolean_integer() -> None:
@@ -178,6 +241,13 @@ def test_untrusted_text_is_truncated_and_stripped_of_control_characters() -> Non
 def test_safe_public_text_enforces_a_length_ceiling() -> None:
     with pytest.raises(ContractValidationError):
         safe_public_text("x" * 11, field_name="body", max_length=10)
+
+
+def test_safe_issue_comment_text_allows_public_reproduction_details() -> None:
+    assert (
+        safe_issue_comment_text("Observed False for a padded truthy value.")
+        == "Observed False for a padded truthy value."
+    )
 
 
 def test_fake_adapter_records_commands_without_network_writes() -> None:

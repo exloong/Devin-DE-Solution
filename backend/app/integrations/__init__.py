@@ -74,7 +74,9 @@ from .github_commands import (
     RequestReviewers,
     ReviewersRequested,
     assert_command_supported,
+    format_reproduction_outcome_comment,
     quote_untrusted_text,
+    safe_issue_comment_text,
     safe_public_text,
 )
 from .github_webhooks import (
@@ -223,6 +225,7 @@ __all__ = [
     "assert_command_supported",
     "build_session_prompt",
     "canonical_session_url",
+    "format_reproduction_outcome_comment",
     "is_relay_session",
     "map_review_status",
     "map_session_status",
@@ -240,6 +243,7 @@ __all__ = [
     "require_success",
     "require_superset_repository",
     "routing_summary",
+    "safe_issue_comment_text",
     "safe_public_text",
     "utc_now",
     "validate_branch_name",

@@ -277,7 +277,9 @@ Important constraints:
 - only one active transition attempt exists per issue revision and transition;
 - an agent result must reference the task and issue revision that created it;
 - human decisions are immutable and superseded rather than edited;
-- public comments contain no private artifacts or security-sensitive content.
+- public comments contain no private artifacts, Devin session or desktop links,
+  or security-sensitive content; reproduction updates state only the outcome,
+  observed behavior, and verification evidence suitable for the reporter.
 
 Per-issue work is serialized with a transaction-level advisory lock in
 PostgreSQL. Job claims use `FOR UPDATE SKIP LOCKED`.
