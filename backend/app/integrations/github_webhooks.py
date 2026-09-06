@@ -29,6 +29,7 @@ _MAX_BODY_BYTES = 8 * 1024 * 1024
 class GitHubEventName(str, Enum):
     """Webhook event types Relay accepts from ``exloong/superset``."""
 
+    PING = "ping"
     ISSUES = "issues"
     ISSUE_COMMENT = "issue_comment"
     PULL_REQUEST = "pull_request"

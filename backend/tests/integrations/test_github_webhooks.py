@@ -7,8 +7,6 @@ import hmac
 import json
 
 import pytest
-from conftest import WEBHOOK_SECRET
-
 from app.integrations import (
     ContractValidationError,
     DeliveryKey,
@@ -19,6 +17,8 @@ from app.integrations import (
     ValidationCode,
     verify_sha256_signature,
 )
+
+from conftest import WEBHOOK_SECRET
 
 
 def sign(raw_body: bytes, secret: bytes = WEBHOOK_SECRET) -> str:
@@ -70,6 +70,22 @@ def test_accepts_signed_superset_issue_event() -> None:
     assert event.repository.full_name == "exloong/superset"
     assert event.issue_number == 40
     assert event.delivery == DeliveryKey(source="github", delivery_id="d-1")
+
+
+def test_accepts_signed_superset_ping_event() -> None:
+    raw_body = json.dumps(
+        {"repository": {"full_name": "exloong/superset"}, "zen": "Keep it logically awesome."},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    verifier = GitHubWebhookVerifier(secret=WEBHOOK_SECRET)
+
+    event = verifier.accept(envelope(raw_body, event="ping"))
+
+    assert event.event_name is GitHubEventName.PING
+    assert event.action is None
+    assert event.repository.full_name == "exloong/superset"
+    assert event.issue_number is None
+    assert event.pull_request_number is None
 
 
 def test_signature_is_computed_over_the_exact_raw_body() -> None:
