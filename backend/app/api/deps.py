@@ -155,11 +155,39 @@ def get_principal(request: Request, ctx: Ctx) -> Principal:
 
 Caller = Annotated[Principal, Depends(get_principal)]
 
+READER_ROLES: frozenset[ActorRole] = frozenset(
+    {ActorRole.OPERATOR, ActorRole.SECURITY, ActorRole.SYSTEM}
+)
+
+
+def get_reader(caller: Caller) -> Principal:
+    """Issue/session/analytics reads may expose security-private flows, so they
+    require an operator-class principal; health/readiness/workflow stay public."""
+    if caller.role not in READER_ROLES:
+        raise DomainError(
+            ErrorCode.UNAUTHORIZED_ACTOR,
+            "reading issues, sessions and analytics requires an operator principal",
+            {"role": caller.role.value},
+        )
+    return caller
+
+
+Reader = Annotated[Principal, Depends(get_reader)]
+
 
 @dataclass(frozen=True)
 class CommandHeaders:
     idempotency_key: str
     expected_version: int | None
+
+    def required_version(self) -> int:
+        if self.expected_version is None:
+            raise DomainError(
+                ErrorCode.INVALID_INPUT,
+                f"{IF_MATCH_HEADER} header is required when mutating an existing resource",
+                {"header": IF_MATCH_HEADER},
+            )
+        return self.expected_version
 
 
 def get_command_headers(

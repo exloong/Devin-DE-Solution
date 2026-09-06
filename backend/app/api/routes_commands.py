@@ -29,7 +29,7 @@ from app.api.schemas import (
 )
 from app.domain import scenarios
 from app.domain.errors import DomainError, ErrorCode
-from app.domain.models import Actor, Event
+from app.domain.models import Actor, AgentSession, Event
 from app.domain.states import ActorRole, EventType, IssueState
 from app.domain.transitions import TransitionResult
 
@@ -56,6 +56,7 @@ def _apply(
     issue_revision: int | None = None,
     actor: Actor | None = None,
 ) -> CommandAccepted:
+    expected_version = headers.required_version() if issue_id is not None else None
     event = Event(
         issue_id=issue_id,
         source=COMMAND_SOURCE,
@@ -66,19 +67,55 @@ def _apply(
         payload=payload,
     )
     with ctx.uow_factory() as uow:
-        result: TransitionResult = ctx.service.apply(
-            uow, event, expected_version=headers.expected_version
-        )
+        result: TransitionResult = ctx.service.apply(uow, event, expected_version=expected_version)
     return _accepted(ctx, result)
 
 
-def _accepted(ctx: AppContext, result: TransitionResult, **extra: object) -> CommandAccepted:
+def _apply_session(
+    ctx: AppContext,
+    *,
+    session_id: uuid.UUID,
+    event_type: EventType,
+    caller: Principal,
+    headers: CommandHeaders,
+    payload: dict[str, object],
+) -> CommandAccepted:
+    """Session mutations bind `If-Match` to session.version and return the session."""
+    expected = headers.required_version()
+    event = Event(
+        issue_id=_session_issue(ctx, session_id),
+        source=COMMAND_SOURCE,
+        delivery_id=headers.idempotency_key,
+        type=event_type,
+        actor=caller.actor(),
+        payload={"session_id": str(session_id), **payload},
+    )
+    with ctx.uow_factory() as uow:
+        result = ctx.service.apply(uow, event, expected_session_version=expected)
+        session = uow.get_session(session_id)
+    if session is None:
+        raise DomainError(ErrorCode.NOT_FOUND, "session not found", {"session_id": str(session_id)})
+    return _accepted(ctx, result, resource=session)
+
+
+def _accepted(
+    ctx: AppContext,
+    result: TransitionResult,
+    *,
+    resource: AgentSession | None = None,
+    **extra: object,
+) -> CommandAccepted:
     issue = result.issue
-    resource_id = issue.id if issue is not None else result.event.id
+    if resource is not None:
+        resource_id, resource_version = resource.id, resource.version
+    elif issue is not None:
+        resource_id, resource_version = issue.id, issue.version
+    else:
+        resource_id, resource_version = result.event.id, 0
     return CommandAccepted(
         event_id=result.event.id,
         resource_id=resource_id,
-        resource_version=issue.version if issue is not None else 0,
+        resource_version=resource_version,
         accepted_at=ctx.service.clock.now(),
         processing="complete",
         duplicate=result.duplicate,
@@ -190,13 +227,16 @@ def reporter_response(
             answers = [
                 {"field": question.field, "unavailable": True, "reason": body.response.reason}
             ]
+    payload: dict[str, object] = {"answers": answers}
+    if body.override_rationale is not None:
+        payload["override_rationale"] = body.override_rationale
     return _apply(
         ctx,
         issue_id=issue_id,
         event_type=EventType.REPORTER_RESPONSE,
         caller=caller,
         headers=headers,
-        payload={"answers": answers},
+        payload=payload,
         issue_revision=body.issue_revision,
     )
 
@@ -255,13 +295,13 @@ def cancel_session(
     caller: Caller,
     headers: Preconditions,
 ) -> CommandAccepted:
-    return _apply(
+    return _apply_session(
         ctx,
-        issue_id=_session_issue(ctx, session_id),
+        session_id=session_id,
         event_type=EventType.SESSION_CANCEL_REQUESTED,
         caller=caller,
         headers=headers,
-        payload={"session_id": str(session_id), "reason": body.reason},
+        payload={"reason": body.reason},
     )
 
 
@@ -273,11 +313,11 @@ def message_session(
     caller: Caller,
     headers: Preconditions,
 ) -> CommandAccepted:
-    return _apply(
+    return _apply_session(
         ctx,
-        issue_id=_session_issue(ctx, session_id),
+        session_id=session_id,
         event_type=EventType.SESSION_MESSAGE,
         caller=caller,
         headers=headers,
-        payload={"session_id": str(session_id), "body": body.body},
+        payload={"body": body.body},
     )

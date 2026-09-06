@@ -482,6 +482,7 @@ class ReporterResponseRequest(ApiModel):
     question_id: uuid.UUID | None = None
     response: AnswerResponse | UnavailableResponse | None = None
     answers: list[ReporterAnswer] | None = Field(default=None, min_length=1)
+    override_rationale: str | None = Field(default=None, min_length=1, max_length=1_000)
 
     @model_validator(mode="after")
     def _one_form(self) -> ReporterResponseRequest:

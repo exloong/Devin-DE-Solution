@@ -316,6 +316,7 @@ TOKENS: dict[str, tuple[str, ActorRole]] = {
     "owner-token-1": ("export-owner", ActorRole.OWNER),
     "owner-token-2": ("unrouted-owner", ActorRole.OWNER),
     "reporter-token-1": ("reporter-1", ActorRole.REPORTER),
+    "reporter-token-2": ("mina-k", ActorRole.REPORTER),
     "agent-token-1": ("devin", ActorRole.AGENT),
 }
 

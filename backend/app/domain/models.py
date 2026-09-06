@@ -74,6 +74,9 @@ class RepositoryScope(Record):
                 {"repository": candidate, "allowed": self.full_name},
             )
 
+    def pull_request_url(self, number: int) -> str:
+        return f"https://github.com/{self.full_name}/pull/{number}"
+
 
 class Repository(Record):
     id: uuid.UUID = Field(default_factory=new_id)
@@ -320,6 +323,7 @@ class AgentSession(Record):
     issue_revision: int
     kind: SessionKind
     title: str
+    version: int = 0
     state: SessionState = SessionState.QUEUED
     repository: str = TARGET_REPOSITORY
     target_commit: str | None = None

@@ -556,7 +556,7 @@ def _session_summary(
 ) -> SessionSummary:
     return SessionSummary(
         id=session.id,
-        version=issue.version,
+        version=session.version,
         issue_id=issue.id,
         issue_key=issue.key,
         issue_title=issue.title,

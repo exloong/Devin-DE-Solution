@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 from types import TracebackType
 
 import pytest
@@ -119,6 +120,7 @@ def test_unavailable_evidence_cannot_become_reproduction_ready(h: Harness) -> No
             EventType.REPORTER_RESPONSE,
             issue_id=issue.id,
             role=ActorRole.REPORTER,
+            login="reporter-1",
             answers=[{"field": "logs", "unavailable": True}],
         )
     )
@@ -133,6 +135,89 @@ def test_unavailable_evidence_cannot_become_reproduction_ready(h: Harness) -> No
     assert JobKind.START_REPRODUCTION not in kinds
 
 
+def test_reporter_answers_require_original_reporter_or_audited_override(h: Harness) -> None:
+    issue = h.classify(h.open_issue(), MISSING)
+    answers = [{"field": "logs", "answer": "trace attached"}]
+    with expect(ErrorCode.UNAUTHORIZED_ACTOR):
+        h.apply(
+            h.event(
+                EventType.REPORTER_RESPONSE,
+                issue_id=issue.id,
+                role=ActorRole.REPORTER,
+                login="someone-else",
+                answers=answers,
+            )
+        )
+    with expect(ErrorCode.UNAUTHORIZED_ACTOR):
+        h.apply(
+            h.event(
+                EventType.REPORTER_RESPONSE,
+                issue_id=issue.id,
+                role=ActorRole.OPERATOR,
+                login="ops-1",
+                answers=answers,
+            )
+        )
+    with expect(ErrorCode.UNAUTHORIZED_ACTOR):
+        h.apply(
+            h.event(
+                EventType.REPORTER_RESPONSE,
+                issue_id=issue.id,
+                role=ActorRole.AGENT,
+                login="devin",
+                answers=answers,
+            )
+        )
+    result = h.apply(
+        h.event(
+            EventType.REPORTER_RESPONSE,
+            issue_id=issue.id,
+            role=ActorRole.OPERATOR,
+            login="ops-1",
+            answers=answers,
+            override_rationale="reporter pasted logs in a private channel",
+        )
+    )
+    assert result.issue is not None and result.issue.state == IssueState.REPRODUCING
+    with h.uow() as uow:
+        audits = [
+            a
+            for a in uow.list_audit(issue.correlation_id)
+            if a.action == "override:reporter_response"
+        ]
+    assert len(audits) == 1 and audits[0].actor.login == "ops-1"
+
+
+def test_fix_result_pr_url_must_match_scoped_repository(h: Harness) -> None:
+    issue = h.start_fix(h.confirm(h.reproduce(h.classify(h.open_issue()))))
+    with h.uow() as uow:
+        session = next(s for s in uow.list_sessions(issue_id=issue.id) if s.kind == SessionKind.FIX)
+    bad_urls = [
+        "https://github.com/evil/superset/pull/501",
+        "https://github.com/exloong/superset/pull/999",
+        "https://github.com/exloong/superset/pulls/501",
+        "http://github.com/exloong/superset/pull/501",
+    ]
+    for url in bad_urls:
+        with expect(ErrorCode.REPOSITORY_NOT_ALLOWED):
+            h.apply(
+                h.event(
+                    EventType.FIX_RESULT,
+                    issue_id=issue.id,
+                    role=ActorRole.AGENT,
+                    login="devin",
+                    revision=issue.revision,
+                    session_id=str(session.id),
+                    pull_request={
+                        "number": 501,
+                        "head_branch": "fix",
+                        "head_sha": "a" * 40,
+                        "url": url,
+                    },
+                )
+            )
+
+
 def test_answered_evidence_starts_reproduction_with_live_workspace(h: Harness) -> None:
     issue = h.classify(h.open_issue(), MISSING)
     result = h.apply(
@@ -140,6 +225,7 @@ def test_answered_evidence_starts_reproduction_with_live_workspace(h: Harness) -
             EventType.REPORTER_RESPONSE,
             issue_id=issue.id,
             role=ActorRole.REPORTER,
+            login="reporter-1",
             answers=[{"field": "logs", "answer": "rm -rf / ; <script>alert(1)</script>"}],
         )
     )
@@ -226,8 +312,11 @@ def test_claimed_public_job_is_rechecked_before_side_effects(h: Harness) -> None
         assert uow.get_job(job.id) is not None
         cancelled = uow.get_job(job.id)
     assert cancelled is not None and cancelled.status == JobStatus.CANCELLED
+    effects: list[str] = []
     with h.uow() as uow, expect(ErrorCode.PROHIBITED_ACTION):
-        h.service.complete_job(uow, job.id, "worker-a")
+        with h.service.run_claimed_job(uow, job.id, "worker-a"):
+            effects.append("published")
+    assert effects == []
     assert _statuses(h, issue.id, JobKind.PUBLISH_QUESTIONS) == ["cancelled"]
 
 
@@ -245,8 +334,11 @@ def test_claimed_job_rejected_when_issue_became_private_without_cancel(h: Harnes
         found.security_flagged = True
         uow.save_issue(found)
         uow.commit()
+    effects: list[str] = []
     with h.uow() as uow, expect(ErrorCode.SECURITY_FAIL_CLOSED):
-        h.service.complete_job(uow, job.id, "worker-a")
+        with h.service.run_claimed_job(uow, job.id, "worker-a"):
+            effects.append("published")
+    assert effects == []
     assert _statuses(h, issue.id, JobKind.PUBLISH_QUESTIONS) == ["cancelled"]
 
 
@@ -263,7 +355,8 @@ def test_stale_revision_job_cannot_run(h: Harness) -> None:
         uow.save_issue(found)
         uow.commit()
     with h.uow() as uow, expect(ErrorCode.STALE_RESULT):
-        h.service.complete_job(uow, job.id, "worker-a")
+        with h.service.run_claimed_job(uow, job.id, "worker-a"):
+            raise AssertionError("effect must not run for a stale job")
     assert _statuses(h, issue.id, JobKind.PUBLISH_QUESTIONS) == ["cancelled"]
 
 
@@ -276,10 +369,43 @@ def test_claim_and_complete_happy_path_and_not_due(h: Harness) -> None:
         h.service.claim_job(uow, escalate.id, "w")
     with h.uow() as uow:
         h.service.claim_job(uow, start.id, "w")
-        done = h.service.complete_job(uow, start.id, "w")
-    assert done.status == JobStatus.DONE and done.finished_at is not None
+        with h.service.run_claimed_job(uow, start.id, "w") as running:
+            assert running.status == JobStatus.CLAIMED
+            done = uow.get_job(start.id)
+            assert done is not None and done.status == JobStatus.CLAIMED
+        done = uow.get_job(start.id)
+    assert done is not None and done.status == JobStatus.DONE and done.finished_at is not None
     with h.uow() as uow, expect(ErrorCode.ILLEGAL_TRANSITION):
-        h.service.complete_job(uow, start.id, "w")
+        with h.service.run_claimed_job(uow, start.id, "w"):
+            raise AssertionError("finished job must not run again")
+
+
+def test_failed_side_effect_is_never_done_and_retries_with_backoff(h: Harness) -> None:
+    issue = h.reproduce(h.classify(h.open_issue()))
+    with h.uow() as uow:
+        start = next(j for j in uow.list_jobs(issue.id) if j.kind == JobKind.START_REPRODUCTION)
+    assert start.max_attempts == 3
+    for attempt in range(1, start.max_attempts + 1):
+        with h.uow() as uow:
+            claimed = h.service.claim_job(uow, start.id, "w")
+        assert claimed.attempts == attempt
+        with h.uow() as uow, pytest.raises(ConnectionError):
+            with h.service.run_claimed_job(uow, start.id, "w"):
+                raise ConnectionError("github unavailable")
+        with h.uow() as uow:
+            after = uow.get_job(start.id)
+        assert after is not None and after.claimed_by is None
+        if attempt < start.max_attempts:
+            assert after.status == JobStatus.PENDING
+            expected_delay = timedelta(seconds=30 * 2 ** (attempt - 1))
+            assert after.run_after == h.clock.now() + expected_delay
+            with h.uow() as uow, expect(ErrorCode.ILLEGAL_TRANSITION):
+                h.service.claim_job(uow, start.id, "w")
+            h.clock.current += expected_delay
+        else:
+            assert after.status == JobStatus.FAILED and after.finished_at is not None
+    with h.uow() as uow, expect(ErrorCode.ILLEGAL_TRANSITION):
+        h.service.claim_job(uow, start.id, "w")
 
 
 def test_confirm_bug_creates_exactly_one_fix_session(h: Harness) -> None:
@@ -671,6 +797,7 @@ def test_reminder_does_not_loop_and_stops_once_answered(h: Harness) -> None:
             EventType.REPORTER_RESPONSE,
             issue_id=issue.id,
             role=ActorRole.REPORTER,
+            login="reporter-1",
             answers=[{"field": "logs", "answer": "attached"}],
         )
     )

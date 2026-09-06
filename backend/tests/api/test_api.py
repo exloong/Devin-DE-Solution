@@ -14,6 +14,7 @@ OPERATOR = bearer(ActorRole.OPERATOR)
 OWNER = bearer(ActorRole.OWNER, "export-owner")
 UNROUTED_OWNER = bearer(ActorRole.OWNER, "unrouted-owner")
 REPORTER = bearer(ActorRole.REPORTER)
+ORIGINAL_REPORTER = bearer(ActorRole.REPORTER, "mina-k")
 AGENT = bearer(ActorRole.AGENT)
 
 
@@ -24,14 +25,27 @@ def _cmd(key: str, version: object = None, **auth: str) -> dict[str, str]:
     return headers
 
 
+def _get(client: TestClient, url: str, params: dict[str, str] | None = None) -> Response:
+    resp: Response = client.get(url, params=params, headers=OPERATOR)
+    return resp
+
+
+def _version(client: TestClient, issue_id: object) -> int:
+    return int(str(_detail(client, issue_id).json()["version"]))
+
+
+def _session_version(client: TestClient, session_id: object) -> int:
+    return int(str(_get(client, f"{API}/sessions/{session_id}").json()["version"]))
+
+
 def _issue_by_key(client: TestClient, key: str) -> Response:
-    resp: Response = client.get(f"{API}/issues", params={"search": key})
+    resp = _get(client, f"{API}/issues", params={"search": key})
     assert resp.status_code == 200 and resp.json()["total"] == 1, resp.text
     return resp
 
 
 def _detail(client: TestClient, issue_id: object) -> Response:
-    resp: Response = client.get(f"{API}/issues/{issue_id}")
+    resp = _get(client, f"{API}/issues/{issue_id}")
     assert resp.status_code == 200, resp.text
     return resp
 
@@ -61,7 +75,7 @@ def test_health_and_ready(client: TestClient) -> None:
 
 
 def test_seeded_issues_match_scenarios(client: TestClient) -> None:
-    body = client.get(f"{API}/issues").json()
+    body = _get(client, f"{API}/issues").json()
     assert body["total"] == len(SCENARIO_NAMES) and body["generated_at"]
     states = {i["key"]: i["state"] for i in body["items"]}
     assert states == {
@@ -88,11 +102,11 @@ def test_seeded_issues_match_scenarios(client: TestClient) -> None:
     gates = {i["key"]: i["human_gate"]["kind"] for i in body["items"]}
     assert gates["SUP-43218"] == "reporter" and gates["SUP-42991"] == "owner"
     assert gates["SUP-43240"] == "security" and gates["SUP-43207"] == "none"
-    filtered = client.get(f"{API}/issues", params={"state": "awaiting_reporter"}).json()
+    filtered = _get(client, f"{API}/issues", params={"state": "awaiting_reporter"}).json()
     assert [i["key"] for i in filtered["items"]] == ["SUP-43218"]
-    searched = client.get(f"{API}/issues", params={"search": "sup-42991"}).json()
+    searched = _get(client, f"{API}/issues", params={"search": "sup-42991"}).json()
     assert [i["key"] for i in searched["items"]] == ["SUP-42991"]
-    bad = client.get(f"{API}/issues", params={"state": "bogus"})
+    bad = _get(client, f"{API}/issues", params={"state": "bogus"})
     assert bad.status_code == 422 and bad.json()["error"]["code"] == "invalid_input"
 
 
@@ -115,17 +129,17 @@ def test_issue_detail_is_flat_redacted_and_typed(client: TestClient) -> None:
     assert detail["evidence"]["security_classification"] == "none"
     assert all(e["outcome"] == "accepted" for e in detail["events"])
     assert detail["session_ids"] and detail["workspace_live"] is False
-    missing = client.get(f"{API}/issues/{uuid.UUID(int=0)}")
+    missing = _get(client, f"{API}/issues/{uuid.UUID(int=0)}")
     assert missing.status_code == 404
     assert missing.json()["error"]["code"] == "not_found"
 
 
 def test_sessions_expose_only_synchronized_live_data(client: TestClient) -> None:
-    sessions = client.get(f"{API}/sessions").json()
+    sessions = _get(client, f"{API}/sessions").json()
     assert sessions["total"] == 4 and sessions["generated_at"]
-    running = client.get(f"{API}/sessions", params={"status": "running"}).json()["items"]
+    running = _get(client, f"{API}/sessions", params={"status": "running"}).json()["items"]
     assert len(running) == 1 and running[0]["issue_key"] == "SUP-43207"
-    detail = client.get(f"{API}/sessions/{running[0]['id']}").json()
+    detail = _get(client, f"{API}/sessions/{running[0]['id']}").json()
     assert detail["workspace"]["released"] is False and detail["workspace"]["id"]
     assert detail["dry_run"] is True
     assert detail["progress"] == 64 and detail["progress_source"] == "seed:devin-repro"
@@ -141,13 +155,13 @@ def test_sessions_expose_only_synchronized_live_data(client: TestClient) -> None
         "desktop_embeddable": False,
     }
     assert detail["review"]["status"] == "not_requested"
-    completed = client.get(f"{API}/sessions", params={"status": "completed"}).json()["items"]
+    completed = _get(client, f"{API}/sessions", params={"status": "completed"}).json()["items"]
     for s in completed:
         assert s["workspace"]["released"] is True and s["workspace"]["id"] is None
         assert s["workspace"]["released_at"] is not None
         assert s["current_action"] is None and s["next_checkpoint"] is None
     fix = next(s for s in completed if s["kind"] == "fix")
-    fix_detail = client.get(f"{API}/sessions/{fix['id']}").json()
+    fix_detail = _get(client, f"{API}/sessions/{fix['id']}").json()
     assert fix_detail["review"]["status"] == "completed"
     assert fix_detail["review"]["verdict"] == "passed"
     assert fix_detail["pull_requests"][0]["number"] == 43302
@@ -169,7 +183,7 @@ def test_workflow_and_analytics(client: TestClient) -> None:
     assert {"intake", "confirm_bug", "route_security_private", "complete", "retry"} <= names
     confirm = next(t for t in workflow["transitions"] if t["name"] == "confirm_bug")
     assert confirm["human_gate"] is True and confirm["actors"] == ["owner"]
-    summary = client.get(f"{API}/analytics/summary").json()
+    summary = _get(client, f"{API}/analytics/summary").json()
     assert summary["issues_processed"] == 7 and summary["confirmed_bugs"] == 1
     assert summary["live_workspaces"] == 1
     assert summary["security_private"] == 1
@@ -193,13 +207,34 @@ def test_commands_denied_without_configured_authentication(
         f"{API}/dry-runs", json={"title": "x"}, headers=_cmd("k-2", **OPERATOR)
     )
     assert resp.status_code == 401
-    assert unauthenticated_client.get(f"{API}/issues").status_code == 200
+    reads = unauthenticated_client.get(f"{API}/issues")
+    assert reads.status_code == 401 and reads.json()["error"]["code"] == "unauthorized_actor"
+    assert unauthenticated_client.get(f"{API}/health").status_code == 200
+    assert unauthenticated_client.get(f"{API}/workflow").status_code == 200
+
+
+def test_reads_require_operator_principal(client: TestClient) -> None:
+    for path in ("/issues", "/sessions", "/analytics/summary"):
+        anonymous = client.get(f"{API}{path}")
+        assert anonymous.status_code == 401, path
+        assert anonymous.json()["error"]["code"] == "unauthorized_actor"
+        for headers in (REPORTER, OWNER, AGENT):
+            denied = client.get(f"{API}{path}", headers=headers)
+            assert denied.status_code == 403, (path, headers)
+            assert denied.json()["error"]["code"] == "unauthorized_actor"
+        assert client.get(f"{API}{path}", headers=OPERATOR).status_code == 200
+    issue = _issue_by_key(client, "SUP-43240").json()["items"][0]
+    for path in (f"/issues/{issue['id']}", f"/sessions/{uuid.UUID(int=0)}"):
+        assert client.get(f"{API}{path}").status_code == 401
+        assert client.get(f"{API}{path}", headers=REPORTER).status_code == 403
+    assert client.get(f"{API}/health").status_code == 200
+    assert client.get(f"{API}/workflow").status_code == 200
 
 
 def test_demo_principal_is_explicit_and_server_side(demo_client: TestClient) -> None:
     resp = demo_client.post(f"{API}/dry-runs", json={"title": "Demo"}, headers=_cmd("demo-1"))
     assert resp.status_code == 201, resp.text
-    issue = _detail(demo_client, resp.json()["resource_id"]).json()
+    issue = demo_client.get(f"{API}/issues/{resp.json()['resource_id']}").json()
     intake = next(e for e in issue["events"] if e["kind"] == "intake")
     assert intake["actor"]["kind"] == "system"
     assert intake["actor"]["login"] == "dry-run:demo-operator"
@@ -222,27 +257,30 @@ def test_missing_or_bad_credentials_are_rejected(client: TestClient) -> None:
 
 def test_actor_identity_cannot_be_forged_from_body(client: TestClient) -> None:
     issue = _issue_by_key(client, "SUP-43231").json()["items"][0]
+    version = issue["version"]
     for forged in (
         {"kind": "confirm_bug", "actor_role": "owner"},
         {"kind": "confirm_bug", "actor_login": "export-owner"},
         {"kind": "confirm_bug", "idempotency_key": "in-body"},
     ):
         resp = client.post(
-            f"{API}/issues/{issue['id']}/decisions", json=forged, headers=_cmd("f-1", **AGENT)
+            f"{API}/issues/{issue['id']}/decisions",
+            json=forged,
+            headers=_cmd("f-1", version, **AGENT),
         )
         assert resp.status_code == 422, resp.text
         assert resp.json()["error"]["code"] == "invalid_input"
     as_agent = client.post(
         f"{API}/issues/{issue['id']}/decisions",
         json={"kind": "confirm_bug"},
-        headers=_cmd("f-2", **AGENT),
+        headers=_cmd("f-2", version, **AGENT),
     )
     assert as_agent.status_code == 403
     assert as_agent.json()["error"]["code"] == "human_gate_required"
     as_reporter = client.post(
         f"{API}/issues/{issue['id']}/decisions",
         json={"kind": "confirm_bug"},
-        headers=_cmd("f-3", **REPORTER),
+        headers=_cmd("f-3", version, **REPORTER),
     )
     assert as_reporter.status_code == 403
     assert _detail(client, issue["id"]).json()["state"] == "needs_owner_decision"
@@ -270,6 +308,10 @@ def test_idempotency_key_header_is_required(client: TestClient) -> None:
 def test_if_match_precondition(client: TestClient) -> None:
     issue = _issue_by_key(client, "SUP-43231").json()["items"][0]
     url = f"{API}/issues/{issue['id']}/decisions"
+    missing = client.post(url, json={"kind": "confirm_bug"}, headers=_cmd("v-m", **OWNER))
+    assert missing.status_code == 422, missing.text
+    assert missing.json()["error"]["details"]["header"] == "If-Match"
+    assert _detail(client, issue["id"]).json()["state"] == "needs_owner_decision"
     malformed = client.post(
         url, json={"kind": "confirm_bug"}, headers={**_cmd("v-0", **OWNER), "If-Match": "abc"}
     )
@@ -289,7 +331,9 @@ def test_if_match_precondition(client: TestClient) -> None:
     assert accepted["resource_id"] == issue["id"]
     assert accepted["resource_version"] == version + 1
     assert _detail(client, issue["id"]).json()["version"] == version + 1
-    replay = client.post(url, json={"kind": "confirm_bug"}, headers=_cmd("v-2", **OWNER))
+    replay = client.post(
+        url, json={"kind": "confirm_bug"}, headers=_cmd("v-2", version + 1, **OWNER)
+    )
     assert replay.status_code == 200 and replay.json()["duplicate"] is True
 
 
@@ -311,7 +355,7 @@ def test_dry_run_is_idempotent_and_never_executes_text(client: TestClient) -> No
     second = client.post(f"{API}/dry-runs", json=payload, headers=_cmd("dry-1", **OPERATOR))
     assert second.json()["duplicate"] is True
     assert second.json()["resource_id"] == accepted["resource_id"]
-    assert client.get(f"{API}/issues").json()["total"] == 8
+    assert _get(client, f"{API}/issues").json()["total"] == 8
 
 
 def test_dry_run_security_text_fails_closed(client: TestClient) -> None:
@@ -342,14 +386,26 @@ def test_reporter_response_flow(client: TestClient) -> None:
     issue = _issue_by_key(client, "SUP-43218").json()["items"][0]
     url = f"{API}/issues/{issue['id']}/responses"
     recording = _question_id(client, issue["id"], "screen_recording")
+    unavailable = {
+        "issue_revision": issue["revision"] if "revision" in issue else 1,
+        "question_id": recording,
+        "response": {"kind": "unavailable", "reason": "cannot record"},
+    }
+    # Only the original reporter (mina-k) may answer; another reporter is refused.
+    stranger = client.post(
+        url, json=unavailable, headers=_cmd("rr-0", issue["version"], **REPORTER)
+    )
+    assert stranger.status_code == 403, stranger.text
+    assert stranger.json()["error"]["code"] == "unauthorized_actor"
+    # An operator may only answer on the reporter's behalf with an audited rationale.
+    no_override = client.post(
+        url, json=unavailable, headers=_cmd("rr-0b", issue["version"], **OPERATOR)
+    )
+    assert no_override.status_code == 403
     partial = client.post(
         url,
-        json={
-            "issue_revision": issue["revision"] if "revision" in issue else 1,
-            "question_id": recording,
-            "response": {"kind": "unavailable", "reason": "cannot record"},
-        },
-        headers=_cmd("rr-1", **REPORTER),
+        json=unavailable,
+        headers=_cmd("rr-1", issue["version"], **ORIGINAL_REPORTER),
     )
     assert partial.status_code == 200, partial.text
     assert partial.json()["to_state"] == "awaiting_reporter"
@@ -363,29 +419,31 @@ def test_reporter_response_flow(client: TestClient) -> None:
             "answers": [
                 {"field": "screen_recording", "answer": "https://example.test/rec"},
                 {"field": "feature_flags", "answer": "DASHBOARD_NATIVE_FILTERS=true"},
-            ]
+            ],
+            "override_rationale": "reporter sent the details by email",
         },
-        headers=_cmd("rr-2", **REPORTER),
+        headers=_cmd("rr-2", _version(client, issue["id"]), **OPERATOR),
     )
+    assert complete.status_code == 200, complete.text
     assert complete.json()["to_state"] == "reproducing"
     after = _detail(client, issue["id"]).json()
     assert after["workspace_live"] is True and after["missing_fields"] == []
     bad = client.post(
         url,
         json={"answers": [{"field": "nope", "answer": "x"}]},
-        headers=_cmd("rr-3", **REPORTER),
+        headers=_cmd("rr-3", _version(client, issue["id"]), **ORIGINAL_REPORTER),
     )
     assert bad.status_code == 422
     unknown_question = client.post(
         url,
         json={"question_id": str(uuid.UUID(int=1)), "response": {"kind": "answer", "value": "x"}},
-        headers=_cmd("rr-4", **REPORTER),
+        headers=_cmd("rr-4", _version(client, issue["id"]), **ORIGINAL_REPORTER),
     )
     assert unknown_question.status_code == 404
     stale = client.post(
         url,
         json={"issue_revision": 99, "answers": [{"field": "feature_flags", "answer": "x"}]},
-        headers=_cmd("rr-5", **REPORTER),
+        headers=_cmd("rr-5", _version(client, issue["id"]), **ORIGINAL_REPORTER),
     )
     assert stale.status_code == 409 and stale.json()["error"]["code"] == "stale_result"
 
@@ -395,7 +453,7 @@ def test_owner_reclassification_uses_pr8_vocabulary(client: TestClient) -> None:
     resp = client.post(
         f"{API}/issues/{issue['id']}/decisions",
         json={"kind": "reclassify", "reclassify_as": "support", "rationale": "Config issue."},
-        headers=_cmd("rc-1", **OWNER),
+        headers=_cmd("rc-1", issue["version"], **OWNER),
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["to_state"] == "unsupported"
@@ -406,12 +464,16 @@ def test_owner_approval_is_authorized_against_routing(client: TestClient) -> Non
     pr = _detail(client, issue["id"]).json()["pull_requests"][0]
     body = {"kind": "approve_pr", "pr_number": pr["number"], "head_sha": pr["head_sha"]}
     unrouted = client.post(
-        f"{API}/issues/{issue['id']}/decisions", json=body, headers=_cmd("ap-0", **UNROUTED_OWNER)
+        f"{API}/issues/{issue['id']}/decisions",
+        json=body,
+        headers=_cmd("ap-0", issue["version"], **UNROUTED_OWNER),
     )
     assert unrouted.status_code == 403
     assert unrouted.json()["error"]["code"] == "unauthorized_actor"
     approve = client.post(
-        f"{API}/issues/{issue['id']}/decisions", json=body, headers=_cmd("ap-1", **OWNER)
+        f"{API}/issues/{issue['id']}/decisions",
+        json=body,
+        headers=_cmd("ap-1", issue["version"], **OWNER),
     )
     assert approve.status_code == 200, approve.text
     assert approve.json()["to_state"] == "awaiting_owner"
@@ -423,43 +485,77 @@ def test_owner_approval_is_authorized_against_routing(client: TestClient) -> Non
 def test_retry_requires_recoverable_state(client: TestClient) -> None:
     issue = _issue_by_key(client, "SUP-43207").json()["items"][0]
     resp = client.post(
-        f"{API}/issues/{issue['id']}/actions/retry", json={}, headers=_cmd("rt-1", **OPERATOR)
+        f"{API}/issues/{issue['id']}/actions/retry",
+        json={},
+        headers=_cmd("rt-1", issue["version"], **OPERATOR),
     )
     assert resp.status_code == 409
     assert resp.json()["error"]["code"] == "illegal_transition"
 
 
-def test_session_messages_and_cancel(client: TestClient) -> None:
-    running = client.get(f"{API}/sessions", params={"status": "running"}).json()["items"][0]
-    msg = client.post(
-        f"{API}/sessions/{running['id']}/messages",
-        json={"body": "Please attach the fixture manifest."},
-        headers=_cmd("m-1", **OPERATOR),
-    )
-    assert msg.status_code == 200 and msg.json()["status"] == "noop"
-    detail = client.get(f"{API}/sessions/{running['id']}").json()
+def test_session_messages_and_cancel_bind_if_match_to_session_version(
+    client: TestClient,
+) -> None:
+    running = _get(client, f"{API}/sessions", params={"status": "running"}).json()["items"][0]
+    issue_version = _version(client, running["issue_id"])
+    session_version = int(str(running["version"]))
+    url = f"{API}/sessions/{running['id']}/messages"
+    body = {"body": "Please attach the fixture manifest."}
+    missing = client.post(url, json=body, headers=_cmd("m-0", **OPERATOR))
+    assert missing.status_code == 422 and missing.json()["error"]["details"]["header"] == "If-Match"
+    wrong = client.post(url, json=body, headers=_cmd("m-0b", session_version + 7, **OPERATOR))
+    assert wrong.status_code == 409 and wrong.json()["error"]["code"] == "version_conflict"
+    details = wrong.json()["error"]["details"]
+    assert details["resource"] == "session" and details["actual"] == session_version
+    for i, headers in enumerate((REPORTER, OWNER, AGENT)):
+        denied = client.post(url, json=body, headers=_cmd(f"m-0c-{i}", session_version, **headers))
+        assert denied.status_code == 403, denied.text
+        assert denied.json()["error"]["code"] == "unauthorized_actor"
+    msg = client.post(url, json=body, headers=_cmd("m-1", session_version, **OPERATOR))
+    assert msg.status_code == 200 and msg.json()["status"] == "noop", msg.text
+    assert msg.json()["resource_id"] == running["id"]
+    assert msg.json()["resource_version"] == session_version + 1
+    detail = _get(client, f"{API}/sessions/{running['id']}").json()
+    assert detail["version"] == session_version + 1
     assert detail["conversation"][-1]["author"]["kind"] == "operator"
     assert detail["conversation"][-1]["author"]["login"] == "ops-1"
+    assert _version(client, running["issue_id"]) == issue_version
+    stale = client.post(
+        f"{API}/sessions/{running['id']}/actions/cancel",
+        json={"reason": "budget"},
+        headers=_cmd("c-0", session_version, **OPERATOR),
+    )
+    assert stale.status_code == 409
+    for i, headers in enumerate((REPORTER, OWNER, AGENT)):
+        denied = client.post(
+            f"{API}/sessions/{running['id']}/actions/cancel",
+            json={"reason": "budget"},
+            headers=_cmd(f"c-0b-{i}", session_version + 1, **headers),
+        )
+        assert denied.status_code == 403, denied.text
     cancel = client.post(
         f"{API}/sessions/{running['id']}/actions/cancel",
         json={"reason": "budget"},
-        headers=_cmd("c-1", running["version"], **OPERATOR),
+        headers=_cmd("c-1", session_version + 1, **OPERATOR),
     )
     assert cancel.status_code == 200, cancel.text
-    assert client.get(f"{API}/sessions/{running['id']}").json()["cancel_requested"] is True
-    finished = client.get(f"{API}/sessions", params={"status": "completed"}).json()["items"][0]
+    assert cancel.json()["resource_id"] == running["id"]
+    assert cancel.json()["resource_version"] == session_version + 2
+    after = _get(client, f"{API}/sessions/{running['id']}").json()
+    assert after["cancel_requested"] is True and after["version"] == session_version + 2
+    finished = _get(client, f"{API}/sessions", params={"status": "completed"}).json()["items"][0]
     late = client.post(
         f"{API}/sessions/{finished['id']}/messages",
         json={"body": "too late"},
-        headers=_cmd("m-2", **OPERATOR),
+        headers=_cmd("m-2", finished["version"], **OPERATOR),
     )
     assert late.status_code == 409
-    missing = client.post(
+    missing_session = client.post(
         f"{API}/sessions/{uuid.UUID(int=0)}/messages",
         json={"body": "x"},
-        headers=_cmd("m-3", **OPERATOR),
+        headers=_cmd("m-3", 0, **OPERATOR),
     )
-    assert missing.status_code == 404
+    assert missing_session.status_code == 404
 
 
 def test_validation_errors_use_error_envelope(client: TestClient) -> None:

@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -130,6 +131,9 @@ class TransitionResult:
         return self.attempt.status == AttemptStatus.APPLIED
 
 
+JOB_RETRY_BACKOFF_BASE = timedelta(seconds=30)
+JOB_RETRY_BACKOFF_MAX = timedelta(minutes=30)
+
 # States in which a queued (not yet started, no workspace) FIX session may wait.
 _HOLDS_QUEUED_FIX: frozenset[IssueState] = frozenset(
     {IssueState.FIX_AUTHORIZED, IssueState.CHANGES_REQUESTED}
@@ -202,7 +206,12 @@ class TransitionService:
     # ------------------------------------------------------------------ apply
 
     def apply(
-        self, uow: UnitOfWork, event: Event, *, expected_version: int | None = None
+        self,
+        uow: UnitOfWork,
+        event: Event,
+        *,
+        expected_version: int | None = None,
+        expected_session_version: int | None = None,
     ) -> TransitionResult:
         existing = uow.get_event_by_delivery(event.source, event.delivery_id)
         if existing is not None:
@@ -233,6 +242,8 @@ class TransitionService:
                     "resource version does not match",
                     {"expected": expected_version, "actual": issue.version},
                 )
+            if expected_session_version is not None:
+                self._check_session_version(uow, event, issue, expected_session_version)
             if event.issue_revision is not None and event.issue_revision != issue.revision:
                 raise DomainError(
                     ErrorCode.STALE_RESULT,
@@ -286,6 +297,22 @@ class TransitionService:
                 )
                 uow.commit()
             raise
+
+    def _check_session_version(
+        self, uow: UnitOfWork, event: Event, issue: Issue, expected: int
+    ) -> None:
+        raw = event.payload.get("session_id")
+        if not isinstance(raw, str):
+            raise DomainError(ErrorCode.INVALID_INPUT, "session precondition without session_id")
+        session = uow.get_session(uuid.UUID(raw))
+        if session is None or session.issue_id != issue.id:
+            raise DomainError(ErrorCode.NOT_FOUND, "session not found", {"session_id": raw})
+        if expected != session.version:
+            raise DomainError(
+                ErrorCode.VERSION_CONFLICT,
+                "session version does not match",
+                {"expected": expected, "actual": session.version, "resource": "session"},
+            )
 
     def _commit_outcome(
         self, ctx: _Context, from_state: IssueState, outcome: _Outcome
@@ -384,9 +411,13 @@ class TransitionService:
             session.current_action = None
             session.next_checkpoint = None
             session.updated_at = ctx.now
-            ctx.uow.save_session(session)
+            self._save_session(ctx, session)
 
     # --------------------------------------------------------------- helpers
+
+    def _save_session(self, ctx: _Context, session: AgentSession) -> None:
+        session.version += 1
+        ctx.uow.save_session(session)
 
     def _enqueue(
         self,
@@ -441,7 +472,7 @@ class TransitionService:
         """Recheck a job against current issue reality; raise instead of acting.
 
         A worker must call this via :meth:`claim_job` before starting and via
-        :meth:`complete_job` before recording side effects, so a job that was
+        :meth:`run_claimed_job` around the side effect, so a job that was
         claimed before a security routing or a revision bump cannot act.
         """
         if job.status == JobStatus.CANCELLED:
@@ -513,14 +544,21 @@ class TransitionService:
         uow.commit()
         return job
 
-    def complete_job(
-        self, uow: UnitOfWork, job_id: uuid.UUID, worker: str, *, succeeded: bool = True
-    ) -> Job:
-        """Finish a claimed job; rechecks security/revision before the caller may act.
+    @contextmanager
+    def run_claimed_job(self, uow: UnitOfWork, job_id: uuid.UUID, worker: str) -> Iterator[Job]:
+        """Authorize a claimed job and hold the issue lock through its side effect.
 
-        Workers call this *before* emitting the job's external side effect and
-        only proceed when it returns; any DomainError means the effect must be
-        skipped.
+        Usage::
+
+            with service.run_claimed_job(uow, job.id, "worker-a") as job:
+                external_side_effect(job)
+
+        The job is rechecked (cancelled / security-private / stale revision) while
+        the per-issue lock is held, so a security routing cannot slip in between
+        the check and the effect. The job becomes DONE only after the block exits
+        normally. If the block raises, the job is scheduled for a bounded retry
+        (or FAILED once ``max_attempts`` is exhausted) and the error re-raised, so a
+        failed effect is never recorded as done.
         """
         job = self._load_job(uow, job_id)
         if job.status != JobStatus.CLAIMED or job.claimed_by != worker:
@@ -531,11 +569,31 @@ class TransitionService:
                 {"job_id": str(job.id), "status": job.status.value, "claimed_by": job.claimed_by},
             )
         self._job_may_run(uow, job)
-        job.status = JobStatus.DONE if succeeded else JobStatus.FAILED
+        try:
+            yield job
+        except Exception:
+            uow.rollback()
+            self._schedule_retry(uow, job)
+            raise
+        job.status = JobStatus.DONE
         job.finished_at = self.clock.now()
         uow.save_job(job)
         uow.commit()
-        return job
+
+    def _schedule_retry(self, uow: UnitOfWork, job: Job) -> None:
+        now = self.clock.now()
+        job.claimed_by = None
+        job.claimed_at = None
+        if job.attempts >= job.max_attempts:
+            job.status = JobStatus.FAILED
+            job.finished_at = now
+        else:
+            job.status = JobStatus.PENDING
+            job.run_after = now + min(
+                JOB_RETRY_BACKOFF_MAX, JOB_RETRY_BACKOFF_BASE * (2 ** (job.attempts - 1))
+            )
+        uow.save_job(job)
+        uow.commit()
 
     def _payload_str(self, ctx: _Context, key: str, default: str | None = None) -> str:
         value = ctx.event.payload.get(key, default)
@@ -656,7 +714,7 @@ class TransitionService:
         session.updated_at = ctx.now
         session.current_action = None
         session.next_checkpoint = None
-        ctx.uow.save_session(session)
+        self._save_session(ctx, session)
         ctx.uow.add_session_event(
             SessionEvent(session_id=session.id, label=label, detail=detail, created_at=ctx.now)
         )
@@ -817,6 +875,7 @@ class TransitionService:
         return self._start_reproduction(ctx, "classification found reproduction context complete")
 
     def _on_reporter_response(self, ctx: _Context) -> _Outcome:
+        self._authorize_reporter_response(ctx)
         answers = self._payload_list(ctx, "answers")
         if not answers:
             raise DomainError(ErrorCode.INVALID_INPUT, "at least one answer is required")
@@ -876,6 +935,42 @@ class TransitionService:
             "answers recorded; required context still missing",
         )
 
+    def _authorize_reporter_response(self, ctx: _Context) -> None:
+        """Only the original reporter may answer; an operator needs an audited override."""
+        actor = ctx.event.actor
+        if actor.role == ActorRole.REPORTER:
+            if actor.login != ctx.issue.reporter_login:
+                raise DomainError(
+                    ErrorCode.UNAUTHORIZED_ACTOR,
+                    "only the original reporter may answer reproduction questions",
+                    {"reporter": ctx.issue.reporter_login},
+                )
+            return
+        if actor.role == ActorRole.OPERATOR:
+            rationale = ctx.event.payload.get("override_rationale")
+            if not isinstance(rationale, str) or not rationale.strip():
+                raise DomainError(
+                    ErrorCode.UNAUTHORIZED_ACTOR,
+                    "operators may record reporter answers only with an override_rationale",
+                )
+            ctx.uow.add_audit(
+                AuditEntry(
+                    actor=actor,
+                    action="override:reporter_response",
+                    resource_type="issue",
+                    resource_id=str(ctx.issue.id),
+                    resource_version=ctx.issue.version,
+                    correlation_id=ctx.event.correlation_id,
+                    detail=rationale.strip(),
+                    created_at=ctx.now,
+                )
+            )
+            return
+        raise DomainError(
+            ErrorCode.UNAUTHORIZED_ACTOR,
+            f"{actor.role.value} may not record reporter answers",
+        )
+
     def _start_reproduction(self, ctx: _Context, trigger: str) -> _Outcome:
         self._assert_reproduction_ready(ctx)
         revision = self._latest_revision(ctx)
@@ -896,7 +991,7 @@ class TransitionService:
         session.started_at = ctx.now
         session.last_heartbeat_at = ctx.now
         session.updated_at = ctx.now
-        ctx.uow.save_session(session)
+        self._save_session(ctx, session)
         self._enqueue(
             ctx,
             JobKind.START_REPRODUCTION,
@@ -932,7 +1027,7 @@ class TransitionService:
             session.progress_synced_at = ctx.now
         session.last_heartbeat_at = ctx.now
         session.updated_at = ctx.now
-        ctx.uow.save_session(session)
+        self._save_session(ctx, session)
         label = ctx.event.payload.get("label")
         if isinstance(label, str):
             ctx.uow.add_session_event(
@@ -1409,7 +1504,7 @@ class TransitionService:
         session.started_at = ctx.now
         session.last_heartbeat_at = ctx.now
         session.updated_at = ctx.now
-        ctx.uow.save_session(session)
+        self._save_session(ctx, session)
         ctx.uow.add_session_event(
             SessionEvent(
                 session_id=session.id,
@@ -1448,6 +1543,13 @@ class TransitionService:
             or not isinstance(url, str)
         ):
             raise DomainError(ErrorCode.INVALID_INPUT, "pull_request fields are incomplete")
+        expected_url = self.scope.pull_request_url(number)
+        if url != expected_url:
+            raise DomainError(
+                ErrorCode.REPOSITORY_NOT_ALLOWED,
+                "pull request url must point at the scoped repository",
+                {"expected": expected_url},
+            )
         forbidden = {"reviewer_candidates", "reviewers", "reviewer_routing_rule", "owners"}
         if forbidden & set(raw_pr):
             raise DomainError(
@@ -1851,7 +1953,7 @@ class TransitionService:
                 ctx, session, SessionState.CANCELLED, "Cancelled", "cancelled before start"
             )
             return _Outcome(None, None, "queued session cancelled")
-        ctx.uow.save_session(session)
+        self._save_session(ctx, session)
         self._enqueue(
             ctx,
             JobKind.CANCEL_SESSION,
@@ -1862,6 +1964,10 @@ class TransitionService:
 
     def _on_session_message(self, ctx: _Context) -> _Outcome:
         session = self._payload_session(ctx)
+        if ctx.event.actor.role != ActorRole.OPERATOR:
+            raise DomainError(
+                ErrorCode.UNAUTHORIZED_ACTOR, "only operators may message agent sessions"
+            )
         body = self._payload_str(ctx, "body")
         if not body.strip():
             raise DomainError(ErrorCode.INVALID_INPUT, "message body is empty")
@@ -1877,6 +1983,8 @@ class TransitionService:
             created_at=ctx.now,
         )
         ctx.uow.add_message(message)
+        session.updated_at = ctx.now
+        self._save_session(ctx, session)
         self._enqueue(
             ctx,
             JobKind.DELIVER_SESSION_MESSAGE,

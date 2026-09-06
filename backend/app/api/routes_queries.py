@@ -7,7 +7,7 @@ from fastapi import APIRouter, Query
 from sqlalchemy import select, text
 
 from app.api import queries
-from app.api.deps import Ctx
+from app.api.deps import Ctx, Reader
 from app.api.schemas import (
     AnalyticsSummary,
     HealthResponse,
@@ -59,6 +59,7 @@ def ready(ctx: Ctx) -> ReadyResponse:
 @router.get("/issues", response_model=IssuePage)
 def list_issues(
     ctx: Ctx,
+    _reader: Reader,
     state: Annotated[list[IssueState] | None, Query()] = None,
     owner: Annotated[str | None, Query(max_length=100)] = None,
     search: Annotated[str | None, Query(max_length=200)] = None,
@@ -71,7 +72,7 @@ def list_issues(
 
 
 @router.get("/issues/{issue_id}", response_model=IssueDetail)
-def get_issue(issue_id: uuid.UUID, ctx: Ctx) -> IssueDetail:
+def get_issue(issue_id: uuid.UUID, ctx: Ctx, _reader: Reader) -> IssueDetail:
     with ctx.uow_factory() as uow:
         return queries.issue_detail(uow, issue_id, dry_run=ctx.scope.dry_run)
 
@@ -79,6 +80,7 @@ def get_issue(issue_id: uuid.UUID, ctx: Ctx) -> IssueDetail:
 @router.get("/sessions", response_model=SessionPage)
 def list_sessions(
     ctx: Ctx,
+    _reader: Reader,
     issue_id: uuid.UUID | None = None,
     status: Annotated[list[SessionState] | None, Query()] = None,
 ) -> SessionPage:
@@ -90,7 +92,7 @@ def list_sessions(
 
 
 @router.get("/sessions/{session_id}", response_model=SessionDetail)
-def get_session(session_id: uuid.UUID, ctx: Ctx) -> SessionDetail:
+def get_session(session_id: uuid.UUID, ctx: Ctx, _reader: Reader) -> SessionDetail:
     with ctx.uow_factory() as uow:
         return queries.session_detail(uow, session_id, dry_run=ctx.scope.dry_run)
 
@@ -101,6 +103,6 @@ def workflow(ctx: Ctx) -> WorkflowDefinition:
 
 
 @router.get("/analytics/summary", response_model=AnalyticsSummary)
-def analytics(ctx: Ctx) -> AnalyticsSummary:
+def analytics(ctx: Ctx, _reader: Reader) -> AnalyticsSummary:
     with ctx.uow_factory() as uow:
         return queries.analytics(uow, ctx.service.clock.now())
