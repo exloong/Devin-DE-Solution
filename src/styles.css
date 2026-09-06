@@ -4230,6 +4230,32 @@ select:focus-visible {
   gap: 9px;
 }
 
+.decision-follow-up {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.decision-follow-up input,
+.decision-follow-up textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #e0e4ec;
+  border-radius: 8px;
+  color: #343c4d;
+  background: #fff;
+  font: inherit;
+  font-size: 8.5px;
+}
+
+.decision-follow-up textarea {
+  resize: vertical;
+}
+
+.decision-follow-up .decision-button {
+  width: 100%;
+}
+
 .decision-button {
   display: flex;
   min-height: 62px;

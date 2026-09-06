@@ -509,17 +509,21 @@ function SessionConversation({
         {conversation && <span>{conversation.length} messages</span>}
       </div>
 
-      {!live && (
+      {(!live || session.dryRun) && (
         <div className="conversation-disclosure" role="status">
           <MessageCircleMore size={16} />
           <div>
-            <strong>Not available in demo data</strong>
-            <span>Demo sessions carry no conversation. Relay never renders a fabricated transcript; connect the API to synchronize real messages.</span>
+            <strong>{session.dryRun ? 'Dry-run conversation' : 'Not available in demo data'}</strong>
+            <span>
+              {session.dryRun
+                ? 'This local adapter does not call Devin or claim synchronized messages.'
+                : 'Demo sessions carry no conversation. Relay never renders a fabricated transcript; connect the API to synchronize real messages.'}
+            </span>
           </div>
         </div>
       )}
 
-      {live && conversation === null && (
+      {live && !session.dryRun && conversation === null && (
         <div className="conversation-disclosure" role="status">
           <ExternalLink size={16} />
           <div>
@@ -538,9 +542,9 @@ function SessionConversation({
         </div>
       )}
 
-      {live && conversation !== null && conversation.length === 0 && <p className="session-empty">No messages have been exchanged yet.</p>}
+      {live && !session.dryRun && conversation !== null && conversation.length === 0 && <p className="session-empty">No messages have been exchanged yet.</p>}
 
-      {live && conversation && conversation.length > 0 && (
+      {live && !session.dryRun && conversation && conversation.length > 0 && (
         <div className="conversation-messages">
           {conversation.map(item => (
             <ConversationBubble key={item.id} message={item} />
@@ -548,7 +552,7 @@ function SessionConversation({
         </div>
       )}
 
-      {live && !embeddable && conversation !== null && (
+      {live && !session.dryRun && !embeddable && conversation !== null && (
         <p className="conversation-footnote">
           Messages are synchronized from the Devin API on each refresh. Live streaming and remote-desktop embedding are not exposed; use the authenticated Devin link for those.
         </p>

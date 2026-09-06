@@ -296,6 +296,7 @@ export interface SessionSummary {
   transition: string;
   actor: string;
   status: AgentSessionStatus;
+  dry_run: boolean;
   created_at: IsoTimestamp;
   started_at?: IsoTimestamp;
   ended_at?: IsoTimestamp;
@@ -397,6 +398,8 @@ export interface OwnerDecisionCommand {
   kind: DecisionKind;
   rationale?: string;
   reclassify_as?: 'duplicate' | 'not_a_bug' | 'unsupported' | 'support';
+  field?: string;
+  prompt?: string;
   pr_number?: number;
   head_sha?: string;
 }

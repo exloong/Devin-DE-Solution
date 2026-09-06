@@ -397,7 +397,13 @@ function LiveIssueDetail({
                   <CommandFeedback state={respond.state} label="Reporter response" onDismiss={respond.reset} />
                 </div>
               )}
-              {openQuestions.length === 0 && issue.questions.length > 0 && <p className="conversation-footnote">All information requests are resolved.</p>}
+              {openQuestions.length === 0 && issue.questions.length > 0 && (
+                <p className="conversation-footnote">
+                  {issue.missing_fields.length > 0
+                    ? `No unanswered requests remain; unavailable required fields still block reproduction: ${issue.missing_fields.join(', ')}.`
+                    : 'All required information requests are answered.'}
+                </p>
+              )}
 
               <div className="lifecycle-events">
                 <h4>Lifecycle timeline</h4>
@@ -709,6 +715,8 @@ function LiveHandoff({
   onDismiss: () => void;
 }) {
   const [rationale, setRationale] = useState('');
+  const [discriminatorField, setDiscriminatorField] = useState('');
+  const [discriminatorPrompt, setDiscriminatorPrompt] = useState('');
   const pending = state.kind === 'pending';
   const bugDecisionOpen = issue.state === 'needs_owner_decision';
   const prDecisionOpen = issue.state === 'awaiting_owner';
@@ -770,13 +778,40 @@ function LiveHandoff({
                     <small>Starts a bounded coding session on {issue.repository.full_name}</small>
                   </span>
                 </button>
-                <button className="decision-button" disabled={pending} onClick={() => run({ kind: 'request_discriminator' })}>
-                  <HelpCircle size={18} />
-                  <span>
-                    <strong>Need more evidence</strong>
-                    <small>Ask one targeted follow-up</small>
-                  </span>
-                </button>
+                <div className="decision-follow-up">
+                  <input
+                    aria-label="Evidence field"
+                    placeholder="Evidence field, e.g. feature_flags"
+                    value={discriminatorField}
+                    disabled={pending}
+                    onChange={event => setDiscriminatorField(event.target.value)}
+                  />
+                  <textarea
+                    aria-label="Evidence question"
+                    rows={2}
+                    placeholder="One targeted question for the reporter…"
+                    value={discriminatorPrompt}
+                    disabled={pending}
+                    onChange={event => setDiscriminatorPrompt(event.target.value)}
+                  />
+                  <button
+                    className="decision-button"
+                    disabled={pending || !discriminatorField.trim() || !discriminatorPrompt.trim()}
+                    onClick={() =>
+                      run({
+                        kind: 'request_discriminator',
+                        field: discriminatorField.trim(),
+                        prompt: discriminatorPrompt.trim(),
+                      })
+                    }
+                  >
+                    <HelpCircle size={18} />
+                    <span>
+                      <strong>Need more evidence</strong>
+                      <small>Ask one targeted follow-up</small>
+                    </span>
+                  </button>
+                </div>
                 <button className="decision-button" disabled={pending} onClick={() => run({ kind: 'reclassify', reclassify_as: 'not_a_bug' })}>
                   <ArrowDownRight size={18} />
                   <span>

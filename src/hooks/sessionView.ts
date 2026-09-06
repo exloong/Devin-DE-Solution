@@ -24,6 +24,7 @@ export type DataSource = 'demo' | 'live';
  */
 export interface SessionView {
   source: DataSource;
+  dryRun: boolean;
   id: string;
   version: number | null;
   shortId: string;
@@ -68,6 +69,7 @@ export interface SessionView {
 export function fromDemoSession(session: DevinSession): SessionView {
   return {
     source: 'demo',
+    dryRun: true,
     id: session.id,
     version: null,
     shortId: session.id,
@@ -208,6 +210,7 @@ export function fromApiSummary(session: SessionSummary, now: number): SessionVie
   const updatedAt = parseTime(session.last_heartbeat_at) ?? endedAt ?? startedAt ?? parseTime(session.created_at);
   return {
     source: 'live',
+    dryRun: session.dry_run,
     id: session.id,
     version: session.version,
     shortId: `DEV-${session.id.slice(0, 8)}`,

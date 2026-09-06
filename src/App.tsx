@@ -74,6 +74,7 @@ import {
 } from './hooks';
 import {
   DataSourceBadge,
+  LifecycleBadge,
   LiveIssueWorkbench,
   RepositorySafetyNotice,
   ResourceNotice,
@@ -409,11 +410,14 @@ function Overview({
   live,
   analytics,
 }: {
-  goToIssue: (id: number) => void;
+  goToIssue: (id: number | string) => void;
   live: boolean;
   analytics: ReturnType<typeof useAnalytics>;
 }) {
   const summary = live ? analytics.data : undefined;
+  const attention = useLiveIssueList('attention', '', live);
+  const liveAttention = attention.data?.items ?? [];
+  const ownerRows = summary?.owner_load ?? ownerLoad;
   const period = summary
     ? `${new Date(summary.period.from).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} – ${new Date(summary.period.to).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`
     : 'September 1–7, 2026';
@@ -542,7 +546,7 @@ function Overview({
         <div className="card volume-card">
           <CardHeader
             title="Pipeline throughput"
-            subtitle="Issues entering and leaving the pipeline each week"
+            subtitle="Static 12-month research baseline · not live runtime data"
             action={
               <a
                 className="text-button"
@@ -607,8 +611,8 @@ function Overview({
         <div className="card bottleneck-card">
           <CardHeader
             title="Time by stage"
-            subtitle="Median active + waiting time"
-            action={<span className="micro-badge">Target &lt; 7d</span>}
+            subtitle="Static 12-month research baseline · not live runtime data"
+            action={<span className="micro-badge">Research</span>}
           />
           <div className="bottleneck-chart">
             {[
@@ -643,24 +647,40 @@ function Overview({
               <span>Owner</span>
               <span>Next action</span>
             </div>
-            {issues.slice(0, 4).map(issue => (
-              <button className="issue-table-row" key={issue.id} onClick={() => goToIssue(issue.id)}>
-                <span className="issue-title-cell">
-                  <small>{issue.key} · {issue.category}</small>
-                  <strong>{issue.title}</strong>
-                </span>
-                <span><StateBadge state={issue.state} /></span>
-                <span className="owner-cell"><Avatar initials={issue.ownerInitials} /> {issue.owner}</span>
-                <span className="next-cell">{issue.nextAction}<small>{issue.due}</small></span>
-              </button>
-            ))}
+            {live
+              ? liveAttention.slice(0, 4).map(issue => {
+                  const owner = issue.owner_routing.candidates.find(candidate => candidate.selected);
+                  return (
+                    <button className="issue-table-row" key={issue.id} onClick={() => goToIssue(issue.id)}>
+                      <span className="issue-title-cell">
+                        <small>{issue.key} · {issue.category ?? 'Unclassified'}</small>
+                        <strong>{issue.title}</strong>
+                      </span>
+                      <span><LifecycleBadge state={issue.state} /></span>
+                      <span className="owner-cell"><Avatar initials={owner?.initials ?? '—'} /> {owner?.team ?? 'Unassigned'}</span>
+                      <span className="next-cell">{issue.next_action}<small>{issue.next_action_due ?? 'No deadline'}</small></span>
+                    </button>
+                  );
+                })
+              : issues.slice(0, 4).map(issue => (
+                  <button className="issue-table-row" key={issue.id} onClick={() => goToIssue(issue.id)}>
+                    <span className="issue-title-cell">
+                      <small>{issue.key} · {issue.category}</small>
+                      <strong>{issue.title}</strong>
+                    </span>
+                    <span><StateBadge state={issue.state} /></span>
+                    <span className="owner-cell"><Avatar initials={issue.ownerInitials} /> {issue.owner}</span>
+                    <span className="next-cell">{issue.nextAction}<small>{issue.due}</small></span>
+                  </button>
+                ))}
+            {live && liveAttention.length === 0 && <p className="session-empty">No blocked or failed issues need operator attention.</p>}
           </div>
         </div>
 
         <div className="card owner-card">
-          <CardHeader title="Owner load" subtitle="Open work and response health" />
+          <CardHeader title="Owner load" subtitle={summary ? 'Live owner-routing totals' : 'Demo workload'} />
           <div className="owner-list">
-            {ownerLoad.map(owner => (
+            {ownerRows.map(owner => (
               <div className="owner-row" key={owner.owner}>
                 <Avatar initials={owner.initials} />
                 <div>

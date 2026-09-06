@@ -121,6 +121,21 @@ class Worker:
             self._apply(
                 uow,
                 job,
+                EventType.SESSION_PROGRESS,
+                {
+                    "session_id": str(session_id),
+                    "progress_percent": 100,
+                    "current_action": "Dry-run reproduction complete",
+                    "next_checkpoint": "Evidence packet published",
+                    "label": "Dry-run reproduction complete",
+                    "message": "Bounded local reproduction finished.",
+                },
+                AGENT,
+                suffix="complete-progress",
+            )
+            self._apply(
+                uow,
+                job,
                 EventType.REPRODUCTION_RESULT,
                 {
                     "session_id": str(session_id),
@@ -152,8 +167,38 @@ class Worker:
                 SYSTEM,
                 suffix="started",
             )
+            self._apply(
+                uow,
+                job,
+                EventType.SESSION_PROGRESS,
+                {
+                    "session_id": str(session_id),
+                    "progress_percent": 70,
+                    "current_action": "Preparing isolated dry-run fix",
+                    "next_checkpoint": "Open fake pull request",
+                    "label": "Dry-run fix",
+                    "message": "No external repository write is performed.",
+                },
+                AGENT,
+                suffix="progress",
+            )
             number = 1000 + issue.external_number
-            head_sha = uuid.uuid5(uuid.NAMESPACE_URL, f"relay:{issue.id}:{issue.revision}").hex
+            head_sha = uuid.uuid5(uuid.NAMESPACE_URL, f"relay:{issue.id}:{session_id}").hex
+            self._apply(
+                uow,
+                job,
+                EventType.SESSION_PROGRESS,
+                {
+                    "session_id": str(session_id),
+                    "progress_percent": 100,
+                    "current_action": "Dry-run fix complete",
+                    "next_checkpoint": "Fake pull request opened",
+                    "label": "Dry-run fix complete",
+                    "message": "The fake pull request is ready for review.",
+                },
+                AGENT,
+                suffix="complete-progress",
+            )
             self._apply(
                 uow,
                 job,
