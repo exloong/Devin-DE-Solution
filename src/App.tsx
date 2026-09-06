@@ -76,7 +76,7 @@ import {
   useLiveIssueList,
   type IssueListFilter,
 } from './components';
-import { OPERATOR_TOKEN_STORAGE_KEY, type Heartbeat, type ProviderStatus } from './api';
+import { OPERATOR_TOKEN_STORAGE_KEY, type AgentSessionStatus, type Heartbeat, type ProviderStatus } from './api';
 import { HealthDashboard, formatAgo } from './components/HealthDashboard';
 
 const navItems: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[] = [
@@ -86,6 +86,9 @@ const navItems: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[] 
   { key: 'issues', label: 'Issue workbench', icon: Inbox },
   { key: 'settings', label: 'Connections', icon: Settings2 },
 ];
+
+/** Sessions still needing Devin or an operator; the nav badge counts these. */
+const ACTIVE_SESSION_STATUSES = new Set<AgentSessionStatus>(['queued', 'running', 'needs_attention']);
 
 const stateClass: Record<Issue['state'], string> = {
   'Needs information': 'amber',
@@ -129,7 +132,7 @@ function App() {
   const attention = useLiveIssueList('attention', '', live);
   const now = useNow(1000);
   const runningSessionCount = live
-    ? liveSessions.data?.items.filter(session => session.status === 'running').length ?? 0
+    ? liveSessions.data?.items.filter(session => ACTIVE_SESSION_STATUSES.has(session.status)).length ?? 0
     : demo
       ? devinSessions.filter(session => session.status === 'Running').length
       : null;
