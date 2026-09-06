@@ -420,11 +420,17 @@ export interface AutomationStatus {
 }
 
 /** A Devin automation as exposed by Relay; inbox URL and secret are never sent to the browser. */
+export interface AutomationTrigger {
+  event_type: string;
+  conditions: Record<string, unknown> | null;
+}
+
 export interface Automation {
   automation_id: string;
   name: string;
   enabled: boolean;
   event_types: string[];
+  triggers: AutomationTrigger[];
   prompt: string | null;
   metadata: Record<string, string>;
   relay_kind: SessionKind | null;
@@ -481,6 +487,8 @@ export interface AutomationDetail {
   sessions: AutomationSessions;
 }
 
+export type IntakeStatus = 'native' | 'webhook' | 'stale' | 'none';
+
 export interface Heartbeat {
   database: ProbeStatus;
   worker: ProbeStatus;
@@ -490,6 +498,9 @@ export interface Heartbeat {
   last_webhook_received_at: IsoTimestamp | null;
   last_webhook_event: string | null;
   last_session_launched_at: IsoTimestamp | null;
+  intake: IntakeStatus;
+  last_automation_poll_at: IsoTimestamp | null;
+  polled_automation_id: string | null;
   automations: AutomationStatus[];
   overall: SystemStatus;
   reasons: string[];

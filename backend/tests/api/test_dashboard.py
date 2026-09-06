@@ -122,7 +122,9 @@ def test_heartbeat_derives_overall_status(h: Harness) -> None:
     assert hb.overall == "degraded"
     assert hb.worker == "ok"
     assert hb.github == "dry_run" and hb.devin == "dry_run"
-    assert "no GitHub webhook has been received" in hb.reasons
+    assert hb.intake == "none"
+    # A missing Relay webhook is not an outage: reproduction intake is Devin-native.
+    assert not any("webhook" in reason for reason in hb.reasons)
 
     with h.engine.begin() as conn:
         runtime_status.touch(conn, runtime_status.GITHUB_WEBHOOK, "issues", now)
@@ -136,11 +138,22 @@ def test_heartbeat_derives_overall_status(h: Harness) -> None:
     assert hb.overall == "healthy"
     assert hb.github == "connected" and hb.devin == "connected"
     assert hb.last_webhook_received_at == now and hb.last_webhook_event == "issues"
+    assert hb.intake == "webhook"
     assert hb.reasons == []
+
+    with h.engine.begin() as conn:
+        runtime_status.touch(conn, runtime_status.DEVIN_AUTOMATION_POLL, "auto-1", now)
+    with h.uow() as uow:
+        hb = dashboard.summary(uow, now, _rows(h)).heartbeat
+    assert hb.intake == "native"
+    assert hb.polled_automation_id == "auto-1"
+    assert hb.last_automation_poll_at == now
 
     h.clock.advance(seconds=31)
     with h.uow() as uow:
         hb = dashboard.summary(uow, h.clock.now(), _rows(h)).heartbeat
     assert hb.worker == "stale"
     assert hb.github == "stale" and hb.devin == "stale"
+    assert hb.intake == "stale"
     assert hb.overall == "degraded"
+    assert "Devin automation intake poll is stale" in hb.reasons

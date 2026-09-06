@@ -48,11 +48,22 @@ def test_list_shows_relay_automations_without_inbox_details(api: TestClient) -> 
     assert body["total"] == 2
     kinds = {item["relay_kind"] for item in body["items"]}
     assert kinds == {"reproduction", "fix"}
+    by_kind = {item["relay_kind"]: item for item in body["items"]}
     for item in body["items"]:
         assert item["managed_by_relay"] is True
-        assert item["has_inbox"] is True
-        assert item["event_types"] == ["webhook:incoming"]
-        assert "task_id" in item["prompt"]
+    repro, fix = by_kind["reproduction"], by_kind["fix"]
+    assert repro["has_inbox"] is False
+    assert repro["event_types"] == ["github:issues"]
+    assert repro["triggers"][0]["conditions"]["any"][0]["all"] == [
+        {"field": "repository.full_name", "operator": "eq", "value": "exloong/superset"},
+        {"field": "action", "operator": "eq", "value": "labeled"},
+        {"field": "label.name", "operator": "eq", "value": "bug"},
+    ]
+    assert "task_id" not in repro["prompt"]
+    assert fix["has_inbox"] is True
+    assert fix["event_types"] == ["webhook:incoming"]
+    assert fix["triggers"] == [{"event_type": "webhook:incoming", "conditions": None}]
+    assert "task_id" in fix["prompt"]
     text = resp.text
     assert "fake-secret" not in text and "webhooks/inbox" not in text
 

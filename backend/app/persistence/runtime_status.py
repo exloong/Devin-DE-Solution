@@ -18,6 +18,7 @@ WORKER = "worker"
 GITHUB_WEBHOOK = "github_webhook"
 PROVIDER_GITHUB = "provider:github"
 PROVIDER_DEVIN = "provider:devin"
+DEVIN_AUTOMATION_POLL = "devin_automation_poll"
 
 
 @dataclass(frozen=True)

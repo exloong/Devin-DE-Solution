@@ -12,6 +12,27 @@ type Editor = { mode: 'create' } | { mode: 'edit'; automation: Automation } | nu
  * Manages the organization's Devin Automations through Relay's proxy. Devin
  * owns the records; Relay only adds who may edit them and hides inbox secrets.
  */
+/** Flatten Devin trigger conditions ({any:[{all:[{field,operator,value}]}]}) into readable lines. */
+function describeConditions(conditions: Record<string, unknown> | null): string[] {
+  if (!conditions) return [];
+  const lines: string[] = [];
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
+    }
+    if (!node || typeof node !== 'object') return;
+    const record = node as Record<string, unknown>;
+    if (typeof record.field === 'string') {
+      lines.push(`${record.field} ${String(record.operator ?? 'eq')} ${JSON.stringify(record.value)}`);
+      return;
+    }
+    Object.values(record).forEach(walk);
+  };
+  walk(conditions);
+  return lines;
+}
+
 export function AutomationsView({ live, goToIssue, notify }: { live: boolean; goToIssue: (id: string) => void; notify: (message: string) => void }) {
   const list = useAutomations(live);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -306,7 +327,17 @@ function AutomationDetailPanel({
               <p>
                 {automation.event_types.length === 0 ? 'No trigger configured' : automation.event_types.join(', ')}
                 {automation.has_inbox && <small> · inbox URL and secret are kept server-side</small>}
+                {automation.event_types.includes('github:issues') && <small> · fired by Devin's GitHub connection, no Relay webhook needed</small>}
               </p>
+              {automation.triggers.some((t) => t.conditions) && (
+                <ul className="trigger-conditions">
+                  {automation.triggers.flatMap((t) => describeConditions(t.conditions)).map((line) => (
+                    <li key={line}>
+                      <code>{line}</code>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           </li>
           <li>

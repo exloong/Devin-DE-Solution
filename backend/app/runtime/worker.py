@@ -48,6 +48,13 @@ class Worker:
             },
             now,
         )
+        intake = self.live_runtime.native_intake if self.live_runtime is not None else None
+        if intake is not None and intake.last_polled_at is not None and intake.automation_id:
+            runtime_status.touch_all(
+                self.engine,
+                {runtime_status.DEVIN_AUTOMATION_POLL: intake.automation_id},
+                intake.last_polled_at,
+            )
 
     def run_once(self) -> int:
         now = self.service.clock.now()

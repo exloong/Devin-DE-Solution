@@ -147,6 +147,9 @@ export function demoDashboard(now = Date.now()): DashboardSummary {
       last_webhook_received_at: null,
       last_webhook_event: null,
       last_session_launched_at: null,
+      intake: 'none',
+      last_automation_poll_at: null,
+      polled_automation_id: null,
       automations: [],
       overall: 'down',
       reasons: ['Demo data: no Relay API, worker, GitHub webhook, or Devin connection is present.'],
@@ -196,13 +199,25 @@ export function SystemStatusPill({ status, reasons }: { status: SystemStatus; re
   );
 }
 
+/** Issue intake is Devin-native (github:issues); Relay's own webhook is optional. */
+function githubSignal(heartbeat: Heartbeat, now: number): string {
+  if (heartbeat.intake === 'native' || heartbeat.intake === 'stale') {
+    const poll = `Devin github:issues automation polled ${formatAgo(heartbeat.last_automation_poll_at, now)}`;
+    return heartbeat.intake === 'stale' ? `${poll} (stale)` : poll;
+  }
+  if (heartbeat.intake === 'webhook') {
+    return `Last webhook ${formatAgo(heartbeat.last_webhook_received_at, now)}${heartbeat.last_webhook_event ? ` · ${heartbeat.last_webhook_event}` : ''}`;
+  }
+  return 'No Devin automation poll or webhook observed yet';
+}
+
 function HeartbeatPanel({ heartbeat, now }: { heartbeat: Heartbeat; now: number }) {
   const backend = heartbeat.database === 'ok' && heartbeat.worker === 'ok' ? 'ok' : heartbeat.database !== 'ok' || heartbeat.worker === 'unavailable' ? 'down' : 'warn';
   const backendLabel =
     heartbeat.database !== 'ok' ? 'Database unavailable' : heartbeat.worker === 'ok' ? 'API + worker online' : heartbeat.worker === 'stale' ? 'Worker heartbeat stale' : 'Worker not running';
   const rows: [string, 'ok' | 'warn' | 'down', string, string][] = [
     ['Backend', backend, backendLabel, `Worker heartbeat ${formatAgo(heartbeat.last_worker_heartbeat_at, now)}`],
-    ['GitHub', providerTone(heartbeat.github), providerLabel[heartbeat.github], `Last webhook ${formatAgo(heartbeat.last_webhook_received_at, now)}${heartbeat.last_webhook_event ? ` · ${heartbeat.last_webhook_event}` : ''}`],
+    ['GitHub', providerTone(heartbeat.github), providerLabel[heartbeat.github], githubSignal(heartbeat, now)],
     ['Devin', providerTone(heartbeat.devin), providerLabel[heartbeat.devin], `Last session launched ${formatAgo(heartbeat.last_session_launched_at, now)}`],
   ];
   return (

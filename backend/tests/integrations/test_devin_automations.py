@@ -18,6 +18,9 @@ from app.integrations.devin_automations import (
     automation_output_schema,
     automation_prompt,
     dispatch_payload,
+    native_issue_number,
+    parse_native_triage_output,
+    reproduction_trigger_conditions,
 )
 from app.integrations.devin_sessions import canonical_session_url
 from app.integrations.errors import ContractValidationError
@@ -65,43 +68,175 @@ def page(items: list[dict[str, JsonValue]]) -> dict[str, JsonValue]:
     return {"items": list(items), "has_next_page": False, "end_cursor": None}
 
 
-def test_prompt_requires_task_id_echo_and_forbids_merging() -> None:
+def test_prompts_separate_native_triage_from_owner_authorized_fix() -> None:
     fix = automation_prompt(TaskKind.FIX)
     assert "@exloong/superset" in fix
     assert "task_id" in fix
     assert "Never merge" in fix
+    assert "human owner has confirmed" in fix
     repro = automation_prompt(TaskKind.REPRODUCTION)
-    assert "Do not modify the repository" in repro
+    assert "GitHub `issues` event" in repro
+    assert "context_completeness >= 80" in repro
+    assert "never open a pull request" in repro
+    assert "task_id" not in repro
     with pytest.raises(ContractValidationError):
         automation_prompt(TaskKind.CLASSIFICATION)
 
 
-def test_prompt_schema_admits_the_echoed_task_id() -> None:
-    for kind in (TaskKind.REPRODUCTION, TaskKind.FIX):
-        schema = automation_output_schema(kind)
-        assert schema["additionalProperties"] is False
-        assert "task_id" in schema["properties"]  # type: ignore[operator]
-        assert "task_id" in schema["required"]  # type: ignore[operator]
-        assert json.dumps(schema, sort_keys=True) in automation_prompt(kind)
+def test_prompt_schemas_match_each_kind_of_session() -> None:
+    fix_schema = automation_output_schema(TaskKind.FIX)
+    assert fix_schema["additionalProperties"] is False
+    assert "task_id" in fix_schema["properties"]  # type: ignore[operator]
+    assert "task_id" in fix_schema["required"]  # type: ignore[operator]
+    assert json.dumps(fix_schema, sort_keys=True) in automation_prompt(TaskKind.FIX)
+
+    native = automation_output_schema(TaskKind.REPRODUCTION)
+    assert native["required"] == ["issue_number", "repository", "phase"]
+    assert "task_id" not in native["properties"]  # type: ignore[operator]
+    assert json.dumps(native, sort_keys=True) in automation_prompt(TaskKind.REPRODUCTION)
 
 
-def test_ensure_creates_automation_when_none_exists_and_keeps_secret() -> None:
+def test_native_trigger_conditions_encode_the_repository_and_label_gate() -> None:
+    conditions = reproduction_trigger_conditions("bug")
+    assert conditions == {
+        "any": [
+            {
+                "all": [
+                    {
+                        "field": "repository.full_name",
+                        "operator": "eq",
+                        "value": "exloong/superset",
+                    },
+                    {"field": "action", "operator": "eq", "value": "labeled"},
+                    {"field": "label.name", "operator": "eq", "value": "bug"},
+                ]
+            }
+        ]
+    }
+    with pytest.raises(ContractValidationError):
+        reproduction_trigger_conditions(" ")
+
+
+def test_native_triage_output_applies_relay_context_gate() -> None:
+    assert native_issue_number(None) is None
+    assert native_issue_number({"issue_number": 0}) is None
+    assert native_issue_number({"issue_number": True}) is None
+    assert native_issue_number({"issue_number": 9, "repository": "other/repo"}) is None
+    assert native_issue_number({"issue_number": 9}) == 9
+
+    thin = parse_native_triage_output(
+        {
+            "issue_number": 9,
+            "repository": "exloong/superset",
+            "phase": "done",
+            "classification": "bug",
+            "context_completeness": 55,
+            "missing_fields": [{"field": "version", "prompt": "Which version?"}],
+        }
+    )
+    assert thin.classification == "bug"
+    assert thin.effective_classification == "needs_information"
+    assert thin.missing_fields[0].field == "version"
+    assert thin.reproduction is None
+
+    full = parse_native_triage_output(
+        {
+            "issue_number": 9,
+            "repository": "exloong/superset",
+            "phase": "done",
+            "classification": "bug",
+            "context_completeness": 90,
+            "reproduction": {
+                "reproduced": True,
+                "attempts": 2,
+                "observed_behavior": "raises",
+                "target_behavior": "fails",
+                "control_behavior": "passes",
+            },
+        }
+    )
+    assert full.effective_classification == "bug"
+    assert full.reproduction is not None and full.reproduction.attempts == 2
+
+    with pytest.raises(ContractValidationError):
+        parse_native_triage_output({"issue_number": 9, "classification": "wontfix"})
+    with pytest.raises(ContractValidationError):
+        parse_native_triage_output({"issue_number": 9, "context_completeness": 120})
+    with pytest.raises(ContractValidationError):
+        parse_native_triage_output({"phase": "triage"})
+
+
+def native_doc(*, automation_id: str = "auto-1", event_type: str = "github:issues") -> dict:
+    return {
+        "automation_id": automation_id,
+        "name": "Relay",
+        "enabled": True,
+        "metadata": dict(automation_metadata(TaskKind.REPRODUCTION)),
+        "triggers": [
+            {
+                "trigger_id": "t1",
+                "event_type": event_type,
+                "conditions": reproduction_trigger_conditions(),
+            }
+        ],
+    }
+
+
+def test_ensure_creates_native_reproduction_automation_without_inbox() -> None:
+    transport = RecordedTransport([HttpResponse(200, page([])), HttpResponse(201, native_doc())])
+    automations = client(transport)
+
+    handle = automations.ensure_automation(TaskKind.REPRODUCTION, now=NOW)
+
+    assert handle == AutomationHandle("auto-1", TaskKind.REPRODUCTION, "", None)
+    assert handle.native is True and handle.can_dispatch is False
+    listing, create = transport.requests
+    assert listing.method == "GET"
+    assert listing.query["metadata.relay_kind"] == "reproduction"
+    assert create.method == "POST"
+    body = create.json_body
+    assert body is not None
+    assert body["triggers"] == [
+        {"event_type": "github:issues", "conditions": reproduction_trigger_conditions("bug")}
+    ]
+    assert body["metadata"] == {"relay_kind": "reproduction", "relay_repo": "exloong/superset"}
+    assert automations.secret_store.load(TaskKind.REPRODUCTION) == handle
+
+
+def test_ensure_migrates_legacy_inbox_reproduction_automation_in_place() -> None:
     transport = RecordedTransport(
         [
-            HttpResponse(200, page([])),
-            HttpResponse(201, automation_doc(TaskKind.REPRODUCTION)),
+            HttpResponse(200, page([automation_doc(TaskKind.REPRODUCTION, secret=None)])),
+            HttpResponse(200, native_doc()),
         ]
     )
     automations = client(transport)
 
     handle = automations.ensure_automation(TaskKind.REPRODUCTION, now=NOW)
 
-    assert handle == AutomationHandle("auto-1", TaskKind.REPRODUCTION, INBOX, "inbox-secret")
+    assert handle.automation_id == "auto-1" and handle.inbox_secret is None
+    listing, patch = transport.requests
+    assert patch.method == "PATCH" and patch.url == f"{API}/automations/auto-1"
+    assert patch.json_body is not None
+    assert patch.json_body["triggers"] == [
+        {"event_type": "github:issues", "conditions": reproduction_trigger_conditions("bug")}
+    ]
+
+
+def test_ensure_creates_fix_automation_when_none_exists_and_keeps_secret() -> None:
+    transport = RecordedTransport(
+        [
+            HttpResponse(200, page([])),
+            HttpResponse(201, automation_doc(TaskKind.FIX)),
+        ]
+    )
+    automations = client(transport)
+
+    handle = automations.ensure_automation(TaskKind.FIX, now=NOW)
+
+    assert handle == AutomationHandle("auto-1", TaskKind.FIX, INBOX, "inbox-secret")
     listing, create = transport.requests
-    assert listing.method == "GET"
-    assert listing.query["metadata.relay_kind"] == "reproduction"
-    assert create.method == "POST"
-    assert create.url == f"{API}/automations"
+    assert listing.query["metadata.relay_kind"] == "fix"
     body = create.json_body
     assert body is not None
     assert body["run_as"] == {"type": "organization"}
@@ -111,8 +246,8 @@ def test_ensure_creates_automation_when_none_exists_and_keeps_secret() -> None:
     action = actions[0]
     assert isinstance(action, dict)
     assert action["type"] == "start_session"
-    assert body["metadata"] == {"relay_kind": "reproduction", "relay_repo": "exloong/superset"}
-    assert automations.secret_store.load(TaskKind.REPRODUCTION) == handle
+    assert body["metadata"] == {"relay_kind": "fix", "relay_repo": "exloong/superset"}
+    assert automations.secret_store.load(TaskKind.FIX) == handle
 
 
 def test_ensure_reuses_existing_automation_without_patching_it() -> None:
@@ -160,6 +295,7 @@ def test_management_list_get_create_update_delete_redact_secrets() -> None:
     assert listed[1].created_by == "Ops"
     assert listed[1].last_invocation_status == "succeeded"
     assert listed[1].has_inbox is True
+    assert listed[1].triggers[0].event_type == "webhook:incoming"
     assert "inbox-secret" not in repr(listed) and INBOX not in repr(listed)
 
     assert automations.get_automation("new").prompt == "do the thing"
@@ -245,8 +381,8 @@ def test_ensure_recreates_automation_whose_secret_was_never_seen() -> None:
 def test_dispatch_posts_task_envelope_to_inbox_with_secret_header() -> None:
     transport = RecordedTransport([HttpResponse(202, {"accepted": True})])
     automations = client(transport)
-    handle = AutomationHandle("auto-1", TaskKind.REPRODUCTION, INBOX, "inbox-secret")
-    task = make_task(TaskKind.REPRODUCTION)
+    handle = AutomationHandle("auto-1", TaskKind.FIX, INBOX, "inbox-secret")
+    task = make_task(TaskKind.FIX)
 
     receipt = automations.dispatch(handle, task, reporter_context="steps", now=NOW)
 
@@ -269,6 +405,14 @@ def test_dispatch_refuses_handle_without_secret() -> None:
     handle = AutomationHandle("auto-1", TaskKind.FIX, INBOX, None)
     with pytest.raises(ContractValidationError):
         automations.dispatch(handle, make_task(TaskKind.FIX), now=NOW)
+
+
+def test_dispatch_refuses_native_reproduction_automation() -> None:
+    automations = client(RecordedTransport())
+    handle = AutomationHandle("auto-1", TaskKind.REPRODUCTION, INBOX, "secret")
+    with pytest.raises(ContractValidationError):
+        automations.dispatch(handle, make_task(TaskKind.REPRODUCTION), now=NOW)
+    assert automations.transport.requests == ()
 
 
 def test_list_spawned_sessions_filters_by_automation_and_since() -> None:
