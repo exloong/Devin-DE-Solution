@@ -219,7 +219,7 @@ class DevinAutomationClient(Protocol):
     """Automation operations Relay depends on."""
 
     def ensure_automation(self, kind: TaskKind, *, now: datetime) -> AutomationHandle:
-        """Find or create Relay's automation for ``kind`` and reconcile its prompt."""
+        """Find Relay's automation for ``kind``, creating it once if absent."""
 
     def dispatch(
         self,

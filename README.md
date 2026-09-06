@@ -190,8 +190,8 @@ heartbeat marked *down*; it never pretends a provider is connected.
 | Service | Responsibility |
 | --- | --- |
 | `web` | Builds and serves the React dashboard; Nginx proxies `/api/v1` to the API on the same origin. |
-| `api` | Provides FastAPI query/command endpoints, authentication, database migrations, health/readiness, and signed webhook ingress. |
-| `worker` | Claims durable jobs, advances timers and transitions, and calls external providers through bounded HTTPS clients. |
+| `api` | Provides FastAPI query/command endpoints, authentication, database migrations, health/readiness, signed webhook ingress, and the authenticated proxy for managing Devin Automations. |
+| `worker` | Claims durable jobs, advances timers and transitions, provisions Relay's two Devin Automations, dispatches gated tasks to their inboxes, and calls external providers through bounded HTTPS clients. |
 | `postgres` | Persists lifecycle state, idempotency records, jobs, evidence, sessions, PR bindings, reviews, approvals, and worker status. |
 
 The API and worker share the backend package but run as separate processes.
@@ -514,6 +514,14 @@ preserve the raw webhook request body.
 - **A webhook returns 409:** the delivery ID was already processed.
 - **A Devin request fails:** confirm the service user can use organization
   sessions and that `DEVIN_ORG_ID` has the `org-...` form.
+- **The Devin Automations view shows 403 or "not configured":** the `api`
+  service needs `DEVIN_API_TOKEN`/`DEVIN_ORG_ID` too, and the service user
+  needs `ViewOrgAutomations` (read), `ManageOrgAutomations` (create, edit,
+  delete) and `ViewOrgSessions` (sessions under an automation).
+- **A dispatched task never gets a session:** check the automation is enabled
+  in Devin and its last invocation status in the Automations view; a `403`
+  from the inbox means the stored secret no longer matches, so delete the
+  automation and restart the worker to re-create it.
 - **Review remains pending:** confirm Devin Review is enabled and its token can
   call the enterprise PR-review endpoint.
 - **Port 4173 is already in use:** set `APP_PORT` to another host port.
