@@ -6,11 +6,13 @@ from pathlib import Path
 
 from fastapi import APIRouter, Header, Request, status
 
+from app.api.controller_gate import GatePolicy, evaluate_issue_event, log_decision
 from app.api.deps import Ctx
 from app.domain.errors import DomainError, ErrorCode
 from app.domain.models import Actor, Event, Issue
 from app.domain.states import ActorRole, EventType
 from app.integrations.github_webhooks import GitHubWebhookEnvelope, GitHubWebhookVerifier
+from app.persistence import runtime_status
 
 router = APIRouter()
 MAX_WEBHOOK_BYTES = 1_048_576
@@ -29,6 +31,11 @@ def _issue_by_number(ctx: Ctx, number: int) -> Issue | None:
     with ctx.uow_factory() as uow:
         repository = uow.get_repository()
         return None if repository is None else uow.get_issue_by_number(repository.id, number)
+
+
+def _seen_delivery(ctx: Ctx, delivery_id: str) -> bool:
+    with ctx.uow_factory() as uow:
+        return uow.get_event_by_delivery("github", delivery_id) is not None
 
 
 def _issue_by_pr(ctx: Ctx, number: int) -> tuple[Issue, str] | None:
@@ -94,6 +101,13 @@ async def github_webhook(
             raw_body=raw_body,
         )
     )
+    with ctx.engine.begin() as conn:
+        runtime_status.touch(
+            conn,
+            runtime_status.GITHUB_WEBHOOK,
+            accepted.event_name.value,
+            ctx.service.clock.now(),
+        )
     payload = accepted.redacted_payload
     issue_data = _mapping(payload.get("issue"))
     pull_request = _mapping(payload.get("pull_request"))
@@ -108,7 +122,7 @@ async def github_webhook(
         number = accepted.issue_number
         if number is None:
             raise DomainError(ErrorCode.INVALID_INPUT, "issue number is required")
-        if accepted.action == "opened":
+        if accepted.action in ("opened", "labeled"):
             raw_labels = issue_data.get("labels")
             label_items = raw_labels if isinstance(raw_labels, list) else []
             labels = [
@@ -116,6 +130,33 @@ async def github_webhook(
                 for label in label_items
                 if isinstance(label, Mapping)
             ]
+            labels = [label for label in labels if label]
+            decision = evaluate_issue_event(
+                GatePolicy.from_env(),
+                repository=_text(_mapping(payload.get("repository")), "full_name"),
+                action=accepted.action,
+                issue_state=_text(issue_data, "state", "open"),
+                labels=labels,
+                label_added=_text(_mapping(payload.get("label")), "name") or None,
+                sender=actor_login,
+            )
+            log_decision(decision, accepted.delivery.delivery_id)
+            if not decision.accepted:
+                return {
+                    "accepted": True,
+                    "delivery": accepted.delivery.delivery_id,
+                    "action": "ignored",
+                    "reason": decision.reason,
+                }
+            if _issue_by_number(ctx, number) is not None and not _seen_delivery(
+                ctx, accepted.delivery.delivery_id
+            ):
+                return {
+                    "accepted": True,
+                    "delivery": accepted.delivery.delivery_id,
+                    "action": "ignored",
+                    "reason": "issue_already_enrolled",
+                }
             event_type = EventType.ISSUE_OPENED
             event_payload = {
                 "repository": ctx.scope.full_name,
@@ -123,7 +164,7 @@ async def github_webhook(
                 "title": _text(issue_data, "title"),
                 "body": _text(issue_data, "body"),
                 "reporter": _text(_mapping(issue_data.get("user")), "login", actor_login),
-                "labels": [label for label in labels if label],
+                "labels": labels,
             }
         elif accepted.action == "reopened":
             issue = _issue_by_number(ctx, number)

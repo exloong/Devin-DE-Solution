@@ -443,6 +443,85 @@ class AnalyticsSummary(ApiModel):
     generated_at: datetime
 
 
+# ---------------------------------------------------------------- dashboard
+
+ProbeStatus = Literal["ok", "stale", "unavailable"]
+ProviderStatus = Literal["connected", "dry_run", "stale", "unconfigured"]
+SystemStatus = Literal["healthy", "degraded", "down"]
+
+
+class ThroughputBucket(ApiModel):
+    day: datetime
+    entered: int
+    completed: int
+
+
+class Throughput(ApiModel):
+    entered: int
+    completed: int
+    buckets: list[ThroughputBucket]
+
+
+class StageCount(ApiModel):
+    id: str
+    label: str
+    kind: Literal["automation", "ai", "human", "terminal"]
+    actor: str
+    count: int
+
+
+class SessionHealth(ApiModel):
+    kind: Literal["reproduction", "fix"]
+    queued: int
+    running: int
+    completed: int
+    failed: int
+    needs_attention: int
+    cancelled: int
+    total: int
+    success_rate_pct: float | None = None
+    median_duration_seconds: float | None = None
+    last_launched_at: datetime | None = None
+
+
+class RecentSession(ApiModel):
+    id: uuid.UUID
+    kind: Literal["reproduction", "fix"]
+    issue_id: uuid.UUID
+    issue_key: str
+    issue_title: str
+    status: Literal["queued", "running", "completed", "failed", "needs_attention", "cancelled"]
+    dry_run: bool
+    created_at: datetime
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    duration_seconds: float | None = None
+    devin_session_url: str | None = None
+
+
+class Heartbeat(ApiModel):
+    database: ProbeStatus
+    worker: ProbeStatus
+    github: ProviderStatus
+    devin: ProviderStatus
+    last_worker_heartbeat_at: datetime | None = None
+    last_webhook_received_at: datetime | None = None
+    last_webhook_event: str | None = None
+    last_session_launched_at: datetime | None = None
+    overall: SystemStatus
+    reasons: list[str]
+
+
+class DashboardSummary(ApiModel):
+    period: Period
+    throughput: Throughput
+    in_flight: list[StageCount]
+    sessions: list[SessionHealth]
+    recent_sessions: list[RecentSession]
+    heartbeat: Heartbeat
+    generated_at: datetime
+
+
 # ------------------------------------------------------------------ commands
 
 

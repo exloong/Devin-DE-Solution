@@ -150,11 +150,97 @@ def test_github_webhook_is_signed_scoped_and_idempotent(
     assert rejected.status_code == 403
     assert rejected.json()["error"]["code"] == "unauthorized_repository"
 
-    unsigned = _webhook(
-        client, payload, "webhook-invalid-signature", valid_signature=False
-    )
+    unsigned = _webhook(client, payload, "webhook-invalid-signature", valid_signature=False)
     assert unsigned.status_code == 401
     assert unsigned.json()["error"]["code"] == "invalid_signature"
+
+
+def test_github_webhook_records_heartbeat_and_gates_labels(
+    client: TestClient, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    monkeypatch.setenv("RELAY_TRUSTED_LABEL", "relay:triage")
+    monkeypatch.setenv("RELAY_TRUSTED_ACTORS", "maintainer")
+    issue: dict[str, object] = {
+        "number": 999101,
+        "title": "Labeled intake",
+        "body": "Fails on export.",
+        "state": "open",
+        "user": {"login": "reporter-1"},
+        "labels": [],
+    }
+    base: dict[str, object] = {"repository": {"full_name": TARGET_REPOSITORY}, "issue": issue}
+
+    before = _get(client, f"{API}/dashboard").json()["heartbeat"]
+    assert before["last_webhook_received_at"] is None
+
+    opened = _webhook(
+        client, {**base, "action": "opened", "sender": {"login": "reporter-1"}}, "g-1"
+    )
+    assert opened.status_code == 202
+    assert opened.json()["action"] == "ignored"
+    assert opened.json()["reason"] == "untrusted_actor"
+
+    labeled_wrong = _webhook(
+        client,
+        {**base, "action": "labeled", "label": {"name": "bug"}, "sender": {"login": "maintainer"}},
+        "g-2",
+    )
+    assert labeled_wrong.json()["reason"] == "label_not_trusted"
+    assert _get(client, f"{API}/issues", params={"search": "SUP-999101"}).json()["total"] == 0
+
+    labeled = _webhook(
+        client,
+        {
+            **base,
+            "action": "labeled",
+            "label": {"name": "relay:triage"},
+            "sender": {"login": "maintainer"},
+        },
+        "g-3",
+    )
+    assert labeled.status_code == 202, labeled.text
+    assert labeled.json()["state"] == "triage"
+    replay = _webhook(
+        client,
+        {
+            **base,
+            "action": "labeled",
+            "label": {"name": "relay:triage"},
+            "sender": {"login": "maintainer"},
+        },
+        "g-4",
+    )
+    assert replay.json() == {
+        "accepted": True,
+        "delivery": "g-4",
+        "action": "ignored",
+        "reason": "issue_already_enrolled",
+    }
+
+    heartbeat = _get(client, f"{API}/dashboard").json()["heartbeat"]
+    assert heartbeat["last_webhook_event"] == "issues"
+    assert heartbeat["last_webhook_received_at"] is not None
+    # An unsigned delivery never counts as a received webhook.
+    clock.advance(minutes=1)
+    unsigned = _webhook(client, {**base, "action": "opened"}, "g-5", valid_signature=False)
+    assert unsigned.status_code == 401
+    after = _get(client, f"{API}/dashboard").json()["heartbeat"]
+    assert after["last_webhook_received_at"] == heartbeat["last_webhook_received_at"]
+
+
+def test_dashboard_reports_seeded_sessions_and_stages(client: TestClient) -> None:
+    resp = _get(client, f"{API}/dashboard")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["throughput"]["entered"] == len(SCENARIO_NAMES)
+    assert sum(stage["count"] for stage in body["in_flight"]) == len(SCENARIO_NAMES)
+    assert [s["kind"] for s in body["sessions"]] == ["reproduction", "fix"]
+    assert body["heartbeat"]["overall"] == "down"
+    for recent in body["recent_sessions"]:
+        assert recent["kind"] in {"reproduction", "fix"}
+        assert recent["issue_key"].startswith("SUP-")
+    assert client.get(f"{API}/dashboard").status_code == 401
 
 
 def test_github_webhook_accepts_ping_without_creating_an_issue(
