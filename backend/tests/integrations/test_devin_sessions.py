@@ -5,8 +5,6 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
-from conftest import TARGET_SHA, make_task
-
 from app.integrations import (
     ClassificationOutput,
     ContractValidationError,
@@ -29,6 +27,8 @@ from app.integrations import (
     validate_result,
 )
 from app.integrations.json_values import JsonValue
+
+from conftest import TARGET_SHA, make_task
 
 TOKEN = StaticTokenProvider("test-token")
 ORG_ID = "org-1edbfc26ef2d43d48516023aebe72dab"
@@ -673,6 +673,32 @@ def test_live_client_collects_a_typed_result_from_structured_output() -> None:
 
     assert isinstance(result.payload, ClassificationOutput)
     assert result.payload.confidence == pytest.approx(0.8)
+
+
+def test_live_client_collects_structured_output_while_waiting_for_user() -> None:
+    task = make_task()
+    transport = RecordedTransport(
+        [
+            HttpResponse(
+                200,
+                session_payload(
+                    status="running",
+                    status_detail="waiting_for_user",
+                    structured_output={
+                        "schema": task.output_schema,
+                        "classification": "not_a_bug",
+                        "confidence": 0.95,
+                        "rationale": "The issue is explicitly synthetic test data.",
+                    },
+                ),
+            )
+        ]
+    )
+
+    result = live_client(transport).collect_result("devin-abc123", task)
+
+    assert isinstance(result.payload, ClassificationOutput)
+    assert result.payload.classification == "not_a_bug"
 
 
 def test_structured_output_parsing_rejects_a_missing_field() -> None:
