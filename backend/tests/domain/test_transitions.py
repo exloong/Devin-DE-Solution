@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import uuid
 from types import TracebackType
 
 import pytest
 from app.domain.errors import DomainError, ErrorCode
-from app.domain.models import AttemptStatus, JobKind, QuestionStatus
+from app.domain.models import AttemptStatus, JobKind, JobStatus, QuestionStatus
 from app.domain.states import (
+    ACTIVE_AGENT_STATES,
     TARGET_REPOSITORY,
     TERMINAL_STATES,
     TRANSITIONS,
@@ -13,6 +15,7 @@ from app.domain.states import (
     ActorRole,
     EventType,
     IssueState,
+    SessionKind,
     SessionState,
     TransitionName,
 )
@@ -176,10 +179,145 @@ def test_security_text_signal_cancels_public_work(h: Harness) -> None:
         jobs = uow.list_jobs(issue.id)
     assert all(not s.workspace_live for s in sessions)
     assert sessions[0].state == SessionState.CANCELLED
-    public_pending = [
-        j for j in jobs if j.status.value == "pending" and j.kind != JobKind.PRIVATE_SECURITY_TASK
-    ]
-    assert public_pending == [] or all(j.kind == JobKind.CLASSIFY for j in public_pending)
+    live = [j for j in jobs if j.status in (JobStatus.PENDING, JobStatus.CLAIMED)]
+    assert [j.kind for j in live] == [JobKind.PRIVATE_SECURITY_TASK]
+
+
+def _statuses(h: Harness, issue_id: uuid.UUID, kind: JobKind) -> list[str]:
+    with h.uow() as uow:
+        return [j.status.value for j in uow.list_jobs(issue_id) if j.kind == kind]
+
+
+def test_security_routing_cancels_non_public_kinds_too(h: Harness) -> None:
+    # needs_owner_decision schedules ESCALATE_OWNER (not in PUBLIC_JOB_KINDS);
+    # awaiting_reporter schedules REMINDER/INACTIVITY timers. All must die.
+    issue = h.reproduce(h.classify(h.open_issue()))
+    assert len(h.jobs(issue.id, JobKind.ESCALATE_OWNER)) == 1
+    waiting = h.classify(
+        h.open_issue(number=101), missing=[{"field": "feature_flags", "prompt": "Which flags?"}]
+    )
+    assert len(h.jobs(waiting.id, JobKind.INACTIVITY)) == 1
+    for target in (issue, waiting):
+        routed = h.apply(
+            h.event(EventType.SECURITY_SIGNAL, issue_id=target.id, reason="private disclosure")
+        )
+        assert routed.issue is not None and routed.issue.state == IssueState.SECURITY_PRIVATE
+        with h.uow() as uow:
+            jobs = uow.list_jobs(target.id)
+        outstanding = {j.kind for j in jobs if j.status in (JobStatus.PENDING, JobStatus.CLAIMED)}
+        assert outstanding == {JobKind.PRIVATE_SECURITY_TASK}
+        assert all(j.finished_at is not None for j in jobs if j.status == JobStatus.CANCELLED)
+
+
+def test_claimed_public_job_is_rechecked_before_side_effects(h: Harness) -> None:
+    """Race: a worker claims PUBLISH_QUESTIONS, then the issue turns security-private."""
+    issue = h.classify(
+        h.open_issue(), missing=[{"field": "feature_flags", "prompt": "Which flags?"}]
+    )
+    with h.uow() as uow:
+        job = next(j for j in uow.list_jobs(issue.id) if j.kind == JobKind.PUBLISH_QUESTIONS)
+    with h.uow() as uow:
+        claimed = h.service.claim_job(uow, job.id, "worker-a")
+    assert claimed.status == JobStatus.CLAIMED and claimed.claimed_by == "worker-a"
+    with h.uow() as uow, expect(ErrorCode.ILLEGAL_TRANSITION):
+        h.service.claim_job(uow, job.id, "worker-b")
+    h.apply(h.event(EventType.SECURITY_SIGNAL, issue_id=issue.id, reason="exploit details"))
+    with h.uow() as uow:
+        assert uow.get_job(job.id) is not None
+        cancelled = uow.get_job(job.id)
+    assert cancelled is not None and cancelled.status == JobStatus.CANCELLED
+    with h.uow() as uow, expect(ErrorCode.PROHIBITED_ACTION):
+        h.service.complete_job(uow, job.id, "worker-a")
+    assert _statuses(h, issue.id, JobKind.PUBLISH_QUESTIONS) == ["cancelled"]
+
+
+def test_claimed_job_rejected_when_issue_became_private_without_cancel(h: Harness) -> None:
+    """Even if cancellation were missed, completion rechecks the security flag."""
+    issue = h.classify(
+        h.open_issue(), missing=[{"field": "feature_flags", "prompt": "Which flags?"}]
+    )
+    with h.uow() as uow:
+        job = next(j for j in uow.list_jobs(issue.id) if j.kind == JobKind.PUBLISH_QUESTIONS)
+        h.service.claim_job(uow, job.id, "worker-a")
+    with h.uow() as uow:
+        found = uow.get_issue(issue.id)
+        assert found is not None
+        found.security_flagged = True
+        uow.save_issue(found)
+        uow.commit()
+    with h.uow() as uow, expect(ErrorCode.SECURITY_FAIL_CLOSED):
+        h.service.complete_job(uow, job.id, "worker-a")
+    assert _statuses(h, issue.id, JobKind.PUBLISH_QUESTIONS) == ["cancelled"]
+
+
+def test_stale_revision_job_cannot_run(h: Harness) -> None:
+    issue = h.classify(
+        h.open_issue(), missing=[{"field": "feature_flags", "prompt": "Which flags?"}]
+    )
+    with h.uow() as uow:
+        job = next(j for j in uow.list_jobs(issue.id) if j.kind == JobKind.PUBLISH_QUESTIONS)
+        h.service.claim_job(uow, job.id, "worker-a")
+        found = uow.get_issue(issue.id)
+        assert found is not None
+        found.revision += 1
+        uow.save_issue(found)
+        uow.commit()
+    with h.uow() as uow, expect(ErrorCode.STALE_RESULT):
+        h.service.complete_job(uow, job.id, "worker-a")
+    assert _statuses(h, issue.id, JobKind.PUBLISH_QUESTIONS) == ["cancelled"]
+
+
+def test_claim_and_complete_happy_path_and_not_due(h: Harness) -> None:
+    issue = h.reproduce(h.classify(h.open_issue()))
+    with h.uow() as uow:
+        escalate = next(j for j in uow.list_jobs(issue.id) if j.kind == JobKind.ESCALATE_OWNER)
+        start = next(j for j in uow.list_jobs(issue.id) if j.kind == JobKind.START_REPRODUCTION)
+    with h.uow() as uow, expect(ErrorCode.ILLEGAL_TRANSITION):
+        h.service.claim_job(uow, escalate.id, "w")
+    with h.uow() as uow:
+        h.service.claim_job(uow, start.id, "w")
+        done = h.service.complete_job(uow, start.id, "w")
+    assert done.status == JobStatus.DONE and done.finished_at is not None
+    with h.uow() as uow, expect(ErrorCode.ILLEGAL_TRANSITION):
+        h.service.complete_job(uow, start.id, "w")
+
+
+def test_confirm_bug_creates_exactly_one_fix_session(h: Harness) -> None:
+    issue = h.confirm(h.reproduce(h.classify(h.open_issue())))
+    with h.uow() as uow:
+        fixes = [s for s in uow.list_sessions(issue_id=issue.id) if s.kind == SessionKind.FIX]
+        start_jobs = [j for j in uow.list_jobs(issue.id) if j.kind == JobKind.START_FIX]
+    assert len(fixes) == 1 and fixes[0].state == SessionState.QUEUED
+    assert len(start_jobs) == 1 and start_jobs[0].payload["session_id"] == str(fixes[0].id)
+    started = h.start_fix(issue)
+    assert started.state == IssueState.FIXING
+    with h.uow() as uow:
+        fixes = [s for s in uow.list_sessions(issue_id=issue.id) if s.kind == SessionKind.FIX]
+    assert len(fixes) == 1 and fixes[0].state == SessionState.RUNNING
+    # A second start has no queued session to start.
+    with expect(ErrorCode.ILLEGAL_TRANSITION):
+        h.apply(h.event(EventType.FIX_SESSION_STARTED, issue_id=issue.id))
+    with h.uow() as uow:
+        assert (
+            len([s for s in uow.list_sessions(issue_id=issue.id) if s.kind == SessionKind.FIX]) == 1
+        )
+
+
+def test_fix_session_start_requires_matching_queued_session(h: Harness) -> None:
+    issue = h.confirm(h.reproduce(h.classify(h.open_issue())))
+    with h.uow() as uow:
+        repro = next(
+            s for s in uow.list_sessions(issue_id=issue.id) if s.kind == SessionKind.REPRODUCTION
+        )
+    with expect(ErrorCode.INVALID_INPUT):
+        h.apply(h.event(EventType.FIX_SESSION_STARTED, issue_id=issue.id, session_id=str(repro.id)))
+    with expect(ErrorCode.NOT_FOUND):
+        h.apply(
+            h.event(
+                EventType.FIX_SESSION_STARTED, issue_id=issue.id, session_id=str(uuid.UUID(int=9))
+            )
+        )
+    assert h.issue(issue.id).state == IssueState.FIX_AUTHORIZED
 
 
 def test_confirm_bug_required_before_fix(h: Harness) -> None:
@@ -237,65 +375,193 @@ def test_fix_pr_outside_scope_is_rejected(h: Harness) -> None:
 
 
 def test_devin_review_is_not_human_approval(h: Harness) -> None:
-    issue = h.to_pr_open()
+    issue = h.to_routed_pr()
+    pr = h.pr(issue.id)
     result = h.apply(
         h.event(
             EventType.DEVIN_REVIEW_COMPLETED,
             issue_id=issue.id,
             role=ActorRole.AGENT,
+            pr_number=pr.number,
+            head_sha=pr.head_sha,
             verdict="passed",
             findings=0,
         )
     )
     assert result.issue is not None and result.issue.state == IssueState.AWAITING_OWNER
-    with h.uow() as uow:
-        pr = uow.list_pull_requests(issue.id)[-1]
+    pr = h.pr(issue.id)
     assert pr.devin_review.value == "passed"
+    assert pr.devin_review_head_sha == pr.head_sha
     assert pr.human_approved is False
     with expect(ErrorCode.HUMAN_GATE_REQUIRED):
-        h.apply(h.event(EventType.PR_MERGED, issue_id=issue.id))
+        h.merge(issue)
     with expect(ErrorCode.HUMAN_GATE_REQUIRED):
-        h.apply(
-            h.event(
-                EventType.HUMAN_REVIEW_SUBMITTED,
-                issue_id=issue.id,
-                role=ActorRole.AGENT,
-                state="approved",
-            )
-        )
+        h.review(issue, role=ActorRole.AGENT, login="devin")
 
 
 def test_human_approval_then_merge_completes(h: Harness) -> None:
-    issue = h.to_pr_open()
-    approved = h.apply(
-        h.event(
-            EventType.HUMAN_REVIEW_SUBMITTED,
-            issue_id=issue.id,
-            role=ActorRole.OWNER,
-            login="owner-1",
-            state="approved",
-        )
-    )
+    issue = h.to_routed_pr()
+    approved = h.review(issue)
     assert approved.issue is not None and approved.issue.state == IssueState.AWAITING_OWNER
-    merged = h.apply(h.event(EventType.PR_MERGED, issue_id=issue.id))
+    pr = h.pr(issue.id)
+    assert pr.approved_head_sha == pr.head_sha and pr.approval_override is False
+    merged = h.merge(issue)
     assert merged.issue is not None and merged.issue.state == IssueState.COMPLETED
     assert merged.attempt.transition == TransitionName.COMPLETE
 
 
 def test_changes_requested_resumes_fix_without_new_confirmation(h: Harness) -> None:
-    issue = h.to_pr_open()
+    issue = h.to_routed_pr()
+    pr = h.pr(issue.id)
     changed = h.apply(
         h.event(
             EventType.OWNER_DECISION,
             issue_id=issue.id,
             role=ActorRole.OWNER,
+            login="owner-1",
             decision="request_changes",
             rationale="tighten test",
+            pr_number=pr.number,
+            head_sha=pr.head_sha,
         )
     )
     assert changed.issue is not None and changed.issue.state == IssueState.CHANGES_REQUESTED
     resumed = h.start_fix(changed.issue)
     assert resumed.state == IssueState.FIXING
+
+
+# --------------------------------------------------- trusted reviewer routing
+
+
+def test_agent_fix_result_cannot_choose_reviewers(h: Harness) -> None:
+    issue = h.start_fix(h.confirm(h.reproduce(h.classify(h.open_issue()))))
+    with expect(ErrorCode.PROHIBITED_ACTION):
+        h.open_pr(issue, reviewer_candidates=["attacker"])
+    assert h.issue(issue.id).state == IssueState.FIXING
+    with h.uow() as uow:
+        assert uow.list_pull_requests(issue.id) == []
+
+
+def test_routing_must_come_from_trusted_adapter(h: Harness) -> None:
+    issue = h.to_pr_open()
+    with expect(ErrorCode.UNAUTHORIZED_ACTOR):
+        h.route_reviewers(issue, role=ActorRole.AGENT, members=["attacker"])
+    with expect(ErrorCode.UNAUTHORIZED_ACTOR):
+        h.route_reviewers(issue, role=ActorRole.OWNER, members=["attacker"])
+    with h.uow() as uow:
+        assert uow.list_reviewer_routings(issue.id) == []
+
+
+def test_owner_role_alone_cannot_approve_without_routing(h: Harness) -> None:
+    issue = h.to_pr_open()
+    with expect(ErrorCode.UNAUTHORIZED_ACTOR):
+        h.review(issue, login="owner-1")
+    h.route_reviewers(issue, members=["real-owner"])
+    with expect(ErrorCode.UNAUTHORIZED_ACTOR):
+        h.review(issue, login="owner-1")
+    ok = h.review(issue, login="real-owner")
+    assert ok.issue is not None and ok.issue.state == IssueState.AWAITING_OWNER
+    with h.uow() as uow:
+        routing = uow.list_reviewer_routings(issue.id)[-1]
+    assert routing.state.value == "resolved"
+    assert routing.rationale == "deterministic CODEOWNERS match"
+    assert h.pr(issue.id).routing_id == routing.id
+
+
+def test_unresolved_routing_escalates_and_blocks_owner_approval(h: Harness) -> None:
+    issue = h.to_pr_open()
+    result = h.route_reviewers(issue, state="no_owner", members=[])
+    assert result.attempt.status == AttemptStatus.NOOP
+    assert h.jobs(issue.id, JobKind.REQUEST_REVIEWERS) == []
+    assert any("routing:" in key for key in h.jobs(issue.id, JobKind.ESCALATE_OWNER))
+    with h.uow() as uow:
+        routing = uow.list_reviewer_routings(issue.id)[-1]
+    assert routing.unowned_paths == ["docs/new.md"]
+    with expect(ErrorCode.UNAUTHORIZED_ACTOR):
+        h.review(issue, login="owner-1")
+
+
+def test_operator_override_is_explicit_and_audited(h: Harness) -> None:
+    issue = h.to_pr_open()
+    with expect(ErrorCode.HUMAN_GATE_REQUIRED):
+        h.review(issue, role=ActorRole.OPERATOR, login="ops")
+    ok = h.review(
+        issue, role=ActorRole.OPERATOR, login="ops", override=True, rationale="owner on leave"
+    )
+    assert ok.issue is not None and ok.issue.state == IssueState.AWAITING_OWNER
+    pr = h.pr(issue.id)
+    assert pr.approval_override is True and pr.human_approver == "ops"
+
+
+# ------------------------------------------------------- PR head binding
+
+
+def test_review_and_approval_bind_to_exact_head(h: Harness) -> None:
+    issue = h.to_routed_pr()
+    pr = h.pr(issue.id)
+    with expect(ErrorCode.STALE_RESULT):
+        h.apply(
+            h.event(
+                EventType.DEVIN_REVIEW_COMPLETED,
+                issue_id=issue.id,
+                role=ActorRole.AGENT,
+                pr_number=pr.number,
+                head_sha="0ldhead",
+                verdict="passed",
+            )
+        )
+    with expect(ErrorCode.STALE_RESULT):
+        h.review(issue, head_sha="0ldhead")
+    with expect(ErrorCode.INVALID_INPUT):
+        h.apply(
+            h.event(EventType.PR_MERGED, issue_id=issue.id, pr_number=999, head_sha=pr.head_sha)
+        )
+
+
+def test_synchronize_invalidates_approval_and_requeues_review(h: Harness) -> None:
+    issue = h.to_routed_pr()
+    h.review(issue)
+    pr = h.pr(issue.id)
+    assert pr.approval_binds(pr.head_sha)
+    synced = h.apply(
+        h.event(
+            EventType.PR_SYNCHRONIZED, issue_id=issue.id, pr_number=pr.number, head_sha="newhead"
+        )
+    )
+    assert synced.attempt.transition == TransitionName.PR_HEAD_UPDATED
+    assert synced.issue is not None and synced.issue.state == IssueState.PR_OPEN
+    pr = h.pr(issue.id)
+    assert pr.head_sha == "newhead"
+    assert pr.human_approved is False and pr.approved_head_sha is None
+    assert pr.devin_review.value == "pending" and pr.routing_id is None
+    assert any(key.endswith("newhead") for key in h.jobs(issue.id, JobKind.TRIGGER_DEVIN_REVIEW))
+    assert any(key.endswith("newhead") for key in h.jobs(issue.id, JobKind.RESOLVE_REVIEWERS))
+    # stale merge for the old head cannot complete; the new head has no approval
+    with expect(ErrorCode.STALE_RESULT):
+        h.merge(issue, head_sha="deadbeef")
+    with expect(ErrorCode.HUMAN_GATE_REQUIRED):
+        h.merge(issue)
+    # approval for the old head cannot be replayed
+    with expect(ErrorCode.STALE_RESULT):
+        h.review(issue, head_sha="deadbeef")
+    # old routing does not authorize the new head
+    with expect(ErrorCode.UNAUTHORIZED_ACTOR):
+        h.review(issue)
+    h.route_reviewers(issue)
+    h.review(issue)
+    done = h.merge(issue)
+    assert done.issue is not None and done.issue.state == IssueState.COMPLETED
+
+
+def test_synchronize_with_same_head_is_noop(h: Harness) -> None:
+    issue = h.to_routed_pr()
+    pr = h.pr(issue.id)
+    result = h.apply(
+        h.event(
+            EventType.PR_SYNCHRONIZED, issue_id=issue.id, pr_number=pr.number, head_sha=pr.head_sha
+        )
+    )
+    assert result.attempt.status == AttemptStatus.NOOP
 
 
 def test_stale_session_result_cannot_advance_newer_revision(h: Harness) -> None:
@@ -359,12 +625,58 @@ def test_rejected_event_is_recorded_and_redelivery_is_duplicate(h: Harness) -> N
 
 def test_reminders_then_inactivity_close_and_reopen(h: Harness) -> None:
     issue = h.classify(h.open_issue(), MISSING)
-    reminded = h.apply(h.event(EventType.REMINDER_ELAPSED, issue_id=issue.id))
+    policy = h.issue(issue.id).reporter_wait
+    assert policy is not None and policy.policy_revision == 1 and policy.reminders_sent == 0
+    reminded = h.timer(issue, EventType.REMINDER_ELAPSED)
     assert reminded.attempt.transition == TransitionName.REMIND_REPORTER
-    closed = h.apply(h.event(EventType.INACTIVITY_ELAPSED, issue_id=issue.id))
+    policy = h.issue(issue.id).reporter_wait
+    assert policy is not None and policy.reminders_sent == 1
+    assert len(h.jobs(issue.id, JobKind.PUBLISH_REMINDER)) == 1
+    # second reminder exhausts the budget: no third timer is scheduled
+    h.timer(issue, EventType.REMINDER_ELAPSED)
+    policy = h.issue(issue.id).reporter_wait
+    assert policy is not None and policy.reminders_sent == 2 and policy.reminder_due_at is None
+    assert len(h.jobs(issue.id, JobKind.PUBLISH_REMINDER)) == 2
+    assert len(h.jobs(issue.id, JobKind.REMINDER)) == 2
+    closed = h.timer(issue, EventType.INACTIVITY_ELAPSED)
     assert closed.issue is not None and closed.issue.state == IssueState.CLOSED_INACTIVE
     reopened = h.apply(h.event(EventType.ISSUE_REOPENED, issue_id=issue.id))
     assert reopened.issue is not None and reopened.issue.state == IssueState.TRIAGE
+
+
+def test_early_and_stale_timers_cannot_act(h: Harness) -> None:
+    issue = h.classify(h.open_issue(), MISSING)
+    with expect(ErrorCode.INVALID_INPUT):
+        h.timer(issue, EventType.REMINDER_ELAPSED, advance=False)
+    with expect(ErrorCode.STALE_RESULT):
+        h.timer(issue, EventType.REMINDER_ELAPSED, policy_revision=7)
+    with expect(ErrorCode.STALE_RESULT):
+        h.timer(issue, EventType.INACTIVITY_ELAPSED, due_at="2020-01-01T00:00:00+00:00")
+    assert h.jobs(issue.id, JobKind.PUBLISH_REMINDER) == []
+    assert h.issue(issue.id).state == IssueState.AWAITING_REPORTER
+
+
+def test_reminder_does_not_loop_and_stops_once_answered(h: Harness) -> None:
+    issue = h.classify(h.open_issue(), MISSING)
+    h.timer(issue, EventType.REMINDER_ELAPSED)
+    before = h.jobs(issue.id, JobKind.REMINDER)
+    # replaying the same timer payload is rejected as stale (due time moved)
+    policy = h.issue(issue.id).reporter_wait
+    assert policy is not None
+    with expect(ErrorCode.STALE_RESULT):
+        h.timer(issue, EventType.REMINDER_ELAPSED, due_at=policy.started_at.isoformat())
+    assert h.jobs(issue.id, JobKind.REMINDER) == before
+    h.apply(
+        h.event(
+            EventType.REPORTER_RESPONSE,
+            issue_id=issue.id,
+            role=ActorRole.REPORTER,
+            answers=[{"field": "logs", "answer": "attached"}],
+        )
+    )
+    assert h.issue(issue.id).state == IssueState.REPRODUCING
+    skipped = h.timer(issue, EventType.INACTIVITY_ELAPSED)
+    assert skipped.attempt.status == AttemptStatus.NOOP
 
 
 def test_duplicate_and_reclassify_paths(h: Harness) -> None:
@@ -404,14 +716,55 @@ def test_environment_block_then_operator_retry(h: Harness) -> None:
     assert retried.issue is not None and retried.issue.state == IssueState.REPRODUCING
 
 
-def test_automation_error_retry_restores_previous_state(h: Harness) -> None:
+def _live_sessions(h: Harness, issue_id: uuid.UUID) -> list[SessionState]:
+    with h.uow() as uow:
+        return [s.state for s in uow.list_sessions(issue_id=issue_id) if s.workspace_live]
+
+
+def test_automation_error_retry_starts_new_reproduction_session(h: Harness) -> None:
     issue = h.classify(h.open_issue())
     failed = h.apply(h.event(EventType.AUTOMATION_FAILURE, issue_id=issue.id, reason="bug"))
     assert failed.issue is not None and failed.issue.state == IssueState.AUTOMATION_ERROR
+    assert _live_sessions(h, issue.id) == []
     retried = h.apply(
         h.event(EventType.RETRY_REQUESTED, issue_id=issue.id, role=ActorRole.OPERATOR)
     )
     assert retried.issue is not None and retried.issue.state == IssueState.REPRODUCING
+    assert _live_sessions(h, issue.id) == [SessionState.RUNNING]
+    assert len(h.jobs(issue.id, JobKind.START_REPRODUCTION)) == 2
+
+
+def test_automation_error_during_fix_requeues_bounded_fix_not_fixing(h: Harness) -> None:
+    issue = h.start_fix(h.confirm(h.reproduce(h.classify(h.open_issue()))))
+    assert issue.state == IssueState.FIXING
+    h.apply(h.event(EventType.AUTOMATION_FAILURE, issue_id=issue.id, reason="crash"))
+    assert _live_sessions(h, issue.id) == []
+    retried = h.apply(
+        h.event(EventType.RETRY_REQUESTED, issue_id=issue.id, role=ActorRole.OPERATOR)
+    )
+    assert retried.issue is not None
+    assert retried.issue.state == IssueState.FIX_AUTHORIZED
+    assert retried.issue.state not in ACTIVE_AGENT_STATES
+    assert _live_sessions(h, issue.id) == []
+    with h.uow() as uow:
+        queued = [s for s in uow.list_sessions(issue_id=issue.id) if s.state == SessionState.QUEUED]
+    assert len(queued) == 1
+    assert any(":retry:" in key for key in h.jobs(issue.id, JobKind.START_FIX))
+    resumed = h.start_fix(retried.issue)
+    assert resumed.state == IssueState.FIXING
+    assert _live_sessions(h, issue.id) == [SessionState.RUNNING]
+
+
+def test_automation_error_with_expired_authorization_returns_to_owner_gate(h: Harness) -> None:
+    issue = h.start_fix(h.confirm(h.reproduce(h.classify(h.open_issue()))))
+    h.apply(h.event(EventType.AUTOMATION_FAILURE, issue_id=issue.id, reason="crash"))
+    h.clock.advance(days=8)
+    retried = h.apply(
+        h.event(EventType.RETRY_REQUESTED, issue_id=issue.id, role=ActorRole.OPERATOR)
+    )
+    assert retried.issue is not None
+    assert retried.issue.state == IssueState.NEEDS_OWNER_DECISION
+    assert _live_sessions(h, issue.id) == []
 
 
 def test_session_message_and_cancel_are_jobs_not_transitions(h: Harness) -> None:

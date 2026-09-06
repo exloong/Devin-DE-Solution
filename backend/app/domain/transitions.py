@@ -25,8 +25,8 @@ from datetime import datetime, timedelta
 
 from app.domain.errors import DomainError, ErrorCode
 from app.domain.models import (
+    PRIVATE_JOB_KINDS,
     PUBLIC_JOB_KINDS,
-    Actor,
     AgentSession,
     AttemptStatus,
     AuditEntry,
@@ -44,9 +44,13 @@ from app.domain.models import (
     JobStatus,
     PullRequestState,
     QuestionStatus,
+    ReporterWaitPolicy,
     Repository,
     RepositoryScope,
+    ReviewerRouting,
     ReviewVerdict,
+    RoutingCandidate,
+    RoutingState,
     SessionBudget,
     SessionEvent,
     SessionOutput,
@@ -72,6 +76,22 @@ from app.domain.states import (
 class SystemClock:
     def now(self) -> datetime:
         return utcnow()
+
+
+def _str_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
+def _parse_timestamp(raw: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise DomainError(ErrorCode.INVALID_INPUT, "due_at must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise DomainError(ErrorCode.INVALID_INPUT, "due_at must be timezone-aware")
+    return parsed
 
 
 SECURITY_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
@@ -108,6 +128,12 @@ class TransitionResult:
     @property
     def applied(self) -> bool:
         return self.attempt.status == AttemptStatus.APPLIED
+
+
+# States in which a queued (not yet started, no workspace) FIX session may wait.
+_HOLDS_QUEUED_FIX: frozenset[IssueState] = frozenset(
+    {IssueState.FIX_AUTHORIZED, IssueState.CHANGES_REQUESTED}
+)
 
 
 @dataclass
@@ -160,7 +186,9 @@ class TransitionService:
             EventType.FIX_RESULT: self._on_fix_result,
             EventType.DEVIN_REVIEW_COMPLETED: self._on_devin_review,
             EventType.PR_OPENED: self._on_pr_opened_webhook,
+            EventType.PR_SYNCHRONIZED: self._on_pr_synchronized,
             EventType.PR_MERGED: self._on_pr_merged,
+            EventType.REVIEWER_ROUTING_RESOLVED: self._on_reviewer_routing_resolved,
             EventType.REMINDER_ELAPSED: self._on_reminder,
             EventType.INACTIVITY_ELAPSED: self._on_inactivity,
             EventType.DUPLICATE_DETECTED: self._on_duplicate,
@@ -346,13 +374,15 @@ class TransitionService:
             if session.state == SessionState.RUNNING:
                 session.state = SessionState.COMPLETED
                 session.finished_at = ctx.now
-            if session.state == SessionState.QUEUED and ctx.issue.state not in (
-                IssueState.FIX_AUTHORIZED,
-            ):
+            if session.state == SessionState.QUEUED and ctx.issue.state not in _HOLDS_QUEUED_FIX:
                 session.state = SessionState.CANCELLED
                 session.finished_at = ctx.now
+            if not session.workspace_released:
+                session.workspace_released_at = ctx.now
             session.workspace_released = True
             session.workspace_name = None
+            session.current_action = None
+            session.next_checkpoint = None
             session.updated_at = ctx.now
             ctx.uow.save_session(session)
 
@@ -383,19 +413,129 @@ class TransitionService:
             payload=payload or {},
             run_after=run_after or ctx.now,
             correlation_id=ctx.issue.correlation_id,
+            issue_revision=ctx.issue.revision,
             created_at=ctx.now,
         )
         ctx.uow.add_job(job)
         return job
 
     def _cancel_pending_jobs(self, ctx: _Context, public_only: bool) -> None:
+        """Cancel outstanding work for the issue.
+
+        ``public_only`` keeps private-security work alive; every pending *or
+        claimed* job of any other kind is cancelled so a worker that already
+        picked one up sees the cancellation when it rechecks before acting.
+        """
         for job in ctx.uow.list_jobs(ctx.issue.id):
-            if job.status != JobStatus.PENDING:
+            if job.status not in (JobStatus.PENDING, JobStatus.CLAIMED):
                 continue
-            if public_only and job.kind not in PUBLIC_JOB_KINDS:
+            if public_only and job.kind in PRIVATE_JOB_KINDS:
                 continue
             job.status = JobStatus.CANCELLED
+            job.finished_at = ctx.now
             ctx.uow.save_job(job)
+
+    # ------------------------------------------------------------------- jobs
+
+    def _job_may_run(self, uow: UnitOfWork, job: Job) -> None:
+        """Recheck a job against current issue reality; raise instead of acting.
+
+        A worker must call this via :meth:`claim_job` before starting and via
+        :meth:`complete_job` before recording side effects, so a job that was
+        claimed before a security routing or a revision bump cannot act.
+        """
+        if job.status == JobStatus.CANCELLED:
+            raise DomainError(
+                ErrorCode.PROHIBITED_ACTION, "job was cancelled", {"job_id": str(job.id)}
+            )
+        if job.status in (JobStatus.DONE, JobStatus.FAILED):
+            raise DomainError(
+                ErrorCode.ILLEGAL_TRANSITION,
+                "job already finished",
+                {"job_id": str(job.id), "status": job.status.value},
+            )
+        if job.issue_id is None:
+            return
+        issue = uow.get_issue(job.issue_id)
+        if issue is None:
+            raise DomainError(ErrorCode.NOT_FOUND, "issue not found")
+        if issue.security_flagged and job.kind not in PRIVATE_JOB_KINDS:
+            job.status = JobStatus.CANCELLED
+            job.finished_at = self.clock.now()
+            uow.save_job(job)
+            uow.commit()
+            raise DomainError(
+                ErrorCode.SECURITY_FAIL_CLOSED,
+                "issue is security-private; non-private job must not run",
+                {"job_id": str(job.id), "kind": job.kind.value},
+            )
+        if job.issue_revision is not None and job.issue_revision != issue.revision:
+            job.status = JobStatus.CANCELLED
+            job.finished_at = self.clock.now()
+            uow.save_job(job)
+            uow.commit()
+            raise DomainError(
+                ErrorCode.STALE_RESULT,
+                "job targets a superseded issue revision",
+                {"job_revision": job.issue_revision, "current": issue.revision},
+            )
+
+    def _load_job(self, uow: UnitOfWork, job_id: uuid.UUID) -> Job:
+        job = uow.get_job(job_id)
+        if job is None:
+            raise DomainError(ErrorCode.NOT_FOUND, "job not found", {"job_id": str(job_id)})
+        if job.issue_id is not None:
+            uow.lock_issue(job.issue_id)
+        return job
+
+    def claim_job(self, uow: UnitOfWork, job_id: uuid.UUID, worker: str) -> Job:
+        """Move a pending job to CLAIMED after rechecking it is still allowed."""
+        job = self._load_job(uow, job_id)
+        now = self.clock.now()
+        if job.status == JobStatus.CLAIMED:
+            raise DomainError(
+                ErrorCode.ILLEGAL_TRANSITION,
+                "job already claimed",
+                {"job_id": str(job.id), "claimed_by": job.claimed_by},
+            )
+        self._job_may_run(uow, job)
+        if job.run_after > now:
+            raise DomainError(
+                ErrorCode.ILLEGAL_TRANSITION,
+                "job is not due yet",
+                {"run_after": job.run_after.isoformat()},
+            )
+        job.status = JobStatus.CLAIMED
+        job.claimed_by = worker
+        job.claimed_at = now
+        job.attempts += 1
+        uow.save_job(job)
+        uow.commit()
+        return job
+
+    def complete_job(
+        self, uow: UnitOfWork, job_id: uuid.UUID, worker: str, *, succeeded: bool = True
+    ) -> Job:
+        """Finish a claimed job; rechecks security/revision before the caller may act.
+
+        Workers call this *before* emitting the job's external side effect and
+        only proceed when it returns; any DomainError means the effect must be
+        skipped.
+        """
+        job = self._load_job(uow, job_id)
+        if job.status != JobStatus.CLAIMED or job.claimed_by != worker:
+            self._job_may_run(uow, job)
+            raise DomainError(
+                ErrorCode.ILLEGAL_TRANSITION,
+                "job is not claimed by this worker",
+                {"job_id": str(job.id), "status": job.status.value, "claimed_by": job.claimed_by},
+            )
+        self._job_may_run(uow, job)
+        job.status = JobStatus.DONE if succeeded else JobStatus.FAILED
+        job.finished_at = self.clock.now()
+        uow.save_job(job)
+        uow.commit()
+        return job
 
     def _payload_str(self, ctx: _Context, key: str, default: str | None = None) -> str:
         value = ctx.event.payload.get(key, default)
@@ -484,6 +624,7 @@ class TransitionService:
             budget=budget,
             target_commit=target_commit,
             repository=self.scope.full_name,
+            dry_run=self.scope.dry_run,
             correlation_id=ctx.issue.correlation_id,
             created_at=ctx.now,
             updated_at=ctx.now,
@@ -507,14 +648,14 @@ class TransitionService:
         self, ctx: _Context, session: AgentSession, state: SessionState, label: str, detail: str
     ) -> None:
         session.state = state
+        if not session.workspace_released:
+            session.workspace_released_at = ctx.now
         session.workspace_released = True
         session.workspace_name = None
         session.finished_at = ctx.now
         session.updated_at = ctx.now
-        session.progress_percent = (
-            100 if state == SessionState.COMPLETED else session.progress_percent
-        )
-        session.current_action = detail
+        session.current_action = None
+        session.next_checkpoint = None
         ctx.uow.save_session(session)
         ctx.uow.add_session_event(
             SessionEvent(session_id=session.id, label=label, detail=detail, created_at=ctx.now)
@@ -667,8 +808,7 @@ class TransitionService:
             created += 1
         if self._open_required_questions(ctx):
             self._enqueue(ctx, JobKind.PUBLISH_QUESTIONS, suffix=str(ctx.issue.version))
-            self._enqueue(ctx, JobKind.REMINDER, run_after=ctx.now + self.reminder_after)
-            self._enqueue(ctx, JobKind.INACTIVITY, run_after=ctx.now + self.inactivity_after)
+            self._begin_reporter_wait(ctx)
             return _Outcome(
                 TransitionName.REQUEST_INFORMATION,
                 IssueState.AWAITING_REPORTER,
@@ -755,11 +895,14 @@ class TransitionService:
         session.workspace_name = f"superset-repro-{ctx.issue.external_number}"
         session.started_at = ctx.now
         session.last_heartbeat_at = ctx.now
-        session.current_action = "Building fixture without reporter data"
-        session.next_checkpoint = "Attach minimal fixture and result matrix"
         session.updated_at = ctx.now
         ctx.uow.save_session(session)
-        self._enqueue(ctx, JobKind.START_REPRODUCTION, payload={"session_id": str(session.id)})
+        self._enqueue(
+            ctx,
+            JobKind.START_REPRODUCTION,
+            suffix=str(session.id),
+            payload={"session_id": str(session.id)},
+        )
         return _Outcome(TransitionName.START_REPRODUCTION, IssueState.REPRODUCING, trigger)
 
     def _on_reproduction_started(self, ctx: _Context) -> _Outcome:
@@ -773,10 +916,20 @@ class TransitionService:
                 "no live workspace is permitted for this issue state",
                 {"issue_state": ctx.issue.state.value, "session_state": session.state.value},
             )
-        progress = self._payload_int(ctx, "progress_percent", session.progress_percent)
-        session.progress_percent = max(0, min(100, progress))
-        session.current_action = self._payload_str(ctx, "current_action", session.current_action)
-        session.next_checkpoint = self._payload_str(ctx, "next_checkpoint", session.next_checkpoint)
+        payload = ctx.event.payload
+        synced = False
+        if "progress_percent" in payload:
+            session.progress_percent = max(0, min(100, self._payload_int(ctx, "progress_percent")))
+            synced = True
+        if "current_action" in payload:
+            session.current_action = self._payload_str(ctx, "current_action")
+            synced = True
+        if "next_checkpoint" in payload:
+            session.next_checkpoint = self._payload_str(ctx, "next_checkpoint")
+            synced = True
+        if synced:
+            session.progress_source = f"{ctx.event.source}:{ctx.event.actor.login}"
+            session.progress_synced_at = ctx.now
         session.last_heartbeat_at = ctx.now
         session.updated_at = ctx.now
         ctx.uow.save_session(session)
@@ -786,7 +939,7 @@ class TransitionService:
                 SessionEvent(
                     session_id=session.id,
                     label=label,
-                    detail=session.current_action,
+                    detail=session.current_action or "",
                     created_at=ctx.now,
                 )
             )
@@ -904,6 +1057,8 @@ class TransitionService:
         allowed_roles = {ActorRole.OWNER}
         if kind == DecisionKind.ROUTE_SECURITY_PRIVATE:
             allowed_roles |= {ActorRole.SECURITY, ActorRole.OPERATOR}
+        if kind in (DecisionKind.APPROVE_PR, DecisionKind.REQUEST_CHANGES):
+            allowed_roles |= {ActorRole.OPERATOR}
         if ctx.event.actor.role not in allowed_roles:
             raise DomainError(
                 ErrorCode.HUMAN_GATE_REQUIRED,
@@ -931,19 +1086,9 @@ class TransitionService:
             )
             decision.expires_at = ctx.now + self.fix_authorization_ttl
             ctx.uow.add_decision(decision)
-            revision = self._latest_revision(ctx)
-            self._create_session(
-                ctx,
-                SessionKind.FIX,
-                f"Fix {ctx.issue.key}",
-                f"{ctx.event.actor.login} confirmed expected behavior",
-                SessionBudget(
-                    wall_clock_seconds=5400,
-                    allowed_capabilities=["read_repo", "run_isolated_tests", "open_pull_request"],
-                ),
-                target_commit=revision.target_commit if revision else None,
+            self._queue_fix_session(
+                ctx, decision, f"{ctx.event.actor.login} confirmed expected behavior"
             )
-            self._enqueue(ctx, JobKind.START_FIX)
             return _Outcome(TransitionName.CONFIRM_BUG, IssueState.FIX_AUTHORIZED, rationale)
         if kind == DecisionKind.REQUEST_DISCRIMINATOR:
             field = self._payload_str(ctx, "field")
@@ -962,6 +1107,7 @@ class TransitionService:
                 )
             )
             self._enqueue(ctx, JobKind.PUBLISH_QUESTIONS, suffix=f"discriminator:{field}")
+            self._begin_reporter_wait(ctx)
             return _Outcome(
                 TransitionName.REQUEST_DISCRIMINATOR, IssueState.AWAITING_REPORTER, field
             )
@@ -978,55 +1124,230 @@ class TransitionService:
         if kind == DecisionKind.ROUTE_SECURITY_PRIVATE:
             ctx.uow.add_decision(decision)
             return self._route_security(ctx, rationale or "owner routed to security")
+        pr = self._pr_ref(ctx)
+        override = self._authorize_review_actor(ctx, pr, rationale)
         if kind == DecisionKind.APPROVE_PR:
             ctx.uow.add_decision(decision)
-            self._mark_pr_approval(ctx, True, ctx.event.actor.login)
+            self._mark_pr_approval(ctx, pr, True, ctx.event.actor.login, override)
             return _Outcome(
                 TransitionName.OWNER_APPROVED,
                 IssueState.AWAITING_OWNER,
-                "human approval recorded; merge remains a human GitHub action",
+                f"human approval recorded for #{pr.number}@{pr.head_sha}; merge stays on GitHub",
             )
         ctx.uow.add_decision(decision)
-        self._mark_pr_approval(ctx, False, None)
+        self._mark_pr_approval(ctx, pr, False, None, override)
+        self._requeue_fix_after_changes(ctx, ctx.event.actor.login)
         return _Outcome(
             TransitionName.OWNER_REQUESTED_CHANGES, IssueState.CHANGES_REQUESTED, rationale
         )
 
-    def _mark_pr_approval(self, ctx: _Context, approved: bool, approver: str | None) -> None:
-        prs = ctx.uow.list_pull_requests(ctx.issue.id)
-        if not prs:
-            raise DomainError(ErrorCode.ILLEGAL_TRANSITION, "no pull request exists for this issue")
-        pr = prs[-1]
+    # ------------------------------------------------- pull request binding
+
+    def _tracked_pr(self, ctx: _Context, number: int) -> PullRequestState:
+        for pr in ctx.uow.list_pull_requests(ctx.issue.id):
+            if pr.number == number:
+                return pr
+        raise DomainError(
+            ErrorCode.INVALID_INPUT,
+            "pull request is not tracked for this issue",
+            {"pr_number": number},
+        )
+
+    def _pr_ref(self, ctx: _Context) -> PullRequestState:
+        """Resolve ``payload.pr_number`` + ``payload.head_sha`` to the tracked PR.
+
+        Every review/approval/merge signal must name the exact head it refers to;
+        a signal for a superseded head is stale and cannot advance state.
+        """
+        number = self._payload_int(ctx, "pr_number")
+        head_sha = self._payload_str(ctx, "head_sha")
+        pr = self._tracked_pr(ctx, number)
+        if head_sha != pr.head_sha:
+            raise DomainError(
+                ErrorCode.STALE_RESULT,
+                "signal refers to a superseded pull request head",
+                {"pr_number": number, "signal_head": head_sha, "tracked_head": pr.head_sha},
+            )
+        return pr
+
+    def _routing_for_head(self, ctx: _Context, pr: PullRequestState) -> ReviewerRouting | None:
+        for routing in reversed(list(ctx.uow.list_reviewer_routings(ctx.issue.id))):
+            if routing.pull_request_number == pr.number and routing.head_sha == pr.head_sha:
+                return routing
+        return None
+
+    def _authorize_review_actor(self, ctx: _Context, pr: PullRequestState, rationale: str) -> bool:
+        """Return True when the decision is an explicit operator override."""
+        actor = ctx.event.actor
+        if actor.role == ActorRole.OPERATOR:
+            if ctx.event.payload.get("override") is not True or not rationale.strip():
+                raise DomainError(
+                    ErrorCode.HUMAN_GATE_REQUIRED,
+                    "operators may only approve via an explicit override with a rationale",
+                )
+            return True
+        if actor.role != ActorRole.OWNER:
+            raise DomainError(ErrorCode.HUMAN_GATE_REQUIRED, "reviews must come from a human owner")
+        routing = self._routing_for_head(ctx, pr)
+        if routing is None:
+            raise DomainError(
+                ErrorCode.UNAUTHORIZED_ACTOR,
+                "no reviewer routing is persisted for this pull request head",
+                {"pr_number": pr.number, "head_sha": pr.head_sha},
+            )
+        if routing.state != RoutingState.RESOLVED or actor.login not in routing.authorized_logins():
+            raise DomainError(
+                ErrorCode.UNAUTHORIZED_ACTOR,
+                "reviewer is not an authorized owner for this pull request head",
+                {
+                    "login": actor.login,
+                    "routing_state": routing.state.value,
+                    "authorized": sorted(routing.authorized_logins()),
+                },
+            )
+        return False
+
+    def _mark_pr_approval(
+        self,
+        ctx: _Context,
+        pr: PullRequestState,
+        approved: bool,
+        approver: str | None,
+        override: bool,
+    ) -> None:
         pr.human_approved = approved
         pr.human_approver = approver
+        pr.approved_head_sha = pr.head_sha if approved else None
+        pr.approval_override = override if approved else False
         pr.updated_at = ctx.now
         ctx.uow.save_pull_request(pr)
 
+    def _reset_pr_head(self, ctx: _Context, pr: PullRequestState, head_sha: str) -> None:
+        """A new head invalidates approval and review evidence bound to the old head."""
+        previous = pr.head_sha
+        pr.head_sha = head_sha
+        pr.human_approved = False
+        pr.human_approver = None
+        pr.approved_head_sha = None
+        pr.approval_override = False
+        pr.devin_review = ReviewVerdict.PENDING
+        pr.devin_review_findings = 0
+        pr.devin_review_head_sha = None
+        pr.devin_review_url = None
+        pr.routing_id = None
+        pr.checks_passed = None
+        pr.updated_at = ctx.now
+        ctx.uow.save_pull_request(pr)
+        ctx.uow.add_evidence(
+            Evidence(
+                issue_id=ctx.issue.id,
+                issue_revision=ctx.issue.revision,
+                session_id=pr.session_id,
+                kind=EvidenceKind.REVIEW_FINDINGS,
+                title=f"PR #{pr.number} head changed",
+                summary=f"{previous} -> {head_sha}; prior approval and review evidence invalidated",
+                created_at=ctx.now,
+            )
+        )
+        self._request_review_and_routing(ctx, pr)
+
+    def _request_review_and_routing(self, ctx: _Context, pr: PullRequestState) -> None:
+        self._enqueue(
+            ctx,
+            JobKind.TRIGGER_DEVIN_REVIEW,
+            suffix=pr.head_sha,
+            payload={"pr_number": pr.number, "head_sha": pr.head_sha},
+        )
+        self._enqueue(
+            ctx,
+            JobKind.RESOLVE_REVIEWERS,
+            suffix=pr.head_sha,
+            payload={"pr_number": pr.number, "head_sha": pr.head_sha},
+        )
+
     def _on_human_review(self, ctx: _Context) -> _Outcome:
         state = self._payload_str(ctx, "state")
-        reviewer = self._payload_str(ctx, "reviewer", ctx.event.actor.login)
-        if ctx.event.actor.role != ActorRole.OWNER:
-            raise DomainError(ErrorCode.HUMAN_GATE_REQUIRED, "reviews must come from a human owner")
+        if state not in ("approved", "changes_requested"):
+            raise DomainError(
+                ErrorCode.INVALID_INPUT, "review state must be approved or changes_requested"
+            )
+        pr = self._pr_ref(ctx)
+        rationale = self._payload_str(ctx, "rationale", "")
+        override = self._authorize_review_actor(ctx, pr, rationale)
+        reviewer = ctx.event.actor.login
         if state == "approved":
             ctx.uow.add_decision(
                 HumanDecision(
                     issue_id=ctx.issue.id,
                     issue_revision=ctx.issue.revision,
                     kind=DecisionKind.APPROVE_PR,
-                    actor=Actor(role=ActorRole.OWNER, login=reviewer),
+                    actor=ctx.event.actor,
+                    rationale=rationale,
                     created_at=ctx.now,
                 )
             )
-            self._mark_pr_approval(ctx, True, reviewer)
-            return _Outcome(TransitionName.OWNER_APPROVED, IssueState.AWAITING_OWNER, reviewer)
-        if state == "changes_requested":
-            self._mark_pr_approval(ctx, False, None)
+            self._mark_pr_approval(ctx, pr, True, reviewer, override)
             return _Outcome(
-                TransitionName.OWNER_REQUESTED_CHANGES, IssueState.CHANGES_REQUESTED, reviewer
+                TransitionName.OWNER_APPROVED,
+                IssueState.AWAITING_OWNER,
+                f"{reviewer} approved #{pr.number}@{pr.head_sha}",
             )
-        raise DomainError(
-            ErrorCode.INVALID_INPUT, "review state must be approved or changes_requested"
+        ctx.uow.add_decision(
+            HumanDecision(
+                issue_id=ctx.issue.id,
+                issue_revision=ctx.issue.revision,
+                kind=DecisionKind.REQUEST_CHANGES,
+                actor=ctx.event.actor,
+                rationale=rationale,
+                created_at=ctx.now,
+            )
         )
+        self._mark_pr_approval(ctx, pr, False, None, override)
+        self._requeue_fix_after_changes(ctx, reviewer)
+        return _Outcome(
+            TransitionName.OWNER_REQUESTED_CHANGES, IssueState.CHANGES_REQUESTED, reviewer
+        )
+
+    def _requeue_fix_after_changes(self, ctx: _Context, reviewer: str) -> None:
+        """Requested changes re-queue one bounded fix session under the live authorization.
+
+        If the confirm_bug authorization has expired nothing is queued; a later
+        FIX_SESSION_STARTED is then rejected with human_gate_required.
+        """
+        try:
+            authorization = self._active_fix_authorization(ctx)
+        except DomainError:
+            return
+        self._queue_fix_session(
+            ctx,
+            authorization,
+            f"{reviewer} requested changes on #{self._pr_ref(ctx).number}",
+            job_suffix=f"changes:{ctx.issue.version}",
+        )
+
+    def _queue_fix_session(
+        self, ctx: _Context, authorization: HumanDecision, trigger: str, *, job_suffix: str = ""
+    ) -> AgentSession:
+        """Queue the single bounded FIX session for the current revision + START_FIX job."""
+        revision = self._latest_revision(ctx)
+        session = self._create_session(
+            ctx,
+            SessionKind.FIX,
+            f"Fix {ctx.issue.key}",
+            trigger,
+            SessionBudget(
+                wall_clock_seconds=5400,
+                allowed_capabilities=["read_repo", "run_isolated_tests", "open_pull_request"],
+            ),
+            target_commit=revision.target_commit if revision else None,
+        )
+        self._enqueue(
+            ctx,
+            JobKind.START_FIX,
+            suffix=job_suffix,
+            payload={"session_id": str(session.id), "authorization_id": str(authorization.id)},
+        )
+        return session
 
     def _active_fix_authorization(self, ctx: _Context) -> HumanDecision:
         for decision in reversed(list(ctx.uow.list_decisions(ctx.issue.id))):
@@ -1042,28 +1363,51 @@ class TransitionService:
             "an unexpired confirm_bug decision is required before coding",
         )
 
+    def _queued_fix_session(self, ctx: _Context) -> AgentSession:
+        """Return the single queued FIX session authorized for the current revision.
+
+        The session is created once by ``confirm_bug`` (or a retry under the
+        same authorization); starting it never creates another one.
+        """
+        if "session_id" in ctx.event.payload:
+            session = self._payload_session(ctx)
+        else:
+            queued = [
+                s
+                for s in ctx.uow.list_sessions(issue_id=ctx.issue.id)
+                if s.kind == SessionKind.FIX
+                and s.issue_revision == ctx.issue.revision
+                and s.state == SessionState.QUEUED
+            ]
+            if not queued:
+                raise DomainError(
+                    ErrorCode.ILLEGAL_TRANSITION,
+                    "no queued fix session exists for this issue revision",
+                )
+            if len(queued) > 1:
+                raise DomainError(
+                    ErrorCode.INTERNAL, "multiple queued fix sessions for one revision"
+                )
+            session = queued[0]
+        if session.kind != SessionKind.FIX:
+            raise DomainError(ErrorCode.INVALID_INPUT, "session is not a fix session")
+        if session.state != SessionState.QUEUED:
+            raise DomainError(
+                ErrorCode.ILLEGAL_TRANSITION,
+                "fix session is not queued",
+                {"session_id": str(session.id), "state": session.state.value},
+            )
+        return session
+
     def _on_fix_session_started(self, ctx: _Context) -> _Outcome:
         authorization = self._active_fix_authorization(ctx)
-        revision = self._latest_revision(ctx)
-        session = self._create_session(
-            ctx,
-            SessionKind.FIX,
-            f"Fix {ctx.issue.key}",
-            f"{authorization.actor.login} confirmed expected behavior",
-            SessionBudget(
-                wall_clock_seconds=5400,
-                allowed_capabilities=["read_repo", "run_isolated_tests", "open_pull_request"],
-            ),
-            target_commit=revision.target_commit if revision else None,
-        )
+        session = self._queued_fix_session(ctx)
         session.state = SessionState.RUNNING
         session.workspace_released = False
         session.workspace_name = f"superset-fix-{ctx.issue.external_number}"
         session.branch = f"devin/{ctx.issue.external_number}-fix"
         session.started_at = ctx.now
         session.last_heartbeat_at = ctx.now
-        session.current_action = "Writing a failing regression test"
-        session.next_checkpoint = "Open a draft pull request against exloong/superset"
         session.updated_at = ctx.now
         ctx.uow.save_session(session)
         ctx.uow.add_session_event(
@@ -1104,26 +1448,42 @@ class TransitionService:
             or not isinstance(url, str)
         ):
             raise DomainError(ErrorCode.INVALID_INPUT, "pull_request fields are incomplete")
-        candidates_raw = raw_pr.get("reviewer_candidates", [])
-        candidates = (
-            [c for c in candidates_raw if isinstance(c, str)]
-            if isinstance(candidates_raw, list)
-            else []
+        forbidden = {"reviewer_candidates", "reviewers", "reviewer_routing_rule", "owners"}
+        if forbidden & set(raw_pr):
+            raise DomainError(
+                ErrorCode.PROHIBITED_ACTION,
+                "agents cannot choose reviewers; routing is a trusted CODEOWNERS adapter outcome",
+                {"fields": sorted(forbidden & set(raw_pr))},
+            )
+        existing_pr = next(
+            (p for p in ctx.uow.list_pull_requests(ctx.issue.id) if p.number == number), None
         )
-        pr = PullRequestState(
-            issue_id=ctx.issue.id,
-            session_id=session.id,
-            repository=repository,
-            number=number,
-            head_branch=head_branch,
-            head_sha=head_sha,
-            url=url,
-            reviewer_candidates=candidates,
-            reviewer_routing_rule=".github/CODEOWNERS + owner_team" if candidates else None,
-            created_at=ctx.now,
-            updated_at=ctx.now,
-        )
-        ctx.uow.add_pull_request(pr)
+        pr_title = raw_pr.get("title")
+        if existing_pr is not None:
+            pr = existing_pr
+            pr.session_id = session.id
+            pr.head_branch = head_branch
+            if isinstance(pr_title, str):
+                pr.title = pr_title
+            if pr.head_sha != head_sha:
+                self._reset_pr_head(ctx, pr, head_sha)
+            else:
+                ctx.uow.save_pull_request(pr)
+        else:
+            pr = PullRequestState(
+                issue_id=ctx.issue.id,
+                session_id=session.id,
+                repository=repository,
+                number=number,
+                title=pr_title if isinstance(pr_title, str) else None,
+                head_branch=head_branch,
+                head_sha=head_sha,
+                url=url,
+                created_at=ctx.now,
+                updated_at=ctx.now,
+            )
+            ctx.uow.add_pull_request(pr)
+            self._request_review_and_routing(ctx, pr)
         for kind, title in (
             (EvidenceKind.REGRESSION_TEST, "Regression test"),
             (EvidenceKind.PATCH, "PR diff"),
@@ -1148,16 +1508,107 @@ class TransitionService:
             "Draft PR opened",
             f"Linked PR #{number} to the issue and released the workspace.",
         )
-        self._enqueue(
-            ctx, JobKind.TRIGGER_DEVIN_REVIEW, suffix=head_sha, payload={"pr_number": number}
+        return _Outcome(
+            TransitionName.OPEN_PR, IssueState.PR_OPEN, f"PR #{number} opened at {head_sha}"
         )
+
+    def _on_reviewer_routing_resolved(self, ctx: _Context) -> _Outcome:
+        if ctx.event.actor.role != ActorRole.SYSTEM:
+            raise DomainError(
+                ErrorCode.UNAUTHORIZED_ACTOR,
+                "reviewer routing is produced only by the trusted CODEOWNERS adapter",
+                {"actor": ctx.event.actor.role.value},
+            )
+        pr = self._pr_ref(ctx)
+        state_raw = self._payload_str(ctx, "state")
+        try:
+            state = RoutingState(state_raw)
+        except ValueError as exc:
+            raise DomainError(
+                ErrorCode.INVALID_INPUT, f"unknown routing state {state_raw}"
+            ) from exc
+        candidates: list[RoutingCandidate] = []
+        for raw in self._payload_list(ctx, "candidates"):
+            if not isinstance(raw, dict):
+                raise DomainError(ErrorCode.INVALID_INPUT, "candidates entries must be objects")
+            team = raw.get("team")
+            rule = raw.get("rule")
+            members = raw.get("members", [])
+            paths = raw.get("paths", [])
+            if not isinstance(team, str) or not isinstance(rule, str):
+                raise DomainError(ErrorCode.INVALID_INPUT, "candidates need team and rule")
+            candidates.append(
+                RoutingCandidate(
+                    team=team,
+                    rule=rule,
+                    members=_str_list(members),
+                    paths=_str_list(paths),
+                    rationale=str(raw.get("rationale", "")),
+                    selected=raw.get("selected", True) is True,
+                )
+            )
+        routing = ReviewerRouting(
+            issue_id=ctx.issue.id,
+            pull_request_number=pr.number,
+            head_sha=pr.head_sha,
+            state=state,
+            candidates=candidates,
+            unowned_paths=_str_list(self._payload_list(ctx, "unowned_paths")),
+            ambiguous_paths=_str_list(self._payload_list(ctx, "ambiguous_paths")),
+            rationale=self._payload_str(ctx, "rationale", ""),
+            resolved_by=ctx.event.actor,
+            created_at=ctx.now,
+        )
+        if state == RoutingState.RESOLVED and not routing.authorized_logins():
+            raise DomainError(
+                ErrorCode.INVALID_INPUT, "resolved routing must name at least one owner login"
+            )
+        ctx.uow.add_reviewer_routing(routing)
+        pr.routing_id = routing.id
+        pr.updated_at = ctx.now
+        ctx.uow.save_pull_request(pr)
+        if state == RoutingState.RESOLVED:
+            self._enqueue(
+                ctx,
+                JobKind.REQUEST_REVIEWERS,
+                suffix=pr.head_sha,
+                payload={
+                    "pr_number": pr.number,
+                    "head_sha": pr.head_sha,
+                    "teams": [c.team for c in candidates if c.selected],
+                    "reviewers": sorted(routing.authorized_logins()),
+                    "routing_id": str(routing.id),
+                },
+            )
+            return _Outcome(None, None, f"reviewer routing resolved for #{pr.number}@{pr.head_sha}")
         self._enqueue(
             ctx,
-            JobKind.REQUEST_REVIEWERS,
-            suffix=str(number),
-            payload={"pr_number": number, "candidates": candidates},
+            JobKind.ESCALATE_OWNER,
+            suffix=f"routing:{pr.head_sha}",
+            payload={
+                "pr_number": pr.number,
+                "head_sha": pr.head_sha,
+                "routing_state": state.value,
+                "unowned_paths": routing.unowned_paths,
+                "ambiguous_paths": routing.ambiguous_paths,
+            },
         )
-        return _Outcome(TransitionName.OPEN_PR, IssueState.PR_OPEN, f"PR #{number} opened")
+        return _Outcome(None, None, f"reviewer routing {state.value}; operator escalation queued")
+
+    def _on_pr_synchronized(self, ctx: _Context) -> _Outcome:
+        number = self._payload_int(ctx, "pr_number")
+        head_sha = self._payload_str(ctx, "head_sha")
+        pr = self._tracked_pr(ctx, number)
+        if pr.head_sha == head_sha:
+            return _Outcome(None, None, "head unchanged")
+        if ctx.issue.state == IssueState.FIXING:
+            return _Outcome(None, None, "fix session in progress; head is bound on fix_result")
+        self._reset_pr_head(ctx, pr, head_sha)
+        return _Outcome(
+            TransitionName.PR_HEAD_UPDATED,
+            IssueState.PR_OPEN,
+            f"PR #{number} head moved to {head_sha}; approval and review invalidated",
+        )
 
     def _on_pr_opened_webhook(self, ctx: _Context) -> _Outcome:
         prs = ctx.uow.list_pull_requests(ctx.issue.id)
@@ -1169,16 +1620,16 @@ class TransitionService:
         return _Outcome(None, None, f"PR #{number} webhook acknowledged")
 
     def _on_devin_review(self, ctx: _Context) -> _Outcome:
-        prs = ctx.uow.list_pull_requests(ctx.issue.id)
-        if not prs:
-            raise DomainError(ErrorCode.ILLEGAL_TRANSITION, "no pull request to review")
-        pr = prs[-1]
+        pr = self._pr_ref(ctx)
         verdict_raw = self._payload_str(ctx, "verdict")
         try:
             pr.devin_review = ReviewVerdict(verdict_raw)
         except ValueError as exc:
             raise DomainError(ErrorCode.INVALID_INPUT, "invalid review verdict") from exc
         pr.devin_review_findings = self._payload_int(ctx, "findings", 0)
+        pr.devin_review_head_sha = pr.head_sha
+        url = ctx.event.payload.get("url")
+        pr.devin_review_url = url if isinstance(url, str) else None
         pr.updated_at = ctx.now
         ctx.uow.save_pull_request(pr)
         ctx.uow.add_evidence(
@@ -1199,14 +1650,16 @@ class TransitionService:
         )
 
     def _on_pr_merged(self, ctx: _Context) -> _Outcome:
-        prs = ctx.uow.list_pull_requests(ctx.issue.id)
-        if not prs:
-            raise DomainError(ErrorCode.ILLEGAL_TRANSITION, "no pull request to merge")
-        pr = prs[-1]
-        if not pr.human_approved:
+        pr = self._pr_ref(ctx)
+        if not pr.approval_binds(pr.head_sha):
             raise DomainError(
                 ErrorCode.HUMAN_GATE_REQUIRED,
-                "merge observed without a recorded human approval; Devin Review is not approval",
+                "merged head has no bound human approval; Devin Review is not approval",
+                {
+                    "pr_number": pr.number,
+                    "head_sha": pr.head_sha,
+                    "approved_head_sha": pr.approved_head_sha,
+                },
             )
         pr.merged = True
         pr.updated_at = ctx.now
@@ -1214,17 +1667,106 @@ class TransitionService:
         self._cancel_pending_jobs(ctx, public_only=False)
         return _Outcome(TransitionName.COMPLETE, IssueState.COMPLETED, f"PR #{pr.number} merged")
 
+    # ---------------------------------------------------------------- timers
+
+    def _begin_reporter_wait(self, ctx: _Context) -> None:
+        previous = ctx.issue.reporter_wait
+        policy = ReporterWaitPolicy(
+            policy_revision=(previous.policy_revision + 1) if previous else 1,
+            started_at=ctx.now,
+            reminder_due_at=ctx.now + self.reminder_after,
+            inactivity_due_at=ctx.now + self.inactivity_after,
+        )
+        ctx.issue.reporter_wait = policy
+        self._schedule_timer(ctx, JobKind.REMINDER, policy, policy.reminder_due_at, 1)
+        self._schedule_timer(ctx, JobKind.INACTIVITY, policy, policy.inactivity_due_at, 0)
+
+    def _schedule_timer(
+        self,
+        ctx: _Context,
+        kind: JobKind,
+        policy: ReporterWaitPolicy,
+        due_at: datetime | None,
+        sequence: int,
+    ) -> None:
+        if due_at is None:
+            return
+        self._enqueue(
+            ctx,
+            kind,
+            suffix=f"p{policy.policy_revision}:n{sequence}",
+            payload={
+                "policy_revision": policy.policy_revision,
+                "due_at": due_at.isoformat(),
+                "sequence": sequence,
+            },
+            run_after=due_at,
+        )
+
+    def _validate_timer(self, ctx: _Context, kind: JobKind) -> ReporterWaitPolicy:
+        policy = ctx.issue.reporter_wait
+        if policy is None:
+            raise DomainError(ErrorCode.STALE_RESULT, "issue is not waiting on the reporter")
+        revision = self._payload_int(ctx, "policy_revision")
+        if revision != policy.policy_revision:
+            raise DomainError(
+                ErrorCode.STALE_RESULT,
+                "timer belongs to a superseded reporter-wait policy",
+                {"timer_revision": revision, "current": policy.policy_revision},
+            )
+        due_at = _parse_timestamp(self._payload_str(ctx, "due_at"))
+        expected = policy.reminder_due_at if kind == JobKind.REMINDER else policy.inactivity_due_at
+        if expected is None or due_at != expected:
+            raise DomainError(
+                ErrorCode.STALE_RESULT,
+                "timer due time does not match the scheduled timer",
+                {
+                    "due_at": due_at.isoformat(),
+                    "scheduled": expected.isoformat() if expected else None,
+                },
+            )
+        if ctx.now < due_at:
+            raise DomainError(
+                ErrorCode.INVALID_INPUT,
+                "timer fired before its due time",
+                {"now": ctx.now.isoformat(), "due_at": due_at.isoformat()},
+            )
+        return policy
+
     def _on_reminder(self, ctx: _Context) -> _Outcome:
-        if not self._open_required_questions(ctx):
+        policy = self._validate_timer(ctx, JobKind.REMINDER)
+        open_questions = self._open_required_questions(ctx)
+        if not open_questions:
             return _Outcome(None, None, "no open questions; reminder skipped")
-        self._enqueue(ctx, JobKind.REMINDER, suffix=f"sent:{ctx.issue.version}")
+        policy.reminders_sent += 1
+        self._enqueue(
+            ctx,
+            JobKind.PUBLISH_REMINDER,
+            suffix=f"p{policy.policy_revision}:n{policy.reminders_sent}",
+            payload={
+                "reminder_number": policy.reminders_sent,
+                "fields": [q.field for q in open_questions],
+            },
+        )
+        if policy.reminders_sent < policy.max_reminders:
+            policy.reminder_due_at = ctx.now + self.reminder_after
+            self._schedule_timer(
+                ctx, JobKind.REMINDER, policy, policy.reminder_due_at, policy.reminders_sent + 1
+            )
+        else:
+            policy.reminder_due_at = None
         return _Outcome(
-            TransitionName.REMIND_REPORTER, IssueState.AWAITING_REPORTER, "reminder published"
+            TransitionName.REMIND_REPORTER,
+            IssueState.AWAITING_REPORTER,
+            f"reminder {policy.reminders_sent}/{policy.max_reminders} queued for publication",
         )
 
     def _on_inactivity(self, ctx: _Context) -> _Outcome:
+        policy = self._validate_timer(ctx, JobKind.INACTIVITY)
         if not self._open_required_questions(ctx):
             return _Outcome(None, None, "no open questions; inactivity skipped")
+        policy.reminder_due_at = None
+        policy.inactivity_due_at = None
         self._cancel_pending_jobs(ctx, public_only=False)
         return _Outcome(
             TransitionName.CLOSE_INACTIVE,
@@ -1255,11 +1797,46 @@ class TransitionService:
         if ctx.issue.state == IssueState.BLOCKED_ENVIRONMENT:
             return self._start_reproduction(ctx, "operator retried after environment block")
         target = ctx.issue.previous_state
-        if target is None or target not in TRANSITIONS[TransitionName.RETRY].destinations:
+        if target is None:
             raise DomainError(
                 ErrorCode.ILLEGAL_TRANSITION, "no recoverable state recorded before the failure"
             )
-        return _Outcome(TransitionName.RETRY, target, f"restored {target.value}")
+        for session in ctx.uow.list_sessions(issue_id=ctx.issue.id):
+            if session.state not in SESSION_TERMINAL:
+                self._finish_session(
+                    ctx, session, SessionState.FAILED, "Superseded", "operator retry"
+                )
+        if target == IssueState.REPRODUCING:
+            return self._start_reproduction(ctx, "operator retried after automation failure")
+        if target in (IssueState.FIXING, IssueState.FIX_AUTHORIZED):
+            try:
+                authorization = self._active_fix_authorization(ctx)
+            except DomainError:
+                return _Outcome(
+                    TransitionName.RETRY,
+                    IssueState.NEEDS_OWNER_DECISION,
+                    "fix authorization expired; owner must confirm again",
+                )
+            self._queue_fix_session(
+                ctx,
+                authorization,
+                f"operator retry under {authorization.actor.login}'s authorization",
+                job_suffix=f"retry:{ctx.issue.version}",
+            )
+            return _Outcome(
+                TransitionName.RETRY,
+                IssueState.FIX_AUTHORIZED,
+                "bounded fix session re-queued under the existing authorization",
+            )
+        if target not in TRANSITIONS[TransitionName.RETRY].destinations:
+            raise DomainError(
+                ErrorCode.ILLEGAL_TRANSITION,
+                "previous state is not a safe gate to restore",
+                {"previous": target.value},
+            )
+        if target == IssueState.TRIAGE:
+            self._enqueue(ctx, JobKind.CLASSIFY, suffix=f"retry:{ctx.issue.version}")
+        return _Outcome(TransitionName.RETRY, target, f"restored safe gate {target.value}")
 
     def _on_session_cancel(self, ctx: _Context) -> _Outcome:
         session = self._payload_session(ctx)

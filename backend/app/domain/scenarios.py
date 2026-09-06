@@ -10,10 +10,11 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 
 from app.domain.errors import DomainError, ErrorCode
-from app.domain.models import Actor, Event, Issue
-from app.domain.ports import UnitOfWorkFactory
+from app.domain.models import Actor, Event, Issue, JobKind
+from app.domain.ports import Clock, UnitOfWorkFactory
 from app.domain.states import TARGET_REPOSITORY, ActorRole, EventType
 from app.domain.transitions import TransitionService
 
@@ -27,6 +28,8 @@ class Step:
     payload: dict[str, object]
     login: str = "relay-system"
     revision: int | None = None
+    # Simulated time elapsed before this step; timers are only legal once due.
+    advance: timedelta = timedelta(0)
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,22 @@ def _classified(missing: list[dict[str, str]] | None = None, **extra: object) ->
 
 
 SESSION_PLACEHOLDER = "$SESSION"
+TIMER_PLACEHOLDER = "$TIMER"
+FIX_PR = {"number": 43302, "head_sha": "a1b2c3d4e5f6"}
+
+
+def _timer(kind: EventType, advance: timedelta) -> Step:
+    return Step(kind, ActorRole.SYSTEM, {"due_at": TIMER_PLACEHOLDER}, advance=advance)
+
+
+class _OffsetClock:
+    def __init__(self, base: Clock, offset: timedelta) -> None:
+        self._base = base
+        self._offset = offset
+
+    def now(self) -> datetime:
+        return self._base.now() + self._offset
+
 
 SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
@@ -204,18 +223,43 @@ SCENARIOS: tuple[Scenario, ...] = (
                         "repository": TARGET_REPOSITORY,
                         "number": 43302,
                         "head_branch": "devin/42991-csv-row-limit",
-                        "head_sha": "a1b2c3d4e5f6",
+                        "head_sha": FIX_PR["head_sha"],
                         "url": f"https://github.com/{TARGET_REPOSITORY}/pull/43302",
-                        "reviewer_candidates": ["core-platform-lead", "export-owner"],
                     },
                 },
                 login="devin-fix",
                 revision=1,
             ),
             Step(
+                EventType.REVIEWER_ROUTING_RESOLVED,
+                ActorRole.SYSTEM,
+                {
+                    "pr_number": FIX_PR["number"],
+                    "head_sha": FIX_PR["head_sha"],
+                    "state": "resolved",
+                    "candidates": [
+                        {
+                            "team": "core-platform",
+                            "members": ["core-platform-lead", "export-owner"],
+                            "rule": "superset/commands/export/** @core-platform",
+                            "paths": ["superset/commands/export/csv.py"],
+                            "rationale": "All changed paths match one CODEOWNERS rule.",
+                        }
+                    ],
+                    "unowned_paths": [],
+                    "ambiguous_paths": [],
+                },
+                login="codeowners-adapter",
+            ),
+            Step(
                 EventType.DEVIN_REVIEW_COMPLETED,
                 ActorRole.AGENT,
-                {"verdict": "passed", "findings": 0},
+                {
+                    "pr_number": FIX_PR["number"],
+                    "head_sha": FIX_PR["head_sha"],
+                    "verdict": "passed",
+                    "findings": 0,
+                },
                 login="devin-review",
             ),
         ),
@@ -262,9 +306,9 @@ SCENARIOS: tuple[Scenario, ...] = (
                     {"field": "reliable_trigger", "prompt": "Describe a query that triggers it."},
                 ]
             ),
-            Step(EventType.REMINDER_ELAPSED, ActorRole.SYSTEM, {}),
-            Step(EventType.REMINDER_ELAPSED, ActorRole.SYSTEM, {}),
-            Step(EventType.INACTIVITY_ELAPSED, ActorRole.SYSTEM, {}),
+            _timer(EventType.REMINDER_ELAPSED, timedelta(days=3)),
+            _timer(EventType.REMINDER_ELAPSED, timedelta(days=3)),
+            _timer(EventType.INACTIVITY_ELAPSED, timedelta(days=8)),
         ),
     ),
     Scenario(
@@ -304,14 +348,22 @@ def seed(
         raise DomainError(
             ErrorCode.INVALID_INPUT, "unknown scenario", {"available": list(SCENARIO_NAMES)}
         )
+    base_clock = service.clock
     for scenario in selected:
         issue = _find_issue(uow_factory, scenario.number)
+        offset = timedelta(0)
         for index, step in enumerate(scenario.steps):
+            offset += step.advance
+            service.clock = _OffsetClock(base_clock, offset)
             payload = dict(step.payload)
             if payload.get("session_id") == SESSION_PLACEHOLDER:
                 if issue is None:
                     raise RuntimeError("scenario references a session before its issue exists")
                 payload["session_id"] = _latest_session_id(uow_factory, issue.id)
+            if payload.get("due_at") == TIMER_PLACEHOLDER:
+                if issue is None:
+                    raise RuntimeError("scenario references a timer before its issue exists")
+                payload.update(_timer_payload(uow_factory, issue.id, step.type))
             event = Event(
                 issue_id=issue.id if issue else None,
                 source=SEED_SOURCE,
@@ -335,7 +387,25 @@ def seed(
                     issue = outcome.issue
         if issue is not None:
             result.issues[scenario.name] = issue.id
+    service.clock = base_clock
     return result
+
+
+def _timer_payload(
+    uow_factory: UnitOfWorkFactory, issue_id: uuid.UUID, kind: EventType
+) -> dict[str, object]:
+    with uow_factory() as uow:
+        issue = uow.get_issue(issue_id)
+    policy = issue.reporter_wait if issue else None
+    if policy is None:
+        return {"policy_revision": 0, "due_at": "1970-01-01T00:00:00+00:00"}
+    due = policy.reminder_due_at if kind == EventType.REMINDER_ELAPSED else policy.inactivity_due_at
+    timer_kind = JobKind.REMINDER if kind == EventType.REMINDER_ELAPSED else JobKind.INACTIVITY
+    return {
+        "policy_revision": policy.policy_revision,
+        "due_at": due.isoformat() if due else "1970-01-01T00:00:00+00:00",
+        "timer": timer_kind.value,
+    }
 
 
 def _find_issue(uow_factory: UnitOfWorkFactory, number: int) -> Issue | None:

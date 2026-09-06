@@ -21,6 +21,7 @@ from app.domain.models import (
     Job,
     PullRequestState,
     Repository,
+    ReviewerRouting,
     SessionEvent,
     SessionOutput,
     TransitionAttempt,
@@ -270,6 +271,13 @@ class SqlAlchemyUnitOfWork:
     def save_question(self, question: InformationRequest) -> None:
         self._update(t.information_requests, question.id, question, status=question.status.value)
 
+    def get_question(self, question_id: uuid.UUID) -> InformationRequest | None:
+        return self._one(
+            t.information_requests,
+            InformationRequest,
+            t.information_requests.c.id == str(question_id),
+        )
+
     def list_questions(
         self, issue_id: uuid.UUID, revision: int | None = None
     ) -> Sequence[InformationRequest]:
@@ -339,6 +347,9 @@ class SqlAlchemyUnitOfWork:
 
     def save_job(self, job: Job) -> None:
         self._update(t.jobs, job.id, job, status=job.status.value, run_after=job.run_after)
+
+    def get_job(self, job_id: uuid.UUID) -> Job | None:
+        return self._one(t.jobs, Job, t.jobs.c.id == str(job_id))
 
     def get_job_by_key(self, idempotency_key: str) -> Job | None:
         return self._one(t.jobs, Job, t.jobs.c.idempotency_key == idempotency_key)
@@ -458,6 +469,27 @@ class SqlAlchemyUnitOfWork:
             PullRequestState,
             t.pull_requests.c.issue_id == str(issue_id),
             order_by=t.pull_requests.c.created_at,
+        )
+
+    # ------------------------------------------------------ reviewer routing
+
+    def add_reviewer_routing(self, routing: ReviewerRouting) -> None:
+        self._insert(
+            t.reviewer_routings,
+            routing,
+            id=str(routing.id),
+            issue_id=str(routing.issue_id),
+            pull_request_number=routing.pull_request_number,
+            head_sha=routing.head_sha,
+            created_at=routing.created_at,
+        )
+
+    def list_reviewer_routings(self, issue_id: uuid.UUID) -> Sequence[ReviewerRouting]:
+        return self._many(
+            t.reviewer_routings,
+            ReviewerRouting,
+            t.reviewer_routings.c.issue_id == str(issue_id),
+            order_by=t.reviewer_routings.c.created_at,
         )
 
     # ----------------------------------------------------------------- audit

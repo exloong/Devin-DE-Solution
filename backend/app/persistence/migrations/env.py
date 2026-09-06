@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from alembic import context
 from app.persistence.tables import metadata
-from sqlalchemy import engine_from_config, pool
 from sqlalchemy.engine import Engine
 
 config = context.config
@@ -10,8 +9,14 @@ target_metadata = metadata
 
 
 def run_migrations_offline() -> None:
+    url = config.get_main_option("sqlalchemy.url")
+    if not url:
+        raise RuntimeError(
+            "offline migrations require an explicit, password-free sqlalchemy.url "
+            "(see app.persistence.database.alembic_config(offline_url=...))"
+        )
     context.configure(
-        url=config.get_main_option("sqlalchemy.url"),
+        url=url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -24,10 +29,8 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     engine = config.attributes.get("connection_engine")
     if not isinstance(engine, Engine):
-        engine = engine_from_config(
-            config.get_section(config.config_ini_section, {}),
-            prefix="sqlalchemy.",
-            poolclass=pool.NullPool,
+        raise RuntimeError(
+            "online migrations must receive an Engine via config.attributes['connection_engine']"
         )
     with engine.connect() as connection:
         context.configure(

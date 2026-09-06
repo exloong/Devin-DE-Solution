@@ -89,6 +89,22 @@ class Severity(str, Enum):
     HIGH = "high"
 
 
+class ReporterWaitPolicy(Record):
+    """Deterministic reminder/inactivity schedule for one reporter-wait period.
+
+    ``policy_revision`` increments every time the issue starts waiting on the
+    reporter; timer events must carry the revision and the exact ``due_at`` they
+    were scheduled for, so stale or early timers cannot act.
+    """
+
+    policy_revision: int
+    started_at: datetime
+    reminders_sent: int = 0
+    max_reminders: int = 2
+    reminder_due_at: datetime | None = None
+    inactivity_due_at: datetime | None = None
+
+
 class Issue(Record):
     id: uuid.UUID = Field(default_factory=new_id)
     repository_id: uuid.UUID
@@ -102,6 +118,7 @@ class Issue(Record):
     category: str = "Uncategorized"
     owner_team: str | None = None
     security_flagged: bool = False
+    reporter_wait: ReporterWaitPolicy | None = None
     correlation_id: str = Field(default_factory=lambda: str(new_id()))
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
@@ -242,8 +259,10 @@ class JobKind(str, Enum):
     START_REPRODUCTION = "start_reproduction"
     START_FIX = "start_fix"
     TRIGGER_DEVIN_REVIEW = "trigger_devin_review"
+    RESOLVE_REVIEWERS = "resolve_reviewers"
     REQUEST_REVIEWERS = "request_reviewers"
     REMINDER = "reminder"
+    PUBLISH_REMINDER = "publish_reminder"
     INACTIVITY = "inactivity"
     ESCALATE_OWNER = "escalate_owner"
     SAFE_ALTERNATIVE_REVIEW = "safe_alternative_review"
@@ -260,7 +279,7 @@ PUBLIC_JOB_KINDS: frozenset[JobKind] = frozenset(
         JobKind.START_FIX,
         JobKind.TRIGGER_DEVIN_REVIEW,
         JobKind.REQUEST_REVIEWERS,
-        JobKind.REMINDER,
+        JobKind.PUBLISH_REMINDER,
     }
 )
 
@@ -276,7 +295,16 @@ class Job(Record):
     max_attempts: int = 3
     payload: dict[str, object] = Field(default_factory=dict)
     correlation_id: str
+    issue_revision: int | None = None
+    claimed_by: str | None = None
+    claimed_at: datetime | None = None
+    finished_at: datetime | None = None
     created_at: datetime = Field(default_factory=utcnow)
+
+
+# Jobs that may only run while the issue is security-private. Everything else is
+# cancelled when an issue is routed to the private security path.
+PRIVATE_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.PRIVATE_SECURITY_TASK})
 
 
 class SessionBudget(Record):
@@ -299,9 +327,13 @@ class AgentSession(Record):
     budget: SessionBudget = Field(default_factory=SessionBudget)
     workspace_released: bool = True
     workspace_name: str | None = None
-    progress_percent: int = 0
-    current_action: str = ""
-    next_checkpoint: str = ""
+    workspace_released_at: datetime | None = None
+    dry_run: bool = False
+    progress_percent: int | None = None
+    current_action: str | None = None
+    next_checkpoint: str | None = None
+    progress_source: str | None = None
+    progress_synced_at: datetime | None = None
     trigger: str = ""
     cancel_requested: bool = False
     external_session_id: str | None = None
@@ -368,6 +400,7 @@ class PullRequestState(Record):
     session_id: uuid.UUID | None = None
     repository: str = TARGET_REPOSITORY
     number: int
+    title: str | None = None
     head_branch: str
     head_sha: str
     url: str
@@ -376,12 +409,53 @@ class PullRequestState(Record):
     checks_passed: bool | None = None
     devin_review: ReviewVerdict = ReviewVerdict.PENDING
     devin_review_findings: int = 0
+    devin_review_head_sha: str | None = None
+    devin_review_url: str | None = None
     human_approved: bool = False
     human_approver: str | None = None
-    reviewer_candidates: list[str] = Field(default_factory=list)
-    reviewer_routing_rule: str | None = None
+    approved_head_sha: str | None = None
+    approval_override: bool = False
+    routing_id: uuid.UUID | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+
+    def approval_binds(self, head_sha: str) -> bool:
+        return self.human_approved and self.approved_head_sha == head_sha == self.head_sha
+
+
+class RoutingState(str, Enum):
+    RESOLVED = "resolved"
+    AMBIGUOUS = "ambiguous"
+    NO_OWNER = "no_owner"
+
+
+class RoutingCandidate(Record):
+    team: str
+    members: list[str] = Field(default_factory=list)
+    rule: str
+    paths: list[str] = Field(default_factory=list)
+    rationale: str = ""
+    selected: bool = True
+
+
+class ReviewerRouting(Record):
+    """Trusted CODEOWNERS adapter outcome for one PR head. Agents never author this."""
+
+    id: uuid.UUID = Field(default_factory=new_id)
+    issue_id: uuid.UUID
+    pull_request_number: int
+    head_sha: str
+    state: RoutingState
+    candidates: list[RoutingCandidate] = Field(default_factory=list)
+    unowned_paths: list[str] = Field(default_factory=list)
+    ambiguous_paths: list[str] = Field(default_factory=list)
+    rationale: str = ""
+    source: str = ".github/CODEOWNERS"
+    resolved_by: Actor
+    created_at: datetime = Field(default_factory=utcnow)
+
+    def authorized_logins(self) -> frozenset[str]:
+        return frozenset(m for c in self.candidates if c.selected for m in c.members)
 
 
 class AuditEntry(Record):

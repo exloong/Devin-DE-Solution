@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from app.api.deps import AppContext
+from app.api.deps import (
+    AppContext,
+    AuthConfig,
+    parse_demo_principal,
+    parse_token_table,
+)
 from app.api.routes_commands import router as commands_router
 from app.api.routes_queries import router as queries_router
 from app.domain import scenarios
@@ -19,6 +25,24 @@ from app.persistence.sqlalchemy_uow import SqlAlchemyUnitOfWorkFactory
 
 API_PREFIX = "/api/v1"
 DEFAULT_DATABASE_URL = "sqlite:///./relay.sqlite3"
+DEFAULT_DEMO_PRINCIPAL = "demo-operator:operator"
+
+
+def auth_from_env(environ: Mapping[str, str] | None = None) -> AuthConfig:
+    """RELAY_AUTH_TOKENS configures bearer principals. RELAY_MODE=demo enables
+    the explicit demo principal (RELAY_DEMO_PRINCIPAL, `login:role`) for dry
+    runs. With neither set, every command is denied."""
+    env = os.environ if environ is None else environ
+    tokens = env.get("RELAY_AUTH_TOKENS", "").strip()
+    demo = env.get("RELAY_MODE", "").strip().lower() == "demo"
+    return AuthConfig(
+        authenticator=parse_token_table(tokens) if tokens else None,
+        demo_principal=(
+            parse_demo_principal(env.get("RELAY_DEMO_PRINCIPAL", DEFAULT_DEMO_PRINCIPAL))
+            if demo
+            else None
+        ),
+    )
 
 
 def _error_response(err: DomainError) -> JSONResponse:
@@ -34,6 +58,7 @@ def create_app(
     seed_scenarios: bool = False,
     clock: Clock | None = None,
     scope: RepositoryScope | None = None,
+    auth: AuthConfig | None = None,
 ) -> FastAPI:
     url = database_url or os.environ.get("RELAY_DATABASE_URL", DEFAULT_DATABASE_URL)
     engine = make_engine(url)
@@ -47,6 +72,7 @@ def create_app(
         service=service,
         scope=repo_scope,
         database_url=url,
+        auth=auth if auth is not None else AuthConfig(),
     )
     if seed_scenarios:
         scenarios.seed(factory, service)
@@ -71,4 +97,4 @@ def create_app(
 
 
 def default_app() -> FastAPI:
-    return create_app(seed_scenarios=os.environ.get("RELAY_SEED", "1") == "1")
+    return create_app(seed_scenarios=os.environ.get("RELAY_SEED", "1") == "1", auth=auth_from_env())

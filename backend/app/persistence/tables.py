@@ -175,6 +175,17 @@ pull_requests = Table(
     Column("data", JSON, nullable=False),
 )
 
+reviewer_routings = Table(
+    "reviewer_routings",
+    metadata,
+    _id(),
+    Column("issue_id", String(36), nullable=False, index=True),
+    Column("pull_request_number", Integer, nullable=False),
+    Column("head_sha", String(64), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("data", JSON, nullable=False),
+)
+
 audit_entries = Table(
     "audit_entries",
     metadata,

@@ -88,6 +88,7 @@ class EventType(str, Enum):
     ISSUE_REOPENED = "issue_reopened"
     REPORTER_COMMENT = "reporter_comment"
     PR_OPENED = "pr_opened"
+    PR_SYNCHRONIZED = "pr_synchronized"
     PR_MERGED = "pr_merged"
     HUMAN_REVIEW_SUBMITTED = "human_review_submitted"
     # Agent results
@@ -112,6 +113,7 @@ class EventType(str, Enum):
     AUTOMATION_FAILURE = "automation_failure"
     FIX_SESSION_STARTED = "fix_session_started"
     REPRODUCTION_STARTED = "reproduction_started"
+    REVIEWER_ROUTING_RESOLVED = "reviewer_routing_resolved"
 
 
 class ActorRole(str, Enum):
@@ -145,6 +147,7 @@ class TransitionName(str, Enum):
     ROUTE_SECURITY_PRIVATE = "route_security_private"
     START_FIX = "start_fix"
     OPEN_PR = "open_pr"
+    PR_HEAD_UPDATED = "pr_head_updated"
     DEVIN_REVIEW_RECORDED = "devin_review_recorded"
     OWNER_REQUESTED_CHANGES = "owner_requested_changes"
     RESUME_FIX = "resume_fix"
@@ -230,7 +233,12 @@ TRANSITIONS: dict[TransitionName, TransitionSpec] = {
                 EventType.REPORTER_COMMENT,
                 EventType.RETRY_REQUESTED,
             ),
-            _s(IssueState.TRIAGE, IssueState.AWAITING_REPORTER, IssueState.BLOCKED_ENVIRONMENT),
+            _s(
+                IssueState.TRIAGE,
+                IssueState.AWAITING_REPORTER,
+                IssueState.BLOCKED_ENVIRONMENT,
+                IssueState.AUTOMATION_ERROR,
+            ),
             _s(IssueState.REPRODUCING),
             _a(ActorRole.SYSTEM, ActorRole.AGENT, ActorRole.OPERATOR, ActorRole.REPORTER),
             preconditions=("all required questions answered", "no unavailable evidence"),
@@ -307,6 +315,19 @@ TRANSITIONS: dict[TransitionName, TransitionSpec] = {
             public_side_effects=("pull_request", "review_request"),
         ),
         TransitionSpec(
+            TransitionName.PR_HEAD_UPDATED,
+            _e(EventType.PR_SYNCHRONIZED),
+            _s(IssueState.PR_OPEN, IssueState.AWAITING_OWNER, IssueState.CHANGES_REQUESTED),
+            _s(IssueState.PR_OPEN),
+            _a(ActorRole.SYSTEM),
+            preconditions=("PR number is tracked for this issue",),
+            description=(
+                "New head commit invalidates prior human approval and Devin Review evidence; "
+                "review and reviewer routing run again for the new head."
+            ),
+            public_side_effects=("review_request",),
+        ),
+        TransitionSpec(
             TransitionName.DEVIN_REVIEW_RECORDED,
             _e(EventType.DEVIN_REVIEW_COMPLETED),
             _s(IssueState.PR_OPEN, IssueState.AWAITING_OWNER),
@@ -319,8 +340,12 @@ TRANSITIONS: dict[TransitionName, TransitionSpec] = {
             _e(EventType.OWNER_DECISION, EventType.HUMAN_REVIEW_SUBMITTED),
             _s(IssueState.PR_OPEN, IssueState.AWAITING_OWNER),
             _s(IssueState.CHANGES_REQUESTED),
-            _a(ActorRole.OWNER),
+            _a(ActorRole.OWNER, ActorRole.OPERATOR),
             human_gate=True,
+            preconditions=(
+                "reviewer is in the persisted CODEOWNERS routing for the PR head, "
+                "or an operator records an explicit override",
+            ),
         ),
         TransitionSpec(
             TransitionName.RESUME_FIX,
@@ -334,8 +359,13 @@ TRANSITIONS: dict[TransitionName, TransitionSpec] = {
             _e(EventType.OWNER_DECISION, EventType.HUMAN_REVIEW_SUBMITTED),
             _s(IssueState.PR_OPEN, IssueState.AWAITING_OWNER),
             _s(IssueState.AWAITING_OWNER),
-            _a(ActorRole.OWNER),
+            _a(ActorRole.OWNER, ActorRole.OPERATOR),
             human_gate=True,
+            preconditions=(
+                "approval names the exact PR number and head SHA",
+                "reviewer is in the persisted CODEOWNERS routing for that head, "
+                "or an operator records an explicit override",
+            ),
             description="Record human approval. Merge remains a human GitHub action.",
         ),
         TransitionSpec(
@@ -344,7 +374,7 @@ TRANSITIONS: dict[TransitionName, TransitionSpec] = {
             _s(IssueState.AWAITING_OWNER, IssueState.PR_OPEN),
             _s(IssueState.COMPLETED),
             _a(ActorRole.SYSTEM),
-            preconditions=("a human approve_pr decision exists",),
+            preconditions=("a human approve_pr decision exists for the merged PR head SHA",),
         ),
         TransitionSpec(
             TransitionName.REMIND_REPORTER,
@@ -352,6 +382,7 @@ TRANSITIONS: dict[TransitionName, TransitionSpec] = {
             _s(IssueState.AWAITING_REPORTER),
             _s(IssueState.AWAITING_REPORTER),
             _a(ActorRole.SYSTEM),
+            preconditions=("timer due_at and policy_revision match the current wait policy",),
             public_side_effects=("issue_comment",),
         ),
         TransitionSpec(
@@ -360,6 +391,7 @@ TRANSITIONS: dict[TransitionName, TransitionSpec] = {
             _s(IssueState.AWAITING_REPORTER),
             _s(IssueState.CLOSED_INACTIVE),
             _a(ActorRole.SYSTEM),
+            preconditions=("timer due_at and policy_revision match the current wait policy",),
         ),
         TransitionSpec(
             TransitionName.MARK_DUPLICATE,
@@ -387,10 +419,13 @@ TRANSITIONS: dict[TransitionName, TransitionSpec] = {
             TransitionName.RETRY,
             _e(EventType.RETRY_REQUESTED),
             _s(IssueState.AUTOMATION_ERROR, IssueState.BLOCKED_ENVIRONMENT),
-            _RECOVERABLE,
+            _RECOVERABLE - ACTIVE_AGENT_STATES,
             _a(ActorRole.OPERATOR),
             human_gate=True,
-            description="Return to the state recorded before the failure.",
+            description=(
+                "Return to the safe gate recorded before the failure; agent-active states "
+                "are re-entered only by starting a new bounded session."
+            ),
         ),
     )
 }
