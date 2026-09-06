@@ -10,20 +10,28 @@ dashboard, FastAPI API, durable worker, PostgreSQL persistence, GitHub and
 Devin integrations, and a credential-free local demo. The only supported
 target repository is currently `exloong/superset`.
 
+**New here?** Jump to [Run locally](#run-locally): the
+[credential-free demo](#quick-start-credential-free-demo) needs only Docker,
+and [Run the real platform locally](#run-the-real-platform-locally-live-mode)
+walks through every credential and check needed to watch Devin work a real
+`exloong/superset` issue from your machine.
+
 ## What Relay does
 
-- Accepts and verifies signed GitHub issue, comment, pull-request, and review
-  events from `exloong/superset`.
+- Provisions, once, the two Devin Automations that run the workflow and lets
+  operators inspect and manage every automation in the Devin organization.
+- Observes the triage/reproduction and fix sessions those automations start
+  and mirrors them — by issue number, never by guessing — into a lifecycle
+  record per `exloong/superset` issue.
 - Stores issue revisions, lifecycle transitions, jobs, conversations,
   evidence, sessions, pull requests, reviews, approvals, and audit history.
 - Runs deterministic policy separately from AI judgment.
-- Starts bounded Devin reproduction and fix sessions against an immutable
-  Superset commit.
-- Asks reporters for only the evidence still needed to reproduce an issue.
-- Routes reproduced bugs and pull requests to human owners for explicit
-  decisions.
-- Exposes live operational state, session details, evidence, and owner gates in
-  the dashboard.
+- Routes not-reproduced bugs and opened pull requests to human owners for
+  explicit decisions.
+- Exposes health, throughput, liveness, session details, evidence, and owner
+  gates in the dashboard.
+- Optionally accepts signed GitHub pull-request and review events for issues
+  it already tracks.
 - Recovers safely from duplicate webhooks, retries, restarts, stale jobs, and
   synchronized pull-request heads.
 
@@ -365,6 +373,108 @@ RELAY_MODE=demo uv run python -m app.runtime.worker
 Delete `backend/relay.sqlite3` when both processes are stopped to reset this
 isolated backend environment.
 
+### Run the real platform locally (live mode)
+
+This is the from-zero path to run Relay against your own Devin organization
+and watch Devin triage, reproduce and fix a real `exloong/superset` issue. It
+takes about fifteen minutes; steps 1–3 are one-time setup.
+
+**What you need before starting**
+
+| Item | Where to get it | Used as |
+| --- | --- | --- |
+| Devin organization with its GitHub integration connected to `exloong/superset` | Devin Settings → Integrations → GitHub | Fires the automations; comments and opens PRs as Devin |
+| Devin service-user API key with `ManageOrgAutomations`, `ViewOrgAutomations`, `ViewOrgSessions` | Devin Settings → Service users → create → API key | `DEVIN_API_TOKEN` |
+| Devin organization id (`org-…`) | Devin Settings → Organization, or the `organizations/org-…` segment of any Devin API URL | `DEVIN_ORG_ID` |
+| GitHub token that can read issues and pull requests of `exloong/superset` | GitHub → Settings → Developer settings → Fine-grained token, limited to that repo | `GITHUB_TOKEN` |
+| Relay operator token | You mint it: `openssl rand -hex 16` | `RELAY_AUTH_TOKENS` and the dashboard sign-in |
+
+Nothing else is required: no GitHub webhook, no public URL, no tunnel — Devin
+receives the GitHub events, and Relay only polls Devin's API outbound.
+
+**1. Configure**
+
+```bash
+git clone https://github.com/exloong/Devin-DE-Solution.git
+cd Devin-DE-Solution
+cp .env.example .env
+chmod 600 .env
+```
+
+Edit `.env` and replace every `replace-with-…` placeholder:
+
+```dotenv
+RELAY_MODE=live
+RELAY_SEED=0
+RELAY_AUTH_TOKENS=<output of openssl rand -hex 16>:relay-operator:operator
+GITHUB_WEBHOOK_SECRET=<any random string; the webhook is optional>
+GITHUB_TOKEN=<fine-grained GitHub token>
+GITHUB_DEFAULT_BRANCH=master
+DEVIN_API_TOKEN=<Devin service-user API key>
+DEVIN_ORG_ID=org-<your organization id>
+```
+
+**2. Start**
+
+```bash
+docker compose up --build --wait
+curl --fail http://127.0.0.1:4173/api/v1/health
+curl --fail http://127.0.0.1:4173/api/v1/ready   # "worker" must not be "unavailable"
+```
+
+On its first start the worker creates the two automations in your Devin
+organization (`Relay reproduction · exloong/superset`, `Relay fix ·
+exloong/superset`) — you should see `devin reproduction automation … ready`
+and `devin fix automation … ready` in `docker compose logs worker`. Later
+starts find and reuse them.
+
+**3. Sign in**
+
+Open `http://127.0.0.1:4173` → **Connections → Dashboard operator access**,
+paste the token part of `RELAY_AUTH_TOKENS` (the text before the first `:`),
+click **Connect**. The Health dashboard should show Backend, GitHub and Devin
+as connected and **Devin Automations** should list the two Relay automations
+as enabled.
+
+**4. Run an issue through**
+
+1. Open a new issue on `exloong/superset` describing a bug (steps, expected
+   vs. actual, version). Within a minute Devin starts a triage session; on
+   its next poll (seconds) Relay shows it: the issue appears in **Issue
+   workbench** and the session under **Devin sessions** and on the dashboard
+   (the UI refreshes every 15 s, or click **Refresh**).
+2. Devin comments on the issue: either a question (`needs information` — reply
+   on the issue and triage runs again), `not a bug`, or `Reproduced.`
+3. On the reproduced comment Devin's fix automation starts a second session,
+   opens a PR whose body starts with `Fixes #N`, and comments on the issue and
+   PR. Relay moves the issue to *Fix in progress* → *PR in review*.
+4. Review and merge the PR yourself — Devin and Relay never merge.
+
+Comments never contain Devin session links; open a session in the Relay UI
+("Open in Devin") to see Devin's work.
+
+**Stop / reset**
+
+```bash
+docker compose down            # keep Relay's database
+docker compose down --volumes  # forget every issue and session record
+```
+
+Resetting Relay's database does not delete the automations in Devin; the
+worker finds them again by metadata on the next start.
+
+**Running live from source instead of Docker** — export the same variables
+(from `.env`: `set -a; source .env; set +a`) plus one shared database, then
+run the three processes in separate terminals:
+
+```bash
+cd backend && uv sync --extra dev
+export RELAY_DATABASE_URL=sqlite:////tmp/relay-live.sqlite3
+uv run uvicorn app.api.app:default_app --factory          # terminal 1, :8000
+uv run python -m app.runtime.worker                        # terminal 2
+cd .. && RELAY_API_PROXY=http://127.0.0.1:8000 npm run dev # terminal 3, :4173
+```
+
 ### Validate changes
 
 Frontend:
@@ -410,13 +520,14 @@ chmod 600 .env
 | --- | --- | --- |
 | `RELAY_MODE` | API, worker | `live` for real providers or `demo` for deterministic local adapters. |
 | `RELAY_SEED` | API | Set to `0` for an empty live database; demo overlay sets it to `1`. |
+| `RELAY_DATABASE_URL` (or `DATABASE_URL`) | API, worker | SQLAlchemy URL of the shared database. Docker Compose sets the PostgreSQL URL; from source it defaults to `sqlite:///./relay.sqlite3` in the current directory (both processes must use the same file). |
 | `RELAY_AUTH_TOKENS` | API | Semicolon-separated `token:login:role` entries. Use a random URL-safe token of at least 8 characters and the `operator` role for dashboard access. |
 | `GITHUB_WEBHOOK_SECRET` | API | High-entropy HMAC secret shared only with the optional GitHub webhook (comments, PRs, reviews). Issue intake is Devin-native and never uses it. |
-| `GITHUB_TOKEN` | Worker | Dedicated GitHub App installation token or fine-grained token scoped only to `exloong/superset`. |
+| `GITHUB_TOKEN` | Worker | Dedicated GitHub App installation token or fine-grained token scoped only to `exloong/superset`; the worker uses it to read the issues Devin's sessions name. Required in live mode. |
 | `GITHUB_DEFAULT_BRANCH` | Worker | Superset branch resolved to the immutable reproduction base; defaults to `master`. |
 | `RELAY_TRUSTED_LABEL` | API | Only gates the legacy webhook path; Devin's automation fires on every opened issue regardless of labels. |
 | `RELAY_TRUSTED_ACTORS` | Worker | Optional comma-separated GitHub logins; when set, only issues reported by these logins are adopted. |
-| `DEVIN_API_TOKEN` | API, Worker | Devin service-user API key. The worker dispatches to Devin Automations; the API proxies automation management. |
+| `DEVIN_API_TOKEN` | API, Worker | Devin service-user API key. The worker provisions the two automations and lists their sessions; the API proxies automation management. Required in live mode. |
 | `DEVIN_ORG_ID` | API, Worker | Devin organization identifier used by the v3 API. |
 | `DEVIN_REVIEW_TOKEN` | Worker | Optional separate Devin Review token; defaults to `DEVIN_API_TOKEN`. |
 | `APP_PORT` | Web | Loopback-only HTTP port; defaults to `4173`. |
@@ -426,7 +537,8 @@ variant, for example `GITHUB_TOKEN_FILE=/run/secrets/github_token`. Secret
 values are read at runtime; they are not returned by the API, logged by the
 HTTPS transport, persisted in lifecycle records, or embedded in the frontend.
 
-Start a clean live stack:
+Start a clean live stack (or follow the step-by-step
+[Run the real platform locally](#run-the-real-platform-locally-live-mode)):
 
 ```bash
 docker compose up --build --wait
@@ -495,15 +607,19 @@ generate its API key. Set the key as `DEVIN_API_TOKEN` and set
 `DEVIN_ORG_ID` to the corresponding `org-...` identifier. See Devin's
 [authentication documentation](https://docs.devin.ai/api-reference/authentication).
 
-Relay session requests:
+Devin's GitHub integration must also be connected to `exloong/superset`
+(Devin Settings → Integrations → GitHub): that connection — not Relay — delivers
+the `github:issues` / `github:issue_comment` events that fire both automations,
+and it is the identity Devin uses to comment and open pull requests.
 
-- allow only `repos: ["exloong/superset"]`;
-- set `resumable: false`;
-- set `bypass_approval: false`;
-- send no additional `secret_ids`;
-- use explicit wall-clock and capability budgets;
-- request typed structured results;
-- quote reporter context as untrusted, inert data.
+The `start_session` action of both Relay automations:
+
+- runs as the organization with `bypass_approval: false`;
+- is pinned to `exloong/superset`, with a prompt that forbids touching any
+  other repository, merging, closing the issue, or pasting a session URL;
+- requests typed structured output (`issue_number`, `repository`, `phase`, …)
+  that the worker uses to adopt the session;
+- quotes the GitHub event and reporter text as untrusted, inert data.
 
 Devin Review runs against the exact Superset PR and requested head SHA. Use
 `DEVIN_REVIEW_TOKEN` when Review has a separate credential, or omit it to reuse
@@ -575,8 +691,16 @@ preserve the raw webhook request body.
   the org claims the same trigger. The Liveness GitHub row shows the last
   automation poll.
 - **A Devin session runs but Relay never shows it:** the worker adopts a
-  session only once its structured output names the issue number; check the
-  session's output in Devin.
+  session only once it can tie it to an `exloong/superset` issue — from the
+  GitHub event Devin appended to the automation prompt (first message of the
+  session) or from the structured output / final JSON Devin posts. Sessions
+  started by other automations, or for another repository, are ignored. Check
+  the worker log for `not adopting` lines and the session's messages in Devin.
+- **The dashboard, sessions or workbench stay empty although Devin sessions
+  are running:** the worker is not running or not polling — `ready` must report
+  the worker heartbeat, and the Liveness GitHub row must say `polled … ago`.
+  The worker polls every `WORKER_POLL_SECONDS` (default 1 s); the UI refreshes
+  every 15 s.
 - **A reproduced issue never gets a fix session:** the fix automation fires on
   an issue comment containing `<!-- relay:reproduced -->`; check that comment
   exists, that the fix automation is enabled, and its last invocation status in
