@@ -624,3 +624,90 @@ class CommandAccepted(ApiModel):
     scenario: str | None = None
     applied: int | None = None
     rejected: int | None = None
+
+
+# ------------------------------------------------------------- automations
+
+AutomationEventType = Literal["webhook:incoming"]
+
+
+class AutomationOut(ApiModel):
+    """A Devin automation as exposed to operators; inbox URL and secret are
+    never included."""
+
+    automation_id: str
+    name: str
+    description: str | None = None
+    enabled: bool
+    event_types: list[str]
+    prompt: str | None = None
+    metadata: dict[str, str]
+    relay_kind: SessionKind | None = None
+    managed_by_relay: bool
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    created_by: str | None = None
+    last_invocation_status: str | None = None
+    last_invocation_at: datetime | None = None
+    has_inbox: bool
+
+
+class AutomationPage(ApiModel):
+    items: list[AutomationOut]
+    total: int
+    generated_at: datetime
+
+
+class AutomationCreate(ApiModel):
+    name: str = Field(min_length=1, max_length=200)
+    prompt: str = Field(min_length=1, max_length=20_000)
+    description: str | None = Field(default=None, max_length=2_000)
+    enabled: bool = True
+    event_type: AutomationEventType = "webhook:incoming"
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _reserved_metadata(self) -> AutomationCreate:
+        if "relay_kind" in self.metadata or "relay_repo" in self.metadata:
+            raise ValueError("metadata keys relay_kind and relay_repo are reserved for Relay")
+        if len(self.metadata) > 20:
+            raise ValueError("at most 20 metadata entries")
+        return self
+
+
+class AutomationUpdate(ApiModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    prompt: str | None = Field(default=None, min_length=1, max_length=20_000)
+    description: str | None = Field(default=None, max_length=2_000)
+    enabled: bool | None = None
+
+    @model_validator(mode="after")
+    def _not_empty(self) -> AutomationUpdate:
+        if all(v is None for v in (self.name, self.prompt, self.description, self.enabled)):
+            raise ValueError("nothing to update")
+        return self
+
+
+class ProviderSessionOut(ApiModel):
+    """A session listed by Devin for an automation (may lack Relay tags)."""
+
+    session_id: str
+    title: str
+    status: str
+    url: str
+    created_at: datetime
+    updated_at: datetime
+    tags: list[str]
+
+
+class AutomationSessions(ApiModel):
+    automation_id: str
+    relay_sessions: list[SessionSummary]
+    provider_sessions: list[ProviderSessionOut]
+    provider_error: str | None = None
+    generated_at: datetime
+
+
+class AutomationDetail(ApiModel):
+    automation: AutomationOut
+    sessions: AutomationSessions

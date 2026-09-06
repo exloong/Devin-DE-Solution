@@ -8,6 +8,8 @@ from app.integrations import FakeDevinSessionAdapter, LiveDevinSessionClient
 from app.integrations.devin_automations import (
     WEBHOOK_SECRET_HEADER,
     AutomationHandle,
+    AutomationPatch,
+    AutomationSpec,
     FakeDevinAutomationClient,
     InMemoryAutomationSecretStore,
     LiveDevinAutomationClient,
@@ -102,24 +104,112 @@ def test_ensure_creates_automation_when_none_exists_and_keeps_secret() -> None:
     assert automations.secret_store.load(TaskKind.REPRODUCTION) == handle
 
 
-def test_ensure_reconciles_existing_automation_with_a_patch() -> None:
-    transport = RecordedTransport(
-        [
-            HttpResponse(200, page([automation_doc(TaskKind.FIX, secret=None)])),
-            HttpResponse(200, automation_doc(TaskKind.FIX, secret=None)),
-        ]
-    )
+def test_ensure_reuses_existing_automation_without_patching_it() -> None:
+    doc = automation_doc(TaskKind.FIX, secret=None)
+    doc["enabled"] = False
+    transport = RecordedTransport([HttpResponse(200, page([doc]))])
     automations = client(transport)
     automations.secret_store.save(AutomationHandle("auto-1", TaskKind.FIX, INBOX, "kept"))
 
     handle = automations.ensure_automation(TaskKind.FIX, now=NOW)
 
     assert handle.inbox_secret == "kept"
-    patch = transport.requests[1]
-    assert patch.method == "PATCH"
-    assert patch.url == f"{API}/automations/auto-1"
-    assert patch.json_body is not None
-    assert "triggers" not in patch.json_body
+    assert handle.enabled is False
+    assert [r.method for r in transport.requests] == ["GET"]
+
+
+def test_management_list_get_create_update_delete_redact_secrets() -> None:
+    created = automation_doc(TaskKind.FIX, automation_id="new")
+    created.update(
+        {
+            "name": "Nightly triage",
+            "description": "desc",
+            "created_at": 1_767_268_800,
+            "updated_at": 1_767_268_900,
+            "created_by": {"id": "u1", "name": "Ops"},
+            "last_invocation": {"status": "succeeded", "fired_at": 1_767_268_950},
+            "actions": [{"type": "start_session", "prompt": "do the thing"}],
+        }
+    )
+    del created["metadata"]
+    transport = RecordedTransport(
+        [
+            HttpResponse(200, page([automation_doc(TaskKind.REPRODUCTION), created])),
+            HttpResponse(200, created),
+            HttpResponse(201, created),
+            HttpResponse(200, created),
+            HttpResponse(204, None),
+        ]
+    )
+    automations = client(transport)
+
+    listed = automations.list_automations()
+    assert [a.automation_id for a in listed] == ["auto-1", "new"]
+    assert listed[0].relay_kind is TaskKind.REPRODUCTION
+    assert listed[1].relay_kind is None
+    assert listed[1].created_by == "Ops"
+    assert listed[1].last_invocation_status == "succeeded"
+    assert listed[1].has_inbox is True
+    assert "inbox-secret" not in repr(listed) and INBOX not in repr(listed)
+
+    assert automations.get_automation("new").prompt == "do the thing"
+
+    automations.create_automation(
+        AutomationSpec(name="Nightly triage", prompt="do the thing", metadata={"team": "ops"})
+    )
+    body = transport.requests[2].json_body
+    assert body is not None
+    assert body["run_as"] == {"type": "organization"}
+    assert body["triggers"] == [{"event_type": "webhook:incoming", "conditions": None}]
+    assert body["metadata"] == {"team": "ops"}
+    actions = body["actions"]
+    assert isinstance(actions, list) and isinstance(actions[0], dict)
+    assert actions[0]["session"] == {
+        "bypass_approval": False,
+        "tags": ["relay", "repo:exloong/superset", "launcher:automation"],
+    }
+
+    automations.update_automation("new", AutomationPatch(prompt="new prompt", enabled=False))
+    patch = transport.requests[3]
+    assert patch.method == "PATCH" and patch.url == f"{API}/automations/new"
+    assert patch.json_body == {
+        "enabled": False,
+        "actions": [{"type": "start_session", "prompt": "new prompt"}],
+    }
+
+    automations.delete_automation("new")
+    assert transport.requests[4].method == "DELETE"
+
+
+def test_list_automation_sessions_is_lenient_about_untagged_sessions() -> None:
+    transport = RecordedTransport(
+        [
+            HttpResponse(
+                200,
+                {
+                    "items": [
+                        {"session_id": "s-1", "created_at": 1_767_268_800, "status": "running"},
+                        {
+                            "session_id": "s-2",
+                            "title": "Later",
+                            "status": "finished",
+                            "url": "https://app.devin.ai/sessions/s-2",
+                            "created_at": 1_767_268_900,
+                            "updated_at": 1_767_268_950,
+                            "tags": ["relay", 7],
+                        },
+                    ],
+                    "has_next_page": False,
+                    "end_cursor": None,
+                },
+            )
+        ]
+    )
+    rows = client(transport).list_automation_sessions("auto-1")
+    assert transport.requests[0].query["automation_ids"] == "auto-1"
+    assert [r.session_id for r in rows] == ["s-2", "s-1"]
+    assert rows[1].title == "s-1" and rows[1].url == canonical_session_url("s-1")
+    assert rows[0].tags == ("relay",)
 
 
 def test_ensure_recreates_automation_whose_secret_was_never_seen() -> None:

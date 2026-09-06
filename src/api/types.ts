@@ -419,6 +419,71 @@ export interface AutomationStatus {
   updated_at: IsoTimestamp;
 }
 
+/** A Devin automation as exposed by Relay; inbox URL and secret are never sent to the browser. */
+export interface Automation {
+  automation_id: string;
+  name: string;
+  description: string | null;
+  enabled: boolean;
+  event_types: string[];
+  prompt: string | null;
+  metadata: Record<string, string>;
+  relay_kind: SessionKind | null;
+  managed_by_relay: boolean;
+  created_at: IsoTimestamp | null;
+  updated_at: IsoTimestamp | null;
+  created_by: string | null;
+  last_invocation_status: string | null;
+  last_invocation_at: IsoTimestamp | null;
+  has_inbox: boolean;
+}
+
+export interface AutomationPage {
+  items: Automation[];
+  total: number;
+  generated_at: IsoTimestamp;
+}
+
+export interface AutomationCreate {
+  name: string;
+  prompt: string;
+  description?: string | null;
+  enabled?: boolean;
+  event_type?: 'webhook:incoming';
+  metadata?: Record<string, string>;
+}
+
+export interface AutomationUpdate {
+  name?: string;
+  prompt?: string;
+  description?: string | null;
+  enabled?: boolean;
+}
+
+/** A session Devin lists under an automation; it may predate Relay or lack Relay tags. */
+export interface ProviderSession {
+  session_id: string;
+  title: string;
+  status: string;
+  url: string;
+  created_at: IsoTimestamp;
+  updated_at: IsoTimestamp;
+  tags: string[];
+}
+
+export interface AutomationSessions {
+  automation_id: string;
+  relay_sessions: SessionSummary[];
+  provider_sessions: ProviderSession[];
+  provider_error: string | null;
+  generated_at: IsoTimestamp;
+}
+
+export interface AutomationDetail {
+  automation: Automation;
+  sessions: AutomationSessions;
+}
+
 export interface Heartbeat {
   database: ProbeStatus;
   worker: ProbeStatus;

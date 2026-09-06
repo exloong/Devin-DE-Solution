@@ -6975,3 +6975,258 @@ input[type="range"] {
     grid-template-columns: 1fr;
   }
 }
+
+/* Devin Automations management */
+.automations-view {
+  display: grid;
+  gap: 16px;
+}
+
+.automations-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.automation-list ul {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.automation-row {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 10px;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.automation-row:hover {
+  background: #f5f7fa;
+}
+
+.automation-row.active {
+  border-color: #d6dcf5;
+  background: #eef1fd;
+}
+
+.automation-row-body {
+  display: grid;
+  min-width: 0;
+}
+
+.automation-row-body strong {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 14px;
+}
+
+.automation-row-body small {
+  color: #667085;
+  font-size: 12px;
+}
+
+.state-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #cdd3dc;
+}
+
+.state-dot.on {
+  background: #1a9c6b;
+}
+
+.kind-icon {
+  color: #667085;
+}
+
+.kind-icon.reproduction {
+  color: #6053cf;
+}
+
+.kind-icon.fix {
+  color: #1a7f5f;
+}
+
+.automation-detail {
+  display: grid;
+  gap: 16px;
+}
+
+.automation-detail .card-header h2 {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.automation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.secondary-button.danger {
+  color: #b42318;
+  border-color: #fecdca;
+}
+
+.automation-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px 20px;
+  margin: 14px 0 0;
+}
+
+.automation-facts dt {
+  color: #667085;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.automation-facts dd {
+  margin: 4px 0 0;
+  font-size: 14px;
+}
+
+.automation-facts dd small {
+  color: #667085;
+}
+
+.automation-facts code {
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.automation-workflow {
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.automation-workflow li {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.automation-workflow .step-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: #eef1fd;
+  color: #4a55c9;
+}
+
+.automation-workflow p {
+  margin: 2px 0 0;
+  color: #475467;
+  font-size: 14px;
+}
+
+.automation-workflow small {
+  color: #667085;
+}
+
+.automation-prompt {
+  margin: 6px 0 0;
+  padding: 12px;
+  max-height: 320px;
+  overflow: auto;
+  border-radius: 10px;
+  background: #f7f8fb;
+  border: 1px solid #e6e9f0;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.automation-metadata {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.meta-chip {
+  padding: 3px 8px;
+  border-radius: 8px;
+  background: #f1f3f7;
+  font-size: 12px;
+  color: #344054;
+}
+
+.meta-chip b {
+  font-weight: 700;
+}
+
+.automation-form {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.automation-form label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  color: #344054;
+}
+
+.automation-form label.checkbox {
+  grid-template-columns: auto 1fr;
+  align-items: center;
+}
+
+.automation-form textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+@media (max-width: 960px) {
+  .automations-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.automation-confirm {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: 1px solid #f3c0c0;
+  border-radius: 10px;
+  background: #fff5f5;
+  color: #8a1f1f;
+}
+
+.automation-confirm p {
+  flex: 1;
+  margin: 0;
+  font-size: 13px;
+}
+
+.primary-button.danger {
+  background: #c62828;
+  border-color: #c62828;
+}

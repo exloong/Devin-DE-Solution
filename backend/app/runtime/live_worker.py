@@ -135,8 +135,7 @@ class LiveWorkerRuntime:
             return {}
         now = self.service.clock.now()
         return {
-            kind: self.automations.ensure_automation(kind, now=now)
-            for kind in AUTOMATION_KINDS
+            kind: self.automations.ensure_automation(kind, now=now) for kind in AUTOMATION_KINDS
         }
 
     def execute(self, uow: UnitOfWork, job: Job) -> None:
@@ -270,9 +269,7 @@ class LiveWorkerRuntime:
             try:
                 spawned = [
                     snap
-                    for snap in self.automations.list_spawned_sessions(
-                        automation_id, since=since
-                    )
+                    for snap in self.automations.list_spawned_sessions(automation_id, since=since)
                     if snap.session_id not in known
                 ]
             except Exception as error:
@@ -284,9 +281,7 @@ class LiveWorkerRuntime:
                 if snap.structured_output is not None
                 and isinstance(snap.structured_output.get("task_id"), str)
             }
-            unmatched = [
-                snap for snap in spawned if snap not in by_task.values()
-            ]
+            unmatched = [snap for snap in spawned if snap not in by_task.values()]
             for session in waiting:
                 snapshot = by_task.get(str(session.id))
                 if snapshot is None and unmatched:
@@ -400,7 +395,11 @@ class LiveWorkerRuntime:
         kind: TaskKind | None = None,
     ) -> None:
         task = self._task(uow, issue, session, kind=kind)
-        if self.automations is not None and task.kind in AUTOMATION_KINDS:
+        if task.kind in AUTOMATION_KINDS:
+            if self.automations is None:
+                raise RuntimeError(
+                    f"{task.kind.value} sessions are launched only through Devin Automations"
+                )
             self._dispatch_to_automation(uow, issue, session, task)
             return
         snapshot = self.devin.create_session(
@@ -493,9 +492,7 @@ class LiveWorkerRuntime:
             except Exception as error:
                 self._fail_session(uow, issue, session, f"{type(error).__name__}: {error}")
 
-    def _complete_session(
-        self, uow: UnitOfWork, issue: Issue, session: AgentSession
-    ) -> None:
+    def _complete_session(self, uow: UnitOfWork, issue: Issue, session: AgentSession) -> None:
         task = self._task(uow, issue, session)
         external_id = session.external_session_id or ""
         if session.automation_id is not None:
@@ -596,8 +593,7 @@ class LiveWorkerRuntime:
                     "pull_request": {
                         "repository": SUPERSET_REPOSITORY.full_name,
                         "number": pull_request.number,
-                        "head_branch": pull_request.head_branch
-                        or result.payload.branch_name,
+                        "head_branch": pull_request.head_branch or result.payload.branch_name,
                         "head_sha": head.sha,
                         "url": pull_request.html_url,
                     },
@@ -631,9 +627,7 @@ class LiveWorkerRuntime:
         ]
         if not questions:
             return
-        sections = [
-            "Relay needs a little more context before attempting isolated reproduction."
-        ]
+        sections = ["Relay needs a little more context before attempting isolated reproduction."]
         for index, question in enumerate(questions, start=1):
             sections.append(
                 f"{index}. **{question.field}** — {question.prompt}\n"
@@ -814,11 +808,14 @@ class LiveWorkerRuntime:
         *,
         kind: TaskKind | None = None,
     ) -> TaskEnvelope:
-        task_kind = kind or {
-            SessionKind.TRIAGE: TaskKind.CLASSIFICATION,
-            SessionKind.REPRODUCTION: TaskKind.REPRODUCTION,
-            SessionKind.FIX: TaskKind.FIX,
-        }[session.kind]
+        task_kind = (
+            kind
+            or {
+                SessionKind.TRIAGE: TaskKind.CLASSIFICATION,
+                SessionKind.REPRODUCTION: TaskKind.REPRODUCTION,
+                SessionKind.FIX: TaskKind.FIX,
+            }[session.kind]
+        )
         target = (
             TargetCommit(sha=session.target_commit)
             if session.target_commit
@@ -883,9 +880,7 @@ class LiveWorkerRuntime:
             return TargetCommit(sha=revision.target_commit)
         return self.github.get_branch_head(self.default_branch)
 
-    def _attach_snapshot(
-        self, session: AgentSession, snapshot: SessionSnapshot
-    ) -> None:
+    def _attach_snapshot(self, session: AgentSession, snapshot: SessionSnapshot) -> None:
         session.external_session_id = snapshot.session_id
         session.external_session_url = snapshot.links.session_url
         session.external_desktop_url = snapshot.links.desktop_url
@@ -968,27 +963,13 @@ class LiveWorkerRuntime:
         return issue
 
     @staticmethod
-    def _pull_request(
-        uow: UnitOfWork, issue_id: uuid.UUID, job: Job
-    ) -> PullRequestState:
+    def _pull_request(uow: UnitOfWork, issue_id: uuid.UUID, job: Job) -> PullRequestState:
         number = job.payload.get("pr_number")
         head_sha = job.payload.get("head_sha")
         for pr in uow.list_pull_requests(issue_id):
             if pr.number == number and pr.head_sha == head_sha:
                 return pr
         raise RuntimeError("job pull request binding is stale")
-
-
-LAUNCHER_AUTOMATIONS = "automations"
-LAUNCHER_SESSIONS = "sessions"
-
-
-def devin_launcher_from_env() -> str:
-    """``RELAY_DEVIN_LAUNCHER``: ``automations`` (default) or ``sessions``."""
-    value = os.environ.get("RELAY_DEVIN_LAUNCHER", LAUNCHER_AUTOMATIONS).strip().lower()
-    if value not in {LAUNCHER_AUTOMATIONS, LAUNCHER_SESSIONS}:
-        raise RuntimeError("RELAY_DEVIN_LAUNCHER must be automations or sessions")
-    return value
 
 
 def live_runtime_from_env(
@@ -1013,15 +994,13 @@ def live_runtime_from_env(
         org_id=org_id,
         policy=task_policy,
     )
-    automations: DevinAutomationClient | None = None
-    if devin_launcher_from_env() == LAUNCHER_AUTOMATIONS:
-        automations = LiveDevinAutomationClient(
-            transport=transport,
-            token_provider=StaticTokenProvider(devin_token),
-            org_id=org_id,
-            sessions=devin,
-            secret_store=automation_secrets or InMemoryAutomationSecretStore(),
-        )
+    automations = LiveDevinAutomationClient(
+        transport=transport,
+        token_provider=StaticTokenProvider(devin_token),
+        org_id=org_id,
+        sessions=devin,
+        secret_store=automation_secrets or InMemoryAutomationSecretStore(),
+    )
     return LiveWorkerRuntime(
         service=service,
         uow_factory=uow_factory,

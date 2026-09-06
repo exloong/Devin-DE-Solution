@@ -25,6 +25,9 @@ services:
       RELAY_AUTH_TOKENS_FILE: ${RELAY_AUTH_TOKENS_FILE:-}
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
       GITHUB_WEBHOOK_SECRET_FILE: ${GITHUB_WEBHOOK_SECRET_FILE:-}
+      DEVIN_API_TOKEN: ${DEVIN_API_TOKEN:-}
+      DEVIN_API_TOKEN_FILE: ${DEVIN_API_TOKEN_FILE:-}
+      DEVIN_ORG_ID: ${DEVIN_ORG_ID:-}
     depends_on:
       postgres:
         condition: service_healthy

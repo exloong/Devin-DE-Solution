@@ -31,9 +31,12 @@ class ValidationCode(str, Enum):
 class ContractValidationError(ValueError):
     """Raised when an integration input violates a Relay contract."""
 
-    def __init__(self, code: ValidationCode, message: str) -> None:
+    def __init__(
+        self, code: ValidationCode, message: str, *, upstream_status: int | None = None
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.upstream_status = upstream_status
 
     def __str__(self) -> str:
         return f"[{self.code.value}] {super().__str__()}"

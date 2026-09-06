@@ -5,3 +5,4 @@ export { SessionDetailView, SessionStatusBadge, sessionStateClass } from './Sess
 export { LiveIssueWorkbench, LifecycleBadge, lifecycleLabel, lifecycleTone, useLiveIssueList } from './LiveIssueWorkbench';
 export type { IssueListFilter } from './LiveIssueWorkbench';
 export { SafeLink } from './SafeLink';
+export { AutomationsView } from './AutomationsView';

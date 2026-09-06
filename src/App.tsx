@@ -69,6 +69,7 @@ import {
   type SessionView,
 } from './hooks';
 import {
+  AutomationsView,
   DataSourceBadge,
   LiveIssueWorkbench,
   RepositorySafetyNotice,
@@ -86,6 +87,7 @@ const navItems: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[] 
   { key: 'overview', label: 'Health dashboard', icon: LayoutDashboard },
   { key: 'workflow', label: 'Core workflow', icon: Network },
   { key: 'sessions', label: 'Devin sessions', icon: Activity },
+  { key: 'automations', label: 'Devin Automations', icon: Zap },
   { key: 'issues', label: 'Issue workbench', icon: Inbox },
   { key: 'settings', label: 'Connections', icon: Settings2 },
 ];
@@ -296,6 +298,7 @@ function App() {
           )}
           {view === 'workflow' && <Workflow notify={notify} />}
           {!gated && view === 'sessions' && <DevinSessions goToIssue={goToIssue} notify={notify} live={live} sessions={liveSessions} onRunDryTest={runDryTest} />}
+          {!gated && view === 'automations' && <AutomationsView live={live} goToIssue={goToIssue} notify={notify} />}
           {view === 'issues' && demo && (
             <IssueWorkbench
               selected={selectedIssue}

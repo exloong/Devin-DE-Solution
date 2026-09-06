@@ -145,7 +145,7 @@ def test_live_worker_binds_sessions_to_revision_and_commit() -> None:
     assert opened.issue is not None
     issue = opened.issue
     github = FakeGitHubAdapter(branch_head=TargetCommit("a" * 40))
-    sessions = FakeDevinSessionAdapter()
+    sessions = FakeDevinSessionAdapter(policy=TaskPolicy(max_wall_seconds=5_400))
     runtime = LiveWorkerRuntime(
         service=harness.service,
         uow_factory=harness.uow,
@@ -153,6 +153,7 @@ def test_live_worker_binds_sessions_to_revision_and_commit() -> None:
         devin=sessions,
         review=FakeDevinReviewAdapter(),
         default_branch="master",
+        automations=FakeDevinAutomationClient(sessions),
     )
     worker = Worker(
         harness.engine,
@@ -350,17 +351,11 @@ def test_database_secret_store_round_trips_handles_without_leaking_secrets() -> 
     assert "s3cret" not in repr(record) and "other" not in repr(record)
 
 
-def test_live_runtime_uses_automations_launcher_by_default(
+def test_live_runtime_always_launches_through_automations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     harness = Harness()
     monkeypatch.setenv("GITHUB_TOKEN", "gh")
     monkeypatch.setenv("DEVIN_API_TOKEN", "dv")
     monkeypatch.setenv("DEVIN_ORG_ID", "org-1234567890abcdef")
-    monkeypatch.delenv("RELAY_DEVIN_LAUNCHER", raising=False)
     assert live_runtime_from_env(harness.service, harness.uow).automations is not None
-    monkeypatch.setenv("RELAY_DEVIN_LAUNCHER", "sessions")
-    assert live_runtime_from_env(harness.service, harness.uow).automations is None
-    monkeypatch.setenv("RELAY_DEVIN_LAUNCHER", "bogus")
-    with pytest.raises(RuntimeError, match="RELAY_DEVIN_LAUNCHER"):
-        live_runtime_from_env(harness.service, harness.uow)
