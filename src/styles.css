@@ -6989,9 +6989,28 @@ input[type="range"] {
   align-items: start;
 }
 
+.automations-layout .card,
+.automation-editor {
+  padding: 19px 20px;
+}
+
+.automation-editor .card-header {
+  align-items: flex-start;
+}
+
+.automation-list {
+  position: sticky;
+  top: 16px;
+  padding: 16px 12px !important;
+}
+
+.automation-list .card-header {
+  padding: 0 8px;
+}
+
 .automation-list ul {
   list-style: none;
-  margin: 12px 0 0;
+  margin: 14px 0 0;
   padding: 0;
   display: grid;
   gap: 4px;
@@ -7003,7 +7022,7 @@ input[type="range"] {
   align-items: center;
   gap: 10px;
   width: 100%;
-  padding: 10px 10px;
+  padding: 10px 12px;
   border: 1px solid transparent;
   border-radius: 10px;
   background: transparent;
@@ -7022,6 +7041,7 @@ input[type="range"] {
 
 .automation-row-body {
   display: grid;
+  gap: 2px;
   min-width: 0;
 }
 
@@ -7065,10 +7085,44 @@ input[type="range"] {
   gap: 16px;
 }
 
+.automation-detail .card-header {
+  align-items: center;
+}
+
 .automation-detail .card-header h2 {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.automation-detail .card-header p {
+  margin-top: 6px;
+}
+
+.automation-detail .recent-sessions {
+  margin-top: 14px;
+}
+
+.automation-detail .recent-sessions-head,
+.automation-detail .recent-sessions-row {
+  grid-template-columns: minmax(200px, 1.6fr) minmax(140px, 1fr) 110px 100px 80px;
+}
+
+.automation-detail .recent-sessions-row > span:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.automation-detail .recent-sessions-row > span:first-child small {
+  display: block;
+}
+
+.automation-detail .session-empty,
+.automation-detail .resource-notice {
+  margin-top: 14px;
 }
 
 .automation-actions {
@@ -7085,9 +7139,15 @@ input[type="range"] {
 
 .automation-facts {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 12px 20px;
-  margin: 14px 0 0;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px 24px;
+  margin: 18px 0 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.automation-facts > div {
+  min-width: 0;
 }
 
 .automation-facts dt {
@@ -7098,8 +7158,9 @@ input[type="range"] {
 }
 
 .automation-facts dd {
-  margin: 4px 0 0;
+  margin: 6px 0 0;
   font-size: 14px;
+  line-height: 1.45;
 }
 
 .automation-facts dd small {
@@ -7113,16 +7174,27 @@ input[type="range"] {
 
 .automation-workflow {
   list-style: none;
-  margin: 14px 0 0;
+  margin: 18px 0 0;
   padding: 0;
   display: grid;
-  gap: 12px;
+  gap: 16px;
 }
 
 .automation-workflow li {
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr);
-  gap: 10px;
+  gap: 12px;
+  align-items: start;
+}
+
+.automation-workflow li > div {
+  min-width: 0;
+}
+
+.automation-workflow strong {
+  display: block;
+  line-height: 28px;
+  font-size: 14px;
 }
 
 .automation-workflow .step-icon {
@@ -7147,8 +7219,8 @@ input[type="range"] {
 }
 
 .automation-prompt {
-  margin: 6px 0 0;
-  padding: 12px;
+  margin: 8px 0 0;
+  padding: 14px 16px;
   max-height: 320px;
   overflow: auto;
   border-radius: 10px;
@@ -7163,12 +7235,12 @@ input[type="range"] {
 .automation-metadata {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 12px;
+  gap: 8px;
+  margin-top: 16px;
 }
 
 .meta-chip {
-  padding: 3px 8px;
+  padding: 4px 10px;
   border-radius: 8px;
   background: #f1f3f7;
   font-size: 12px;
@@ -7181,15 +7253,46 @@ input[type="range"] {
 
 .automation-form {
   display: grid;
-  gap: 12px;
-  margin-top: 12px;
+  gap: 14px;
+  margin-top: 16px;
 }
 
 .automation-form label {
   display: grid;
   gap: 6px;
   font-size: 13px;
+  font-weight: 600;
   color: #344054;
+}
+
+.automation-form input,
+.automation-form textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font: inherit;
+  font-size: 14px;
+}
+
+.automation-form textarea {
+  min-height: 80px;
+  resize: vertical;
+}
+
+.automation-form .automation-actions {
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+.automation-form input[type='checkbox'] {
+  width: auto;
+  margin: 0;
+}
+
+.automation-form label.checkbox {
+  gap: 10px;
 }
 
 .automation-form label.checkbox {
@@ -7206,13 +7309,17 @@ input[type="range"] {
   .automations-layout {
     grid-template-columns: 1fr;
   }
+
+  .automation-list {
+    position: static;
+  }
 }
 
 .automation-confirm {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin: 12px 0;
+  margin: 16px 0 0;
   padding: 12px 14px;
   border: 1px solid #f3c0c0;
   border-radius: 10px;
