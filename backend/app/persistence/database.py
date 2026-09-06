@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Protocol, cast
 
 from alembic import command
 from alembic.config import Config
@@ -11,6 +12,16 @@ from sqlalchemy.pool import StaticPool
 from app.persistence.tables import metadata
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+
+
+class _Cursor(Protocol):
+    def execute(self, sql: str) -> object: ...
+
+    def close(self) -> None: ...
+
+
+class _DbapiConnection(Protocol):
+    def cursor(self) -> _Cursor: ...
 
 
 def make_engine(url: str) -> Engine:
@@ -25,7 +36,7 @@ def make_engine(url: str) -> Engine:
 
         @event.listens_for(engine, "connect")
         def _sqlite_pragmas(dbapi_connection: object, _record: object) -> None:
-            cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
+            cursor = cast(_DbapiConnection, dbapi_connection).cursor()
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.execute("PRAGMA busy_timeout=5000")
             cursor.close()
