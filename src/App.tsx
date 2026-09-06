@@ -53,11 +53,33 @@ import {
   outcomeData,
   ownerLoad,
   weeklyVolume,
-  type DevinSession,
   type FlowStep,
   type Issue,
   type ViewKey,
 } from './data';
+import {
+  fromApiDetail,
+  fromApiSummary,
+  fromDemoSession,
+  useAnalytics,
+  useApiStatus,
+  useDryRun,
+  useSession,
+  useSessions,
+  type ApiStatus,
+  type SessionView,
+} from './hooks';
+import {
+  DataSourceBadge,
+  LiveIssueWorkbench,
+  RepositorySafetyNotice,
+  ResourceNotice,
+  SessionDetailView,
+  SessionStatusBadge,
+  isRepositorySafetyError,
+  useLiveIssueList,
+  type IssueListFilter,
+} from './components';
 
 const navItems: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[] = [
   { key: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -78,14 +100,6 @@ const stateClass: Record<Issue['state'], string> = {
   'Closed · inactive': 'rose',
 };
 
-const sessionStateClass: Record<DevinSession['status'], string> = {
-  Running: 'running',
-  Queued: 'queued',
-  'Needs attention': 'attention',
-  'Waiting on owner': 'waiting',
-  Completed: 'completed',
-};
-
 function Logo() {
   return (
     <div className="logo-mark" aria-hidden="true">
@@ -99,19 +113,40 @@ function Logo() {
 function App() {
   const [view, setView] = useState<ViewKey>('overview');
   const [selectedIssueId, setSelectedIssueId] = useState(43218);
+  const [selectedLiveIssueId, setSelectedLiveIssueId] = useState<string | null>(null);
+  const [issueFilter, setIssueFilter] = useState<IssueListFilter>('all');
+  const [issueSearch, setIssueSearch] = useState('');
   const [toast, setToast] = useState<string | null>(null);
   const [mobileNav, setMobileNav] = useState(false);
   const selectedIssue = issues.find(issue => issue.id === selectedIssueId) ?? issues[0];
-  const runningSessionCount = devinSessions.filter(session => session.status === 'Running').length;
+
+  const api = useApiStatus();
+  const live = api.mode === 'live' || api.mode === 'degraded';
+  const liveSessions = useSessions({}, live);
+  const liveIssues = useLiveIssueList(issueFilter, issueSearch, live);
+  const analytics = useAnalytics(live);
+  const runningSessionCount = live
+    ? liveSessions.data?.items.filter(session => session.status === 'running').length ?? 0
+    : devinSessions.filter(session => session.status === 'Running').length;
+  const issueCount = live ? liveIssues.data?.total ?? 0 : issues.length;
 
   const notify = (message: string) => {
     setToast(message);
     window.setTimeout(() => setToast(null), 2600);
   };
 
-  const goToIssue = (id: number) => {
-    setSelectedIssueId(id);
+  const goToIssue = (id: number | string) => {
+    if (typeof id === 'number') setSelectedIssueId(id);
+    else if (/^\d+$/.test(id)) setSelectedIssueId(Number(id));
+    else setSelectedLiveIssueId(id);
     setView('issues');
+  };
+
+  const dryRun = useDryRun(() => notify('Dry-run accepted by the API'));
+  const runDryTest = () => {
+    setView('sessions');
+    if (live) void dryRun.run();
+    else notify('Dry-run reproduction session queued (simulated)');
   };
 
   return (
@@ -144,7 +179,7 @@ function App() {
                 <Icon size={18} strokeWidth={1.9} />
                 <span>{item.label}</span>
                 {item.key === 'sessions' && <b>{runningSessionCount}</b>}
-                {item.key === 'issues' && <b>6</b>}
+                {item.key === 'issues' && <b>{issueCount}</b>}
               </button>
             );
           })}
@@ -152,30 +187,43 @@ function App() {
 
         <div className="sidebar-section">
           <p className="nav-label">Saved views</p>
-          <button className="saved-view">
-            <span className="dot amber-dot" />
-            Waiting on reporter
-            <b>8</b>
-          </button>
-          <button className="saved-view">
-            <span className="dot green-dot" />
-            Owner decisions
-            <b>5</b>
-          </button>
-          <button className="saved-view">
-            <span className="dot blue-dot" />
-            PRs in review
-            <b>11</b>
-          </button>
+          {(
+            [
+              ['waiting', 'amber-dot', 'Waiting on reporter', ['awaiting_reporter'], 8],
+              ['decision', 'green-dot', 'Owner decisions', ['needs_owner_decision'], 5],
+              ['review', 'blue-dot', 'PRs in review', ['pr_open', 'awaiting_owner', 'changes_requested'], 11],
+            ] as [IssueListFilter, string, string, string[], number][]
+          ).map(([key, dot, label, states, demoCount]) => {
+            const counts = analytics.data?.state_counts;
+            const count = live ? states.reduce((sum, state) => sum + (counts?.[state as keyof typeof counts] ?? 0), 0) : demoCount;
+            return (
+              <button
+                className="saved-view"
+                key={key}
+                onClick={() => {
+                  setIssueFilter(key);
+                  setView('issues');
+                }}
+              >
+                <span className={`dot ${dot}`} />
+                {label}
+                <b>{live && !analytics.data ? '–' : count}</b>
+              </button>
+            );
+          })}
         </div>
 
         <div className="sidebar-spacer" />
         <div className="environment-card">
           <div className="environment-title">
-            <span className="pulse-dot" />
-            Dry-run environment
+            <span className={`pulse-dot ${api.mode}`} />
+            {api.mode === 'checking' ? 'Checking API…' : live ? 'Connected to Relay API' : 'Demo environment'}
           </div>
-          <p>All actions are simulated in <strong>exloong/superset</strong>.</p>
+          <p>
+            {live
+              ? <>Events, sessions, and PRs are scoped to <strong>exloong/superset</strong>.{api.mode === 'degraded' && api.reason ? <> Degraded: {api.reason}.</> : null}</>
+              : <>API unreachable; showing committed demo data for <strong>exloong/superset</strong>. Nothing here is live.</>}
+          </p>
           <button onClick={() => setView('settings')}>
             Review safeguards <ArrowRight size={14} />
           </button>
@@ -204,21 +252,12 @@ function App() {
             <kbd>⌘ K</kbd>
           </div>
           <div className="top-actions">
-            <div className="mode-pill">
-              <span />
-              Simulation mode
-            </div>
+            <ModePill api={api} />
             <button className="icon-button" aria-label="Notifications">
               <Bell size={18} />
               <span className="notification-dot" />
             </button>
-            <button
-              className="primary-button"
-              onClick={() => {
-                setView('sessions');
-                notify('Dry-run reproduction session queued');
-              }}
-            >
+            <button className="primary-button" onClick={runDryTest} disabled={dryRun.pending}>
               <Play size={16} fill="currentColor" />
               Run dry test
             </button>
@@ -226,16 +265,41 @@ function App() {
         </header>
 
         <div className="page">
-          {view === 'overview' && <Overview goToIssue={goToIssue} />}
+          {view === 'overview' && <Overview goToIssue={goToIssue} live={live} analytics={analytics} />}
           {view === 'workflow' && <Workflow notify={notify} />}
           {view === 'experience' && <ExperiencePreview notify={notify} />}
-          {view === 'sessions' && <DevinSessions goToIssue={goToIssue} notify={notify} />}
-          {view === 'issues' && (
+          {view === 'sessions' && <DevinSessions goToIssue={goToIssue} notify={notify} live={live} sessions={liveSessions} onRunDryTest={runDryTest} />}
+          {view === 'issues' && !live && (
             <IssueWorkbench
               selected={selectedIssue}
               onSelect={setSelectedIssueId}
               notify={notify}
             />
+          )}
+          {view === 'issues' && live && (
+            <>
+              <PageHeader
+                eyebrow="Live workbench"
+                title="Issue queue"
+                description="Reporter questions, evidence packets, owner routing, and human decisions from the Relay API."
+                actions={
+                  <button className="secondary-button" onClick={() => void liveIssues.refresh()}>
+                    <RefreshCw size={15} /> Refresh
+                  </button>
+                }
+              />
+              {liveIssues.state.kind === 'error' && isRepositorySafetyError(liveIssues.state.error) && <RepositorySafetyNotice error={liveIssues.state.error} />}
+              <LiveIssueWorkbench
+                issues={liveIssues}
+                selectedId={selectedLiveIssueId}
+                onSelect={setSelectedLiveIssueId}
+                filter={issueFilter}
+                onFilter={setIssueFilter}
+                search={issueSearch}
+                onSearch={setIssueSearch}
+                notify={notify}
+              />
+            </>
           )}
           {view === 'settings' && <Configuration notify={notify} />}
         </div>
@@ -247,6 +311,17 @@ function App() {
           {toast}
         </div>
       )}
+    </div>
+  );
+}
+
+function ModePill({ api }: { api: ApiStatus }) {
+  const label =
+    api.mode === 'checking' ? 'Checking API' : api.mode === 'live' ? 'Live · exloong/superset' : api.mode === 'degraded' ? `Degraded · ${api.reason ?? 'API'}` : 'Demo data';
+  return (
+    <div className={`mode-pill ${api.mode}`} title={api.reason ?? (api.health?.version ? `API ${api.health.version}` : undefined)} role="status">
+      <span />
+      {label}
     </div>
   );
 }
@@ -274,61 +349,76 @@ function PageHeader({
   );
 }
 
-function Overview({ goToIssue }: { goToIssue: (id: number) => void }) {
+function Overview({
+  goToIssue,
+  live,
+  analytics,
+}: {
+  goToIssue: (id: number) => void;
+  live: boolean;
+  analytics: ReturnType<typeof useAnalytics>;
+}) {
+  const summary = live ? analytics.data : undefined;
+  const period = summary
+    ? `${new Date(summary.period.from).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} – ${new Date(summary.period.to).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`
+    : 'September 1–7, 2026';
   return (
     <>
       <PageHeader
-        eyebrow="September 1–7, 2026"
+        eyebrow={period}
         title="Issue operations"
         description="A single view of intake quality, reproduction throughput, and owner attention."
         actions={
           <>
+            <DataSourceBadge state={live ? analytics.state : { kind: 'demo', reason: 'API unavailable' }} />
             <button className="secondary-button">
               Last 90 days <ChevronDown size={15} />
             </button>
-            <button className="secondary-button">
+            <button className="secondary-button" onClick={() => void analytics.refresh()} disabled={!live}>
               <RefreshCw size={15} /> Refresh
             </button>
           </>
         }
       />
 
+      {live && <ResourceNotice state={analytics.state} resourceLabel="analytics" />}
+
       <section className="metric-grid" aria-label="Key metrics">
         <MetricCard
           label="Issues processed"
-          value="148"
-          change="+18%"
-          note="vs. previous period"
+          value={summary ? String(summary.issues_processed) : live ? '–' : '148'}
+          change={summary ? 'live' : live ? '' : '+18%'}
+          note={summary ? 'this period' : live ? 'awaiting analytics' : 'vs. previous period'}
           icon={<Inbox size={19} />}
           tone="violet"
-          spark={[18, 24, 22, 31, 28, 38, 42]}
+          spark={summary ? [] : [18, 24, 22, 31, 28, 38, 42]}
         />
         <MetricCard
           label="Confirmed bugs"
-          value="43"
-          change="29.1%"
-          note="of total intake"
+          value={summary ? String(summary.confirmed_bugs) : live ? '–' : '43'}
+          change={summary ? (summary.issues_processed ? `${Math.round((summary.confirmed_bugs / summary.issues_processed) * 1000) / 10}%` : '') : live ? '' : '29.1%'}
+          note={live && !summary ? 'awaiting analytics' : 'of total intake'}
           icon={<CircleDot size={19} />}
           tone="green"
-          spark={[20, 19, 28, 24, 34, 38, 36]}
+          spark={summary ? [] : [20, 19, 28, 24, 34, 38, 36]}
         />
         <MetricCard
           label="Reproduced autonomously"
-          value="68%"
-          change="+9.4%"
-          note="without owner setup"
+          value={summary ? `${summary.reproduced_autonomously_pct}%` : live ? '–' : '68%'}
+          change={summary ? 'live' : live ? '' : '+9.4%'}
+          note={live && !summary ? 'awaiting analytics' : 'without owner setup'}
           icon={<TestTube2 size={19} />}
           tone="blue"
-          spark={[14, 20, 21, 29, 31, 33, 42]}
+          spark={summary ? [] : [14, 20, 21, 29, 31, 33, 42]}
         />
         <MetricCard
           label="Median to owner decision"
-          value="9.4h"
-          change="-3.1h"
-          note="faster this period"
+          value={summary ? `${summary.median_to_owner_decision_hours}h` : live ? '–' : '9.4h'}
+          change={summary ? 'live' : live ? '' : '-3.1h'}
+          note={live && !summary ? 'awaiting analytics' : live ? 'this period' : 'faster this period'}
           icon={<Clock3 size={19} />}
           tone="amber"
-          spark={[42, 39, 34, 36, 28, 25, 21]}
+          spark={summary ? [] : [42, 39, 34, 36, 28, 25, 21]}
         />
       </section>
 
@@ -356,17 +446,18 @@ function Overview({ goToIssue }: { goToIssue: (id: number) => void }) {
         </div>
 
         <div className="card outcomes-card">
-          <CardHeader title="Outcome mix" subtitle="148 issues classified" />
+          <CardHeader title="Outcome mix" subtitle={summary ? `${summary.issues_processed} issues classified · live` : live ? 'Awaiting analytics' : '148 issues classified · demo'} />
           <div className="outcomes-layout">
-            <DonutChart />
+            {!summary && <DonutChart />}
             <div className="outcome-list">
-              {outcomeData.map(item => (
+              {(summary ? summary.outcome_mix.map((item, index) => ({ ...item, color: outcomeData[index % outcomeData.length].color })) : live ? [] : outcomeData).map(item => (
                 <div className="outcome-row" key={item.label}>
                   <span className="dot" style={{ background: item.color }} />
                   <span>{item.label}</span>
                   <strong>{item.value}</strong>
                 </div>
               ))}
+              {live && !summary && <p className="session-empty">Outcome mix is not shown until the API returns analytics.</p>}
             </div>
           </div>
         </div>
@@ -589,40 +680,42 @@ function Avatar({ initials, size = 'normal' }: { initials: string; size?: 'norma
   return <span className={`avatar ${size}`}>{initials}</span>;
 }
 
-function SessionStatus({ status }: { status: DevinSession['status'] }) {
-  return (
-    <span className={`session-status ${sessionStateClass[status]}`}>
-      <i />
-      {status}
-    </span>
-  );
-}
-
 function DevinSessions({
   goToIssue,
   notify,
+  live,
+  sessions,
+  onRunDryTest,
 }: {
-  goToIssue: (id: number) => void;
+  goToIssue: (id: string) => void;
   notify: (message: string) => void;
+  live: boolean;
+  sessions: ReturnType<typeof useSessions>;
+  onRunDryTest: () => void;
 }) {
-  const [selectedSessionId, setSelectedSessionId] = useState(devinSessions[0].id);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [filter, setFilter] = useState<'live' | 'attention' | 'all'>('live');
-  const [detailTab, setDetailTab] = useState<'activity' | 'artifacts' | 'guardrails'>('activity');
-  const visibleSessions = devinSessions.filter(session => {
-    if (filter === 'attention') return session.status === 'Needs attention';
-    if (filter === 'all') return true;
-    return session.status !== 'Completed';
-  });
-  const selected = visibleSessions.find(session => session.id === selectedSessionId) ?? visibleSessions[0] ?? devinSessions[0];
-  const runningCount = devinSessions.filter(session => session.status === 'Running').length;
-  const queuedCount = devinSessions.filter(session => session.status === 'Queued').length;
-  const attentionCount = devinSessions.filter(session => session.status === 'Needs attention').length;
-  const waitingCount = devinSessions.filter(session => session.status === 'Waiting on owner').length;
+  const now = Date.now();
 
-  const selectSession = (id: string) => {
-    setSelectedSessionId(id);
-    setDetailTab('activity');
-  };
+  const allSessions: SessionView[] = live
+    ? (sessions.data?.items ?? []).map(session => fromApiSummary(session, now))
+    : devinSessions.map(fromDemoSession);
+
+  const visibleSessions = allSessions.filter(session => {
+    if (filter === 'attention') return session.status === 'Needs attention' || session.status === 'Failed';
+    if (filter === 'all') return true;
+    return session.status !== 'Completed' && session.status !== 'Cancelled' && session.status !== 'Failed';
+  });
+  const selectedSummary = visibleSessions.find(session => session.id === selectedSessionId) ?? visibleSessions[0] ?? allSessions[0] ?? null;
+  const detail = useSession(live && selectedSummary ? selectedSummary.id : null, live);
+  const selected: SessionView | null =
+    live && detail.data && selectedSummary && detail.data.id === selectedSummary.id ? fromApiDetail(detail.data, now) : selectedSummary;
+
+  const count = (status: SessionView['status']) => allSessions.filter(session => session.status === status).length;
+  const capacity = live ? sessions.data?.capacity : undefined;
+  const slots = capacity?.slots ?? (live ? null : 6);
+  const releasedWaiting = allSessions.filter(session => session.status === 'Waiting on owner');
+  const allReleased = releasedWaiting.every(session => session.workspaceReleased);
 
   return (
     <>
@@ -632,10 +725,10 @@ function DevinSessions({
         description="See every agent run created by the issue flow, what triggered it, and where human attention is required."
         actions={
           <>
-            <button className="secondary-button" onClick={() => notify('Session data refreshed')}>
-              <RefreshCw size={15} /> Live · 18s ago
+            <button className="secondary-button" onClick={() => (live ? void sessions.refresh() : notify('Demo data does not refresh'))}>
+              <RefreshCw size={15} /> <DataSourceBadge state={live ? sessions.state : { kind: 'demo', reason: 'API unavailable' }} compact />
             </button>
-            <button className="primary-button" onClick={() => notify('Dry-run reproduction session queued')}>
+            <button className="primary-button" onClick={onRunDryTest}>
               <Plus size={15} /> Run dry test
             </button>
           </>
@@ -645,25 +738,33 @@ function DevinSessions({
       <section className="session-summary" aria-label="Devin session summary">
         <div className="card">
           <span className="session-summary-icon running"><Activity size={17} /></span>
-          <div><strong>{runningCount}</strong><span>Agents running</span></div>
-          <small>of 6 workspace slots</small>
+          <div><strong>{count('Running')}</strong><span>Agents running</span></div>
+          <small>{slots !== null ? `of ${slots} workspace slots` : 'capacity not reported'}</small>
         </div>
         <div className="card">
           <span className="session-summary-icon queued"><Clock3 size={17} /></span>
-          <div><strong>{queuedCount}</strong><span>Queued trigger</span></div>
-          <small>next slot in ~4 min</small>
+          <div><strong>{count('Queued')}</strong><span>Queued trigger</span></div>
+          <small>
+            {live
+              ? capacity?.next_slot_eta_seconds !== undefined
+                ? `next slot in ~${Math.max(1, Math.round(capacity.next_slot_eta_seconds / 60))} min`
+                : 'next slot ETA not reported'
+              : 'next slot in ~4 min'}
+          </small>
         </div>
         <div className="card">
           <span className="session-summary-icon attention"><AlertTriangle size={17} /></span>
-          <div><strong>{attentionCount}</strong><span>Needs attention</span></div>
-          <small>environment recovery</small>
+          <div><strong>{count('Needs attention') + count('Failed')}</strong><span>Needs attention</span></div>
+          <small>{live ? 'recovery or retry required' : 'environment recovery'}</small>
         </div>
         <div className="card">
-          <span className="session-summary-icon released"><Pause size={17} /></span>
-          <div><strong>{waitingCount}</strong><span>Waiting on human</span></div>
-          <small>workspace already released</small>
+          <span className={`session-summary-icon ${allReleased ? 'released' : 'attention'}`}><Pause size={17} /></span>
+          <div><strong>{releasedWaiting.length}</strong><span>Waiting on human</span></div>
+          <small>{allReleased ? 'workspace already released' : 'workspace still allocated!'}</small>
         </div>
       </section>
+
+      {live && sessions.state.kind === 'error' && isRepositorySafetyError(sessions.state.error) && <RepositorySafetyNotice error={sessions.state.error} />}
 
       <section className="session-monitor card">
         <aside className="session-list-panel">
@@ -672,7 +773,7 @@ function DevinSessions({
               <p className="eyebrow">Flow-triggered runs</p>
               <strong>Session queue</strong>
             </div>
-            <span className="live-indicator"><i /> Live</span>
+            <DataSourceBadge state={live ? sessions.state : { kind: 'demo', reason: 'API unavailable' }} />
           </div>
           <div className="session-filters">
             <button className={filter === 'live' ? 'active' : ''} onClick={() => setFilter('live')}>Live & waiting</button>
@@ -680,15 +781,17 @@ function DevinSessions({
             <button className={filter === 'all' ? 'active' : ''} onClick={() => setFilter('all')}>All</button>
           </div>
           <div className="session-list">
+            {live && <ResourceNotice state={sessions.state} resourceLabel="sessions" />}
+            {visibleSessions.length === 0 && allSessions.length > 0 && <p className="session-empty">No sessions match this filter.</p>}
             {visibleSessions.map(session => (
               <button
-                className={`session-list-item ${selected.id === session.id ? 'selected' : ''}`}
-                onClick={() => selectSession(session.id)}
+                className={`session-list-item ${selected?.id === session.id ? 'selected' : ''}`}
+                onClick={() => setSelectedSessionId(session.id)}
                 key={session.id}
               >
                 <div className="session-list-row">
-                  <SessionStatus status={session.status} />
-                  <small>{session.id}</small>
+                  <SessionStatusBadge status={session.status} />
+                  <small>{session.shortId}</small>
                 </div>
                 <strong>{session.title}</strong>
                 <span>{session.issueKey} · {session.flowStep}</span>
@@ -708,154 +811,22 @@ function DevinSessions({
           </div>
         </aside>
 
-        <div className="session-detail">
-          <div className="session-detail-head">
-            <div className="session-title">
-              <span className={`session-agent-icon ${sessionStateClass[selected.status]}`}><Bot size={21} /></span>
-              <div>
-                <span>{selected.id} · {selected.actor}</span>
-                <h2>{selected.title}</h2>
-                <button onClick={() => goToIssue(selected.issueId)}>{selected.issueKey} · {selected.issueTitle} <ChevronRight size={13} /></button>
-              </div>
-            </div>
-            <div className="session-head-actions">
-              <SessionStatus status={selected.status} />
-              {selected.status === 'Running' && (
-                <button className="icon-button" onClick={() => notify(`${selected.id} pause requested`)} aria-label="Pause session">
-                  <Pause size={16} />
-                </button>
-              )}
-              <button className="secondary-button" onClick={() => notify(`${selected.id} opened in Devin`)}>
-                Open session <ArrowRight size={14} />
-              </button>
-            </div>
+        {selected ? (
+          <SessionDetailView
+            session={selected}
+            detailState={live ? detail.state : undefined}
+            goToIssue={goToIssue}
+            notify={notify}
+            onRefresh={live ? () => void Promise.all([sessions.refresh(), detail.refresh()]) : undefined}
+          />
+        ) : (
+          <div className="session-detail session-detail-empty">
+            {live ? <ResourceNotice state={sessions.state} resourceLabel="sessions" /> : null}
+            {live && sessions.state.kind === 'empty' && (
+              <p className="session-empty">The API is reachable and reports no sessions. Demo sessions are hidden while the API is live.</p>
+            )}
           </div>
-
-          <div className={`session-current-work ${sessionStateClass[selected.status]}`}>
-            <span>
-              {selected.status === 'Running' ? <Activity size={17} /> : selected.status === 'Needs attention' ? <AlertTriangle size={17} /> : <Clock3 size={17} />}
-            </span>
-            <div>
-              <small>{selected.status === 'Running' ? 'Working on' : selected.status === 'Needs attention' ? 'Blocked at' : 'Current state'}</small>
-              <strong>{selected.currentAction}</strong>
-            </div>
-            <div className="session-elapsed">
-              <small>Elapsed / budget</small>
-              <strong>{selected.elapsed} <span>/ {selected.budget}</span></strong>
-            </div>
-          </div>
-
-          <div className="session-progress-block">
-            <div>
-              <span>Session progress</span>
-              <strong>{selected.progress}%</strong>
-            </div>
-            <div className="session-progress-track"><i style={{ width: `${selected.progress}%` }} /></div>
-            <small>Next checkpoint: {selected.nextCheckpoint}</small>
-          </div>
-
-          <div className="session-tabs" role="tablist" aria-label="Session details">
-            {[
-              ['activity', 'Activity'],
-              ['artifacts', `Artifacts · ${selected.artifacts.length}`],
-              ['guardrails', 'Guardrails'],
-            ].map(([key, label]) => (
-              <button
-                className={detailTab === key ? 'active' : ''}
-                onClick={() => setDetailTab(key as typeof detailTab)}
-                role="tab"
-                aria-selected={detailTab === key}
-                key={key}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-
-          <div className="session-detail-body">
-            <div className="session-detail-primary">
-              {detailTab === 'activity' && (
-                <div className="session-timeline">
-                  <div className="session-section-title">
-                    <div><p className="eyebrow">Execution trace</p><h3>What this session has done</h3></div>
-                    <span>Updated {selected.updated}</span>
-                  </div>
-                  {selected.events.map(event => (
-                    <div className={`session-event ${event.state}`} key={`${selected.id}-${event.label}`}>
-                      <i>{event.state === 'complete' ? <Check size={12} /> : event.state === 'blocked' ? <AlertTriangle size={12} /> : <span />}</i>
-                      <div><strong>{event.label}</strong><span>{event.detail}</span></div>
-                      <small>{event.time}</small>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {detailTab === 'artifacts' && (
-                <div className="session-artifacts">
-                  <div className="session-section-title">
-                    <div><p className="eyebrow">Portable evidence</p><h3>Outputs attached to the issue lifecycle</h3></div>
-                  </div>
-                  {selected.artifacts.map((artifact, index) => (
-                    <button onClick={() => notify(`${artifact} preview opened`)} key={artifact}>
-                      <span><FileCheck2 size={17} /></span>
-                      <div><strong>{artifact}</strong><small>{index === 0 ? 'Primary output' : 'Supporting evidence'} · retained with issue state</small></div>
-                      <ChevronRight size={15} />
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {detailTab === 'guardrails' && (
-                <div className="session-guardrails">
-                  <div className="session-section-title">
-                    <div><p className="eyebrow">Execution contract</p><h3>Limits applied to this run</h3></div>
-                  </div>
-                  {[
-                    ['Bounded runtime', `${selected.budget} maximum; no unattended continuation`],
-                    ['Isolated workspace', 'No reporter production data or credentials are available'],
-                    ['Narrow scope', `Only the ${selected.flowStep.toLowerCase()} transition is authorized`],
-                    ['Human gates', 'No merge, issue closure, or expected-behavior decision'],
-                  ].map(([label, copy]) => (
-                    <div className="guardrail-row" key={label}>
-                      <ShieldCheck size={16} />
-                      <div><strong>{label}</strong><span>{copy}</span></div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <aside className="session-context">
-              <div>
-                <p className="eyebrow">Flow linkage</p>
-                <span><small>Triggered by</small><strong>{selected.trigger}</strong></span>
-                <span><small>Flow step</small><strong>{selected.flowStep}</strong></span>
-                <span><small>Started</small><strong>{selected.started}</strong></span>
-                <span><small>Environment</small><strong>{selected.environment}</strong></span>
-                {selected.branch && <span><small>Working branch</small><strong>{selected.branch}</strong></span>}
-              </div>
-              <div>
-                <p className="eyebrow">Operator controls</p>
-                {selected.status === 'Needs attention' ? (
-                  <button className="primary-button" onClick={() => notify('Recovery options opened')}>
-                    Review recovery options
-                  </button>
-                ) : selected.status === 'Waiting on owner' ? (
-                  <button className="primary-button" onClick={() => goToIssue(selected.issueId)}>
-                    Open owner decision
-                  </button>
-                ) : (
-                  <button className="secondary-button" onClick={() => notify('Session logs exported')}>
-                    <TerminalSquare size={14} /> Export run log
-                  </button>
-                )}
-                <button className="text-button" onClick={() => notify('Flow definition opened')}>
-                  View trigger in flow <ArrowRight size={13} />
-                </button>
-              </div>
-            </aside>
-          </div>
-        </div>
+        )}
       </section>
     </>
   );
