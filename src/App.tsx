@@ -850,9 +850,11 @@ function DevinSessions({
                 </div>
                 <strong>{session.title}</strong>
                 <span>{session.issueKey} · {session.flowStep}</span>
-                <div className="session-mini-progress">
-                  <i style={{ width: `${session.progress}%` }} />
-                </div>
+                {session.progress !== null && (
+                  <div className="session-mini-progress">
+                    <i style={{ width: `${session.progress}%` }} />
+                  </div>
+                )}
                 <div className="session-list-foot">
                   <span><Clock3 size={11} /> {session.elapsed}</span>
                   <span>{session.updated}</span>

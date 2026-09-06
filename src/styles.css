@@ -5617,6 +5617,14 @@ input[type="range"] {
   font-size: 12px;
 }
 
+.progress-disclosure {
+  display: block;
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 4px 0 6px;
+}
+
 .unsafe-link {
   display: inline-flex;
   align-items: center;

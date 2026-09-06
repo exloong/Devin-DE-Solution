@@ -162,7 +162,7 @@ export function SessionDetailView({
                 ? 'Blocked at'
                 : 'Current state'}
           </small>
-          <strong>{session.currentAction}</strong>
+          <strong>{session.currentAction ?? <span className="muted">Not exposed by the Devin session API</span>}</strong>
         </div>
         <div className="session-elapsed">
           <small>Elapsed / budget</small>
@@ -234,12 +234,16 @@ export function SessionDetailView({
       <div className="session-progress-block">
         <div>
           <span>Session progress</span>
-          <strong>{session.progress}%</strong>
+          <strong>{session.progress === null ? <span className="muted">Unavailable</span> : `${session.progress}%`}</strong>
         </div>
-        <div className="session-progress-track">
-          <i style={{ width: `${session.progress}%` }} />
-        </div>
-        <small>Next checkpoint: {session.nextCheckpoint}</small>
+        {session.progress === null ? (
+          <small className="progress-disclosure">Devin does not report a progress percentage for live sessions; follow the event timeline and status instead.</small>
+        ) : (
+          <div className="session-progress-track">
+            <i style={{ width: `${session.progress}%` }} />
+          </div>
+        )}
+        <small>Next checkpoint: {session.nextCheckpoint ?? 'Not exposed by the Devin session API'}</small>
       </div>
 
       <div className="session-tabs" role="tablist" aria-label="Session details">

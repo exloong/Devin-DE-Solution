@@ -34,9 +34,23 @@ export interface Resource<T> {
   isDemo: boolean;
 }
 
-function toApiError(error: unknown): ApiError {
+/** Anything thrown after a response arrived (schema/mapping bugs, safety checks) is a reachable-API failure, never "absent". */
+export function toApiError(error: unknown): ApiError {
   if (error instanceof ApiError) return error;
-  return new ApiError('server_error', error instanceof Error ? error.message : 'Unexpected error');
+  return new ApiError('malformed_response', error instanceof Error ? error.message : 'Unexpected error', null, null, error, true);
+}
+
+/**
+ * Decides the resource state after a failed fetch. Demo is chosen only when
+ * no API answered (`apiAbsent`); every reachable failure — 401/403, malformed
+ * JSON, wrong repository, policy/server errors — is an explicit `error`.
+ */
+export function resolveFailureState<T>(previous: ResourceState<T>, error: ApiError): ResourceState<T> {
+  if (previous.kind === 'live' || previous.kind === 'stale') {
+    return { kind: 'stale', data: previous.data, fetchedAt: previous.fetchedAt, stale: true, error };
+  }
+  if (error.apiAbsent) return { kind: 'demo', reason: error.message };
+  return { kind: 'error', error };
 }
 
 export function useResource<T>(fetcher: () => Promise<T>, deps: readonly unknown[], options: ResourceOptions<T> = {}): Resource<T> {
@@ -61,15 +75,7 @@ export function useResource<T>(fetcher: () => Promise<T>, deps: readonly unknown
       else setState({ kind: 'live', data, fetchedAt, stale: false });
     } catch (raw) {
       if (id !== requestId.current) return;
-      const error = toApiError(raw);
-      const previous = latest.current;
-      if (previous.kind === 'live' || previous.kind === 'stale') {
-        setState({ kind: 'stale', data: previous.data, fetchedAt: previous.fetchedAt, stale: true, error });
-      } else if (error.apiAbsent) {
-        setState({ kind: 'demo', reason: error.message });
-      } else {
-        setState({ kind: 'error', error });
-      }
+      setState(resolveFailureState(latest.current, toApiError(raw)));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, ...deps]);

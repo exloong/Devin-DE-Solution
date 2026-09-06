@@ -40,14 +40,15 @@ export interface SessionView {
   endedAt: number | null;
   elapsed: string;
   updated: string;
-  progress: number;
+  /** null when the source has no synchronized progress value (live Devin sessions). */
+  progress: number | null;
   budget: string;
   budgetSeconds: number | null;
   environment: string;
   workspaceReleased: boolean;
   trigger: string;
-  currentAction: string;
-  nextCheckpoint: string;
+  currentAction: string | null;
+  nextCheckpoint: string | null;
   repository: string;
   repositoryUrl: string;
   commit: string | null;
@@ -83,7 +84,7 @@ export function fromDemoSession(session: DevinSession): SessionView {
     endedAt: null,
     elapsed: session.elapsed,
     updated: session.updated,
-    progress: session.progress,
+    progress: normalizeProgress(session.progress),
     budget: session.budget,
     budgetSeconds: null,
     environment: session.environment,
@@ -174,15 +175,15 @@ export function formatRelative(from: number | null, now: number): string {
   return `${Math.floor(diff / 86_400)}d ago`;
 }
 
-export function formatClock(value: string): string {
+export function formatClock(value?: string | null): string {
   const ms = parseTime(value);
-  if (ms === null) return value;
+  if (ms === null) return 'Unknown';
   return new Date(ms).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'UTC' }) + ' UTC';
 }
 
-export function formatDateTime(value: string): string {
+export function formatDateTime(value?: string | null): string {
   const ms = parseTime(value);
-  if (ms === null) return value;
+  if (ms === null) return 'Unknown';
   return new Date(ms).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' }) + ' UTC';
 }
 
@@ -223,14 +224,14 @@ export function fromApiSummary(session: SessionSummary, now: number): SessionVie
     endedAt,
     elapsed: elapsed === null ? '00:00' : formatDuration(elapsed),
     updated: formatRelative(updatedAt, now),
-    progress: session.progress,
+    progress: normalizeProgress(session.progress),
     budget: formatBudget(session.budget.wall_seconds),
     budgetSeconds: session.budget.wall_seconds,
     environment: session.workspace.released ? 'Workspace released' : session.workspace.id ?? 'Waiting for slot',
     workspaceReleased: session.workspace.released,
     trigger: session.trigger,
-    currentAction: session.current_action,
-    nextCheckpoint: session.next_checkpoint ?? '—',
+    currentAction: session.current_action ?? null,
+    nextCheckpoint: session.next_checkpoint ?? null,
     repository: session.repository.full_name,
     repositoryUrl: safeHref(session.repository.html_url, 'github') ?? TARGET_REPOSITORY_URL,
     commit: session.target_commit,
@@ -267,6 +268,12 @@ export function fromApiDetail(session: SessionDetail, now: number): SessionView 
 
 export function isActiveStatus(status: DevinSessionStatus): boolean {
   return status === 'Running' || status === 'Queued';
+}
+
+/** Accepts only an explicit finite 0–100 value; anything else is "unavailable" rather than 0%. */
+export function normalizeProgress(value: number | null | undefined): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  return Math.min(100, Math.max(0, value));
 }
 
 export function isWaitingOnHuman(session: Pick<SessionView, 'status' | 'humanGate'>): boolean {

@@ -298,15 +298,17 @@ export interface SessionSummary {
   started_at?: IsoTimestamp;
   ended_at?: IsoTimestamp;
   last_heartbeat_at?: IsoTimestamp;
-  progress: number;
+  /** 0–100 only when Relay holds an explicitly synchronized value; Devin v3 session data documents no progress percentage. */
+  progress?: number | null;
   budget: SessionBudget;
   repository: RepositoryRef;
   target_commit: string;
   branch?: string;
   workspace: { id?: string; released: boolean; released_at?: IsoTimestamp };
   trigger: string;
-  current_action: string;
-  next_checkpoint?: string;
+  /** Relay-internal fields; absent when the upstream session does not expose them. */
+  current_action?: string | null;
+  next_checkpoint?: string | null;
   correlation_id: string;
   human_gate?: HumanGate;
 }

@@ -90,12 +90,14 @@ export function useApiStatus(pollMs = 30_000): ApiStatus {
   }
 
   const readinessData = readiness.state.data;
-  const degraded = healthData.status === 'degraded' || readinessData.database !== 'ok' || readinessData.worker !== 'ok';
+  const staleProbe = health.state.kind === 'stale' ? health.state.error : readiness.state.kind === 'stale' ? readiness.state.error : null;
+  const degraded = staleProbe !== null || healthData.status === 'degraded' || readinessData.database !== 'ok' || readinessData.worker !== 'ok';
   return {
     mode: degraded ? 'degraded' : 'live',
     health: healthData,
     readiness: readinessData,
-    reason: degraded ? describeDegraded(healthData, readinessData) : undefined,
+    reason: staleProbe ? `Health probe is stale: ${staleProbe.message}` : degraded ? describeDegraded(healthData, readinessData) : undefined,
+    error: staleProbe ?? undefined,
     checkedAt,
     refresh,
   };

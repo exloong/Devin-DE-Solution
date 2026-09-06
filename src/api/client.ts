@@ -46,7 +46,7 @@ export class ApiError extends Error {
     status: number | null = null,
     correlationId: string | null = null,
     details: unknown = undefined,
-    reachable: boolean = status !== null,
+    reachable = true,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -74,6 +74,10 @@ export class RepositorySafetyError extends ApiError {
     super(
       'wrong_repository',
       `${resource} belongs to ${repository}; Relay only processes ${TARGET_REPOSITORY}. The record was not entered into the flow.`,
+      null,
+      null,
+      { repository, resource },
+      true,
     );
     this.name = 'RepositorySafetyError';
     this.repository = repository;
@@ -168,9 +172,9 @@ export class ApiClient {
       });
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
-        throw new ApiError('timeout', `Relay API did not respond within ${this.timeoutMs} ms`);
+        throw new ApiError('timeout', `Relay API did not respond within ${this.timeoutMs} ms`, null, null, undefined, false);
       }
-      throw new ApiError('unavailable', 'Relay API is unreachable');
+      throw new ApiError('unavailable', 'Relay API is unreachable', null, null, undefined, false);
     } finally {
       window.clearTimeout(timer);
     }

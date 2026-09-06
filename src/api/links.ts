@@ -13,7 +13,8 @@ export type LinkCheck = { ok: true; href: string } | { ok: false; reason: string
 
 export const GITHUB_HOST = 'github.com';
 export const DEVIN_HOSTS = ['app.devin.ai', 'devin.ai'] as const;
-const DEVIN_PATH_PREFIXES = ['/sessions/', '/review/', '/workspace/'] as const;
+/** Canonical authenticated Devin paths: session, Desktop/remote computer, and Devin Review. */
+const DEVIN_PATH_PREFIXES = ['/sessions/', '/desktop/session/', '/review/'] as const;
 
 export const TARGET_REPOSITORY_URL = `https://${GITHUB_HOST}/${TARGET_REPOSITORY}`;
 
