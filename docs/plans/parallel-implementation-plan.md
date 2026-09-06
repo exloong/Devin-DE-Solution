@@ -94,9 +94,8 @@ request, close an issue as fixed, or publish a suspected security report.
 4. A GitHub client boundary restricted to `exloong/superset`, including
    reviewer requests and `.github/CODEOWNERS`-based candidate routing.
 5. Typed Devin session task/result envelopes and a v3 client boundary for
-   create, inspect, list, message, outputs, and canonical session links.
-   Cancellation must be explicitly unavailable unless a documented endpoint
-   exists; the client must not invent one.
+   create, inspect, list, message, outputs, canonical session links, and
+   bounded cancellation through the documented session archive endpoint.
 6. A Devin Review client boundary for trigger, status, and findings.
 7. Deterministic mock adapters for classification, reproduction, evidence,
    fix, session progress, conversation, and review results.
