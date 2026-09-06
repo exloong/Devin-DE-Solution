@@ -199,16 +199,13 @@ export function SystemStatusPill({ status, reasons }: { status: SystemStatus; re
   );
 }
 
-/** Issue intake is Devin-native (github:issues); Relay's own webhook is optional. */
+/** Issue intake is Devin-native (github:issues); Relay never enrolls issues from webhooks. */
 function githubSignal(heartbeat: Heartbeat, now: number): string {
   if (heartbeat.intake === 'native' || heartbeat.intake === 'stale') {
     const poll = `Devin github:issues automation polled ${formatAgo(heartbeat.last_automation_poll_at, now)}`;
     return heartbeat.intake === 'stale' ? `${poll} (stale)` : poll;
   }
-  if (heartbeat.intake === 'webhook') {
-    return `Last webhook ${formatAgo(heartbeat.last_webhook_received_at, now)}${heartbeat.last_webhook_event ? ` · ${heartbeat.last_webhook_event}` : ''}`;
-  }
-  return 'No Devin automation poll or webhook observed yet';
+  return 'No Devin automation poll observed yet';
 }
 
 function HeartbeatPanel({ heartbeat, now }: { heartbeat: Heartbeat; now: number }) {
@@ -435,7 +432,7 @@ export function HealthDashboard({
       {live && <ResourceNotice state={dashboard.state} resourceLabel="dashboard" />}
 
       <section className="metric-grid" aria-label="Throughput">
-        <Metric label="Issues entered" value={data ? String(data.throughput.entered) : '–'} note="enrolled through the webhook gate" icon={<Inbox size={19} />} tone="violet" />
+        <Metric label="Issues entered" value={data ? String(data.throughput.entered) : '–'} note="enrolled by the Devin github:issues automation" icon={<Inbox size={19} />} tone="violet" />
         <Metric label="Issues completed" value={data ? String(data.throughput.completed) : '–'} note="reached a terminal outcome" icon={<CheckCircle2 size={19} />} tone="green" />
         <Metric label="In flight" value={inFlight === null ? '–' : String(inFlight)} note="across non-terminal stages" icon={<Clock3 size={19} />} tone="blue" />
         <Metric label="Devin sessions running" value={running === null ? '–' : String(running)} note="reproduction + fix" icon={<Bot size={19} />} tone="amber" />

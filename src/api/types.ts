@@ -487,7 +487,7 @@ export interface AutomationDetail {
   sessions: AutomationSessions;
 }
 
-export type IntakeStatus = 'native' | 'webhook' | 'stale' | 'none';
+export type IntakeStatus = 'native' | 'stale' | 'none';
 
 export interface Heartbeat {
   database: ProbeStatus;

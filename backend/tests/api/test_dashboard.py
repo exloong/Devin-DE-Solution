@@ -135,11 +135,12 @@ def test_heartbeat_derives_overall_status(h: Harness) -> None:
     )
     with h.uow() as uow:
         hb = dashboard.summary(uow, now, _rows(h)).heartbeat
-    assert hb.overall == "healthy"
+    assert hb.overall == "degraded"
     assert hb.github == "connected" and hb.devin == "connected"
     assert hb.last_webhook_received_at == now and hb.last_webhook_event == "issues"
-    assert hb.intake == "webhook"
-    assert hb.reasons == []
+    # A Relay webhook is not intake: only the Devin automation poll is.
+    assert hb.intake == "none"
+    assert hb.reasons == ["no Devin automation intake poll has been observed"]
 
     with h.engine.begin() as conn:
         runtime_status.touch(conn, runtime_status.DEVIN_AUTOMATION_POLL, "auto-1", now)
@@ -148,6 +149,7 @@ def test_heartbeat_derives_overall_status(h: Harness) -> None:
     assert hb.intake == "native"
     assert hb.polled_automation_id == "auto-1"
     assert hb.last_automation_poll_at == now
+    assert hb.overall == "healthy" and hb.reasons == []
 
     h.clock.advance(seconds=31)
     with h.uow() as uow:

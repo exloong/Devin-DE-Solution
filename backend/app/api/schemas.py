@@ -449,7 +449,7 @@ class AnalyticsSummary(ApiModel):
 ProbeStatus = Literal["ok", "stale", "unavailable"]
 ProviderStatus = Literal["connected", "dry_run", "stale", "unconfigured"]
 SystemStatus = Literal["healthy", "degraded", "down"]
-IntakeStatus = Literal["native", "webhook", "stale", "none"]
+IntakeStatus = Literal["native", "stale", "none"]
 
 
 class ThroughputBucket(ApiModel):

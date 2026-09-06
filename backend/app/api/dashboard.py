@@ -175,8 +175,6 @@ def heartbeat(
         intake = "native"
     elif poll is not None:
         intake = "stale"
-    elif webhook is not None:
-        intake = "webhook"
     else:
         intake = "none"
     reasons: list[str] = []
@@ -197,7 +195,7 @@ def heartbeat(
     if intake == "stale":
         reasons.append("Devin automation intake poll is stale")
     elif intake == "none" and devin == "connected":
-        reasons.append("no Devin automation poll or GitHub webhook has been observed")
+        reasons.append("no Devin automation intake poll has been observed")
     overall: SystemStatus
     if database != "ok" or worker == "unavailable":
         overall = "down"

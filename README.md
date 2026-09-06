@@ -46,10 +46,11 @@ target repository is currently `exloong/superset`.
 ## How it works
 
 ```text
-GitHub webhook
+GitHub issue labeled `bug` ──▶ Devin github:issues automation ──▶ Devin session
+                                                                      │
+Relay worker ── polls the automation's sessions, adopts them by issue ◀┘
       │
-      ▼
-Relay API ── validates signature, repository, delivery, and command
+Relay API ── (optional) signed webhook for comments, PRs, reviews
       │
       ▼
 PostgreSQL ── stores lifecycle state, audit history, and durable jobs
@@ -76,9 +77,13 @@ requested changes, duplicates, non-bugs, unsupported reports, and inactivity.
 
 Each event is handled as follows:
 
-1. GitHub sends a signed event to `/api/v1/webhooks/github`.
+1. Devin's GitHub connection fires the reproduction automation; the worker
+   adopts the resulting session by the issue it reports and records the
+   `ISSUE_OPENED` event. Optional follow-up events (comments, PRs, reviews)
+   arrive signed at `/api/v1/webhooks/github`; `issues.opened`/`labeled`
+   deliveries there are acknowledged and ignored.
 2. The API verifies the HMAC signature, delivery ID, event shape, and repository
-   scope, then records the event and its resulting transition atomically.
+   scope of webhook events, then records each transition atomically.
 3. The transition creates durable work for the worker; duplicate deliveries and
    stale commands cannot advance the issue twice.
 4. The worker claims jobs and uses either deterministic demo adapters or live
@@ -96,7 +101,7 @@ Devin session; everything else is deterministic policy or a human decision.
 
 | Step | Actor | What happens |
 | --- | --- | --- |
-| Intake & classify | Workflow controller (deterministic) | Verifies the webhook signature, applies the controller gate (repository is `exloong/superset`, issue is open, optional trusted label/actor), and classifies the report. **No Devin session is launched here.** |
+| Intake & classify | Devin `github:issues` automation + workflow controller (deterministic) | Devin fires on `exloong/superset` · `labeled` · trusted label; the worker re-checks the gate against GitHub (repository, issue open, label, optional trusted actor) before adopting the session. **Classification is deterministic; Relay never enrolls issues from its own webhook.** |
 | Reproduce safely | Devin reproducer (`kind = reproduction`) | **Auto-launched** by the worker once triage marks the report a likely defect with context completeness ≥ 80%. Builds an isolated fixture, runs control/failure cases, drafts a regression test. |
 | Confirm the bug | Component owner (human gate) | Reviews the evidence pack and explicitly confirms or rejects the bug. |
 | Prepare the fix | Devin coding agent (`kind = fix`) | Launched **only** after the owner's `confirm_bug` decision (`POST /api/v1/issues/{id}/decisions`). Implements the smallest fix with a regression test and opens a PR. |
@@ -151,12 +156,12 @@ the row is lost, the worker retires the fix automation and creates a fresh one.
 A reproduction automation created before this native trigger existed is
 migrated in place to `github:issues`.
 
-Relay's own GitHub webhook (`GITHUB_WEBHOOK_SECRET`) remains optional: it
-still enrolls issues, ingests comments, PRs and reviews when configured, and
-is HMAC-verified and gated, but the **Liveness** panel no longer treats a
-missing webhook as an outage. Its GitHub row shows the last poll of the
-reproduction automation (`intake = native`) or the last webhook
-(`intake = webhook`) instead.
+Relay's own GitHub webhook (`GITHUB_WEBHOOK_SECRET`) is optional and never a
+trigger: it only ingests reporter comments, PR pushes and reviews for issues
+Relay already tracks. `issues.opened`/`labeled` deliveries are acknowledged
+with `reason = intake_is_devin_automation`. The **Liveness** panel's GitHub
+row shows the last poll of the reproduction automation (`intake = native`,
+`stale`, or `none`); a missing webhook is never an outage.
 
 ### Managing Devin Automations from the UI
 
@@ -196,7 +201,7 @@ the pipeline is working. Every number is aggregated from persisted records:
 - Devin automation health, separately for reproduction and fix sessions:
   queued / running / succeeded / failed counts, success rate, median duration,
   and a recent-sessions table linking to each session.
-- Liveness: last GitHub webhook received, last Devin session launched, worker
+- Liveness: last Devin automation poll (and optional webhook), worker
   heartbeat, database probe, and GitHub / Devin provider mode
   (`connected`, `dry_run`, `stale`, `unconfigured`). These derive a single
   `healthy` / `degraded` / `down` status with reasons.
@@ -401,11 +406,11 @@ chmod 600 .env
 | `RELAY_MODE` | API, worker | `live` for real providers or `demo` for deterministic local adapters. |
 | `RELAY_SEED` | API | Set to `0` for an empty live database; demo overlay sets it to `1`. |
 | `RELAY_AUTH_TOKENS` | API | Semicolon-separated `token:login:role` entries. Use a random URL-safe token of at least 8 characters and the `operator` role for dashboard access. |
-| `GITHUB_WEBHOOK_SECRET` | API | High-entropy HMAC secret shared only with the GitHub webhook. Optional for reproduction intake, which is Devin-native. |
+| `GITHUB_WEBHOOK_SECRET` | API | High-entropy HMAC secret shared only with the optional GitHub webhook (comments, PRs, reviews). Issue intake is Devin-native and never uses it. |
 | `GITHUB_TOKEN` | Worker | Dedicated GitHub App installation token or fine-grained token scoped only to `exloong/superset`. |
 | `GITHUB_DEFAULT_BRANCH` | Worker | Superset branch resolved to the immutable reproduction base; defaults to `master`. |
-| `RELAY_TRUSTED_LABEL` | API, Worker | Controller-gate label; defaults to `bug` for the reproduction automation's `label.name` condition. When set, `issues.opened`/`issues.labeled` webhook events enroll an issue only if it carries (or is being given) this label. |
-| `RELAY_TRUSTED_ACTORS` | API | Optional comma-separated GitHub logins; when set, only these senders can trigger enrollment. |
+| `RELAY_TRUSTED_LABEL` | Worker | Label in the reproduction automation's `label.name` condition and in the worker's adoption gate; defaults to `bug`. |
+| `RELAY_TRUSTED_ACTORS` | Worker | Optional comma-separated GitHub logins; when set, only issues reported by these logins are adopted. |
 | `DEVIN_API_TOKEN` | API, Worker | Devin service-user API key. The worker dispatches to Devin Automations; the API proxies automation management. |
 | `DEVIN_ORG_ID` | API, Worker | Devin organization identifier used by the v3 API. |
 | `DEVIN_REVIEW_TOKEN` | Worker | Optional separate Devin Review token; defaults to `DEVIN_API_TOKEN`. |
@@ -458,7 +463,7 @@ Relay has no merge or issue-close command in its typed GitHub boundary. Still
 protect the default branch with required human review and do not grant the App
 an administrative bypass.
 
-Reproduction needs no webhook: connect Devin's GitHub integration to
+Issue intake needs no webhook: connect Devin's GitHub integration to
 `exloong/superset` (Devin Settings → Integrations) so its `github:issues`
 trigger fires. To additionally feed Relay comments, PR and review events,
 configure a GitHub webhook with:
