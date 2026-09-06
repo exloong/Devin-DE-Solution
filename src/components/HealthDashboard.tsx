@@ -502,7 +502,7 @@ export function HealthDashboard({
                 <Webhook size={14} /> Demo mode: no live issue records. Connect the Relay API to see issues that need attention.
               </p>
             )}
-            {live && attentionItems.length === 0 && <p className="session-empty">No blocked or failed issues need operator attention.</p>}
+            {live && attentionItems.length === 0 && <p className="session-empty">No blocked, failed, or decision-pending issues need attention.</p>}
           </div>
         </div>
       </section>

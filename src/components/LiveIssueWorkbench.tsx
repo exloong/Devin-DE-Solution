@@ -125,7 +125,7 @@ const listFilterStates: Record<ListFilter, LifecycleState[] | undefined> = {
   waiting: ['awaiting_reporter'],
   decision: ['needs_owner_decision'],
   review: ['pr_open', 'awaiting_owner', 'changes_requested'],
-  attention: ['blocked_environment', 'automation_error'],
+  attention: ['blocked_environment', 'automation_error', 'needs_owner_decision'],
 };
 
 export function LiveIssueWorkbench({
