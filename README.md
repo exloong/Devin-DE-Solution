@@ -252,7 +252,8 @@ curl --fail http://127.0.0.1:4173/api/v1/ready
 ```
 
 Open `http://127.0.0.1:4173`. Demo mode authenticates commands with a local demo
-principal, so no operator or provider token is required.
+principal, so no operator or provider token is required. (Live mode does: see
+[Operator token](#operator-token-required-to-sign-in).)
 
 To use another host port:
 
@@ -403,9 +404,25 @@ curl --fail http://127.0.0.1:4173/api/v1/health
 curl --fail http://127.0.0.1:4173/api/v1/ready
 ```
 
-Open `http://127.0.0.1:4173`, go to **Connections**, and enter
-the Relay operator token. The browser keeps it in `sessionStorage`; provider
-credentials remain server-side.
+### Operator token (required to sign in)
+
+In live mode every dashboard view (health, sessions, Devin Automations) is
+behind a Relay-issued operator token. There is nothing to obtain from GitHub or
+Devin: you generate the token yourself and register it with the API.
+
+```bash
+# 1. Generate a random token.
+TOKEN=$(openssl rand -hex 16)
+
+# 2. Register it in .env as token:login:role (the role must be `operator`).
+echo "RELAY_AUTH_TOKENS=${TOKEN}:relay-operator:operator" >> .env
+```
+
+Open `http://127.0.0.1:4173`, go to **Connections → Dashboard operator
+access**, paste the token, and click **Connect**. Until then the dashboard
+shows "commands require an authenticated principal". The browser keeps the
+token in `sessionStorage` for that tab only (every operator and every new tab
+enters it again); provider credentials remain server-side.
 
 ### GitHub requirements
 

@@ -77,6 +77,17 @@ export function ResourceNotice({ state, resourceLabel }: { state: ResourceState<
       </div>
     );
   }
+  if (state.error.code === 'unauthorized') {
+    return (
+      <div className="resource-notice error" role="alert">
+        <AlertTriangle size={16} />
+        <span>
+          Sign in to load {resourceLabel}: open Connections → Dashboard operator access and enter the Relay operator token
+          (the value registered in the API's RELAY_AUTH_TOKENS).
+        </span>
+      </div>
+    );
+  }
   return (
     <div className="resource-notice error" role="alert">
       <AlertTriangle size={16} />
