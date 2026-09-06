@@ -466,6 +466,7 @@ class _FakeSession:
     created_at: datetime
     updated_at: datetime
     messages: list[ConversationMessage] = field(default_factory=list)
+    structured_output: JsonObject | None = None
 
 
 class FakeDevinSessionAdapter:
@@ -513,6 +514,53 @@ class FakeDevinSessionAdapter:
             )
             self._sessions[session_id] = session
             self._order.append(session_id)
+        return self._snapshot(session)
+
+    def create_native_session(
+        self,
+        task: TaskEnvelope,
+        *,
+        session_id: str,
+        status: SessionStatus = SessionStatus.RUNNING,
+        structured_output: JsonObject | None = None,
+    ) -> SessionSnapshot:
+        """Register a session Devin started on its own (native automation trigger).
+
+        ``task`` only lends the kind, commit and budget the snapshot needs;
+        ``structured_output`` is returned verbatim instead of the deterministic
+        payload so tests can drive the native triage contract.
+        """
+        normalized = normalize_session_id(session_id)
+        with self._lock:
+            if normalized in self._sessions:
+                raise ContractValidationError(
+                    ValidationCode.DUPLICATE_DELIVERY, "a session with this id already exists"
+                )
+            session = _FakeSession(
+                task=task,
+                session_id=normalized,
+                status=status,
+                workspace_status=(
+                    WorkspaceStatus.RELEASED if status.is_terminal else WorkspaceStatus.ACTIVE
+                ),
+                created_at=task.created_at,
+                updated_at=task.created_at,
+                structured_output=structured_output,
+            )
+            self._sessions[normalized] = session
+            self._order.append(normalized)
+        return self._snapshot(session)
+
+    def set_structured_output(
+        self, session_id: str, structured_output: JsonObject, *, complete: bool = False
+    ) -> SessionSnapshot:
+        with self._lock:
+            session = self._require(session_id)
+            session.structured_output = structured_output
+            if complete and not session.status.is_terminal:
+                session.status = SessionStatus.COMPLETED
+                session.workspace_status = WorkspaceStatus.RELEASED
+            session.updated_at = session.updated_at + timedelta(seconds=30)
         return self._snapshot(session)
 
     def advance(self, session_id: str) -> SessionSnapshot:
@@ -632,8 +680,8 @@ class FakeDevinSessionAdapter:
     def _snapshot(self, session: _FakeSession) -> SessionSnapshot:
         task = session.task
         pull_requests: tuple[PullRequestLink, ...] = ()
-        structured_output: JsonObject | None = None
-        if session.status is SessionStatus.COMPLETED:
+        structured_output: JsonObject | None = session.structured_output
+        if session.status is SessionStatus.COMPLETED and structured_output is None:
             payload = _deterministic_payload(task)
             structured_output = {"schema": task.output_schema}
             if isinstance(payload, FixOutput) and payload.pull_request is not None:

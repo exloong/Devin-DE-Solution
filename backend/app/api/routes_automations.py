@@ -18,6 +18,7 @@ from app.api.schemas import (
     AutomationOut,
     AutomationPage,
     AutomationSessions,
+    AutomationTriggerOut,
     AutomationUpdate,
     ProviderSessionOut,
 )
@@ -51,6 +52,13 @@ def automation_out(summary: AutomationSummary) -> AutomationOut:
         name=summary.name,
         enabled=summary.enabled,
         event_types=list(summary.event_types),
+        triggers=[
+            AutomationTriggerOut(
+                event_type=trigger.event_type,
+                conditions=dict(trigger.conditions) if trigger.conditions is not None else None,
+            )
+            for trigger in summary.triggers
+        ],
         prompt=summary.prompt,
         metadata=dict(summary.metadata),
         relay_kind=SessionKind(kind.value) if kind is not None else None,

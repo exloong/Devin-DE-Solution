@@ -17,6 +17,7 @@ from app.api.schemas import (
     AutomationStatus,
     DashboardSummary,
     Heartbeat,
+    IntakeStatus,
     Period,
     ProbeStatus,
     ProviderStatus,
@@ -168,6 +169,14 @@ def heartbeat(
     github = _provider(rows.get(runtime_status.PROVIDER_GITHUB), worker)
     devin = _provider(rows.get(runtime_status.PROVIDER_DEVIN), worker)
     webhook = rows.get(runtime_status.GITHUB_WEBHOOK)
+    poll = rows.get(runtime_status.DEVIN_AUTOMATION_POLL)
+    intake: IntakeStatus
+    if poll is not None and now - poll.updated_at <= WORKER_FRESH:
+        intake = "native"
+    elif poll is not None:
+        intake = "stale"
+    else:
+        intake = "none"
     reasons: list[str] = []
     if database != "ok":
         reasons.append("database is not reachable")
@@ -183,8 +192,10 @@ def heartbeat(
         reasons.append("Devin provider status has not been reported")
     elif devin == "dry_run":
         reasons.append("Devin sessions run in dry-run mode")
-    if webhook is None:
-        reasons.append("no GitHub webhook has been received")
+    if intake == "stale":
+        reasons.append("Devin automation intake poll is stale")
+    elif intake == "none" and devin == "connected":
+        reasons.append("no Devin automation intake poll has been observed")
     overall: SystemStatus
     if database != "ok" or worker == "unavailable":
         overall = "down"
@@ -200,6 +211,9 @@ def heartbeat(
         last_worker_heartbeat_at=worker_row.updated_at if worker_row else None,
         last_webhook_received_at=webhook.updated_at if webhook else None,
         last_webhook_event=webhook.instance_id if webhook else None,
+        intake=intake,
+        last_automation_poll_at=poll.updated_at if poll else None,
+        polled_automation_id=poll.instance_id if poll else None,
         last_session_launched_at=max((s.created_at for s in sessions), default=None),
         automations=[
             AutomationStatus(

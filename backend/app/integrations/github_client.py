@@ -63,6 +63,18 @@ MAX_PULL_REQUEST_FILE_PAGES = 30
 MAX_PULL_REQUEST_FILES = PULL_REQUEST_FILE_PAGE_SIZE * MAX_PULL_REQUEST_FILE_PAGES
 
 
+@dataclass(frozen=True)
+class IssueSnapshot:
+    """The parts of a Superset issue Relay needs to enroll it."""
+
+    number: int
+    title: str
+    body: str
+    state: str
+    labels: tuple[str, ...]
+    reporter_login: str
+
+
 class GitHubClient(Protocol):
     """The only GitHub operations Relay is allowed to perform."""
 
@@ -80,6 +92,9 @@ class GitHubClient(Protocol):
 
     def get_pull_request_head(self, pull_request_number: int) -> TargetCommit:
         """Resolve a pull request to its immutable current head."""
+
+    def get_issue(self, issue_number: int) -> IssueSnapshot:
+        """Read one Superset issue (title, body, state, labels, reporter)."""
 
 
 def _authorize(
@@ -121,10 +136,10 @@ class FakeGitHubAdapter:
         pull_request_heads: Mapping[int, TargetCommit] | None = None,
         known_reviewers: frozenset[str] | None = None,
         branch_head: TargetCommit | None = None,
+        issues: Mapping[int, IssueSnapshot] | None = None,
     ) -> None:
         if allowed_capabilities is not None and any(
-            not isinstance(capability, GitHubCapability)
-            for capability in allowed_capabilities
+            not isinstance(capability, GitHubCapability) for capability in allowed_capabilities
         ):
             raise ContractValidationError(
                 ValidationCode.PROHIBITED_CAPABILITY,
@@ -140,6 +155,7 @@ class FakeGitHubAdapter:
         self._pull_request_heads = dict(pull_request_heads or {})
         self._known_reviewers = known_reviewers
         self._branch_head = branch_head or TargetCommit(sha="0" * 40)
+        self._issues = dict(issues or {})
         self._recorded: list[RecordedCommand] = []
         self._comment_ids = count(start=9_001)
         self._pull_request_numbers = count(start=101)
@@ -177,9 +193,7 @@ class FakeGitHubAdapter:
             )
         if isinstance(command, CreateBranch):
             self._branches[command.branch_name] = command.base_commit
-            return BranchCreated(
-                branch_name=command.branch_name, commit=command.base_commit
-            )
+            return BranchCreated(branch_name=command.branch_name, commit=command.base_commit)
         if isinstance(command, CreatePullRequest):
             if command.head_branch not in self._branches:
                 raise ContractValidationError(
@@ -207,14 +221,10 @@ class FakeGitHubAdapter:
                 rejected: tuple[str, ...] = ()
             else:
                 accepted = tuple(
-                    login
-                    for login in command.reviewers
-                    if login in self._known_reviewers
+                    login for login in command.reviewers if login in self._known_reviewers
                 )
                 rejected = tuple(
-                    login
-                    for login in command.reviewers
-                    if login not in self._known_reviewers
+                    login for login in command.reviewers if login not in self._known_reviewers
                 )
             return ReviewersRequested(
                 pull_request_number=command.pull_request_number,
@@ -257,6 +267,15 @@ class FakeGitHubAdapter:
                 f"no recorded head for pull request {pull_request_number}",
             ) from error
 
+    def get_issue(self, issue_number: int) -> IssueSnapshot:
+        try:
+            return self._issues[issue_number]
+        except KeyError as error:
+            raise ContractValidationError(
+                ValidationCode.MALFORMED_RESPONSE,
+                f"no recorded issue {issue_number}",
+            ) from error
+
     @property
     def recorded(self) -> tuple[RecordedCommand, ...]:
         with self._lock:
@@ -267,9 +286,7 @@ class FakeGitHubAdapter:
         return tuple(entry.command for entry in self.recorded)
 
     def commands_for(self, capability: GitHubCapability) -> tuple[GitHubCommand, ...]:
-        return tuple(
-            entry.command for entry in self.recorded if entry.capability is capability
-        )
+        return tuple(entry.command for entry in self.recorded if entry.capability is capability)
 
 
 @dataclass
@@ -318,9 +335,7 @@ class LiveGitHubClient:
     def execute(self, command: GitHubCommand) -> CommandResult:
         _authorize(command, self.allowed_capabilities)
         if isinstance(command, PostIssueComment):
-            return self._post_comment(
-                issue_number=command.issue_number, body=command.body
-            )
+            return self._post_comment(issue_number=command.issue_number, body=command.body)
         if isinstance(command, AddIssueLabels):
             response = self._send(
                 "POST",
@@ -342,9 +357,7 @@ class LiveGitHubClient:
                 },
             )
             require_success(response, action="create branch")
-            return BranchCreated(
-                branch_name=command.branch_name, commit=command.base_commit
-            )
+            return BranchCreated(branch_name=command.branch_name, commit=command.base_commit)
         if isinstance(command, CreatePullRequest):
             payload = require_json_object(
                 self._send(
@@ -528,6 +541,36 @@ class LiveGitHubClient:
                 "pull request response has no head object",
             )
         return TargetCommit(sha=require_str(head, "sha", action="resolve pull request head"))
+
+    def get_issue(self, issue_number: int) -> IssueSnapshot:
+        _require_positive(issue_number, "issue number")
+        action = "read issue"
+        payload = require_json_object(self._send("GET", f"/issues/{issue_number}"), action=action)
+        if require_int(payload, "number", action=action) != issue_number:
+            raise ContractValidationError(
+                ValidationCode.MALFORMED_RESPONSE,
+                "response issue number does not match the request",
+            )
+        if isinstance(payload.get("pull_request"), Mapping):
+            raise ContractValidationError(
+                ValidationCode.MALFORMED_RESPONSE, f"#{issue_number} is a pull request"
+            )
+        body = payload.get("body")
+        labels: list[str] = []
+        for label in object_array(payload.get("labels"), action=action):
+            name = label.get("name")
+            if isinstance(name, str) and name:
+                labels.append(name)
+        user = payload.get("user")
+        reporter = user.get("login") if isinstance(user, Mapping) else None
+        return IssueSnapshot(
+            number=issue_number,
+            title=require_str(payload, "title", action=action),
+            body=body if isinstance(body, str) else "",
+            state=require_str(payload, "state", action=action),
+            labels=tuple(labels),
+            reporter_login=reporter if isinstance(reporter, str) and reporter else "unknown",
+        )
 
 
 def _require_positive(value: int, field_name: str) -> int:

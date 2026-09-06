@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -449,6 +449,7 @@ class AnalyticsSummary(ApiModel):
 ProbeStatus = Literal["ok", "stale", "unavailable"]
 ProviderStatus = Literal["connected", "dry_run", "stale", "unconfigured"]
 SystemStatus = Literal["healthy", "degraded", "down"]
+IntakeStatus = Literal["native", "stale", "none"]
 
 
 class ThroughputBucket(ApiModel):
@@ -515,6 +516,9 @@ class Heartbeat(ApiModel):
     last_worker_heartbeat_at: datetime | None = None
     last_webhook_received_at: datetime | None = None
     last_webhook_event: str | None = None
+    intake: IntakeStatus = "none"
+    last_automation_poll_at: datetime | None = None
+    polled_automation_id: str | None = None
     last_session_launched_at: datetime | None = None
     automations: list[AutomationStatus] = []
     overall: SystemStatus
@@ -631,6 +635,11 @@ class CommandAccepted(ApiModel):
 AutomationEventType = Literal["webhook:incoming"]
 
 
+class AutomationTriggerOut(ApiModel):
+    event_type: str
+    conditions: dict[str, Any] | None = None
+
+
 class AutomationOut(ApiModel):
     """A Devin automation as exposed to operators; inbox URL and secret are
     never included."""
@@ -639,6 +648,7 @@ class AutomationOut(ApiModel):
     name: str
     enabled: bool
     event_types: list[str]
+    triggers: list[AutomationTriggerOut] = []
     prompt: str | None = None
     metadata: dict[str, str]
     relay_kind: SessionKind | None = None

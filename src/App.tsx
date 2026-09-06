@@ -1109,15 +1109,15 @@ function connectionCards(heartbeat: Heartbeat | null, live: boolean, now: number
       icon: <GitPullRequest size={22} />,
       badge: githubBadge,
       tone: githubTone,
-      copy: 'Signed webhook receiver for issues opened/labeled on exloong/superset; API token stays server-side.',
-      detail: heartbeat ? `Last webhook ${formatAgo(heartbeat.last_webhook_received_at, now)}${heartbeat.last_webhook_event ? ` (${heartbeat.last_webhook_event})` : ''}` : 'No webhook has been observed.',
+      copy: 'Issues on exloong/superset are enrolled by Devin\'s own GitHub connection (github:issues automation); Relay\'s API token stays server-side for comments and evidence.',
+      detail: heartbeat ? `Devin automation polled ${formatAgo(heartbeat.last_automation_poll_at, now)}${heartbeat.last_webhook_received_at ? ` · optional webhook ${formatAgo(heartbeat.last_webhook_received_at, now)}` : ''}` : 'No automation poll has been observed.',
     },
     {
       name: 'Devin Automations',
       icon: <Zap size={22} />,
       badge: devinBadge,
       tone: devinTone,
-      copy: 'Two Relay-managed Devin Automations (webhook inbox → start_session): reproduction dispatched by the controller gate, fix dispatched only on owner authorization.',
+      copy: 'Two Relay-managed Devin Automations: reproduction on a native github:issues trigger (repo/labeled/bug), fix on an inbox fired only by owner authorization.',
       detail: heartbeat
         ? `Last session launched ${formatAgo(heartbeat.last_session_launched_at, now)}${heartbeat.automations.length ? ` · ${heartbeat.automations.map((a) => `${a.kind} ${a.automation_id}${a.enabled ? '' : ' (disabled)'}`).join(', ')}` : ' · automations not provisioned'}`
         : 'No session has been launched.',

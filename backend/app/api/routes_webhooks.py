@@ -6,7 +6,6 @@ from pathlib import Path
 
 from fastapi import APIRouter, Header, Request, status
 
-from app.api.controller_gate import GatePolicy, evaluate_issue_event, log_decision
 from app.api.deps import Ctx
 from app.domain.errors import DomainError, ErrorCode
 from app.domain.models import Actor, Event, Issue
@@ -123,48 +122,13 @@ async def github_webhook(
         if number is None:
             raise DomainError(ErrorCode.INVALID_INPUT, "issue number is required")
         if accepted.action in ("opened", "labeled"):
-            raw_labels = issue_data.get("labels")
-            label_items = raw_labels if isinstance(raw_labels, list) else []
-            labels = [
-                _text(_mapping(label), "name")
-                for label in label_items
-                if isinstance(label, Mapping)
-            ]
-            labels = [label for label in labels if label]
-            decision = evaluate_issue_event(
-                GatePolicy.from_env(),
-                repository=_text(_mapping(payload.get("repository")), "full_name"),
-                action=accepted.action,
-                issue_state=_text(issue_data, "state", "open"),
-                labels=labels,
-                label_added=_text(_mapping(payload.get("label")), "name") or None,
-                sender=actor_login,
-            )
-            log_decision(decision, accepted.delivery.delivery_id)
-            if not decision.accepted:
-                return {
-                    "accepted": True,
-                    "delivery": accepted.delivery.delivery_id,
-                    "action": "ignored",
-                    "reason": decision.reason,
-                }
-            if _issue_by_number(ctx, number) is not None and not _seen_delivery(
-                ctx, accepted.delivery.delivery_id
-            ):
-                return {
-                    "accepted": True,
-                    "delivery": accepted.delivery.delivery_id,
-                    "action": "ignored",
-                    "reason": "issue_already_enrolled",
-                }
-            event_type = EventType.ISSUE_OPENED
-            event_payload = {
-                "repository": ctx.scope.full_name,
-                "number": number,
-                "title": _text(issue_data, "title"),
-                "body": _text(issue_data, "body"),
-                "reporter": _text(_mapping(issue_data.get("user")), "login", actor_login),
-                "labels": labels,
+            # Intake is Devin-native: the reproduction automation's
+            # github:issues trigger enrolls issues, never this webhook.
+            return {
+                "accepted": True,
+                "delivery": accepted.delivery.delivery_id,
+                "action": "ignored",
+                "reason": "intake_is_devin_automation",
             }
         elif accepted.action == "reopened":
             issue = _issue_by_number(ctx, number)

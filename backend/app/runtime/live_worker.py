@@ -17,11 +17,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 
+from app.api.controller_gate import GatePolicy, evaluate_issue_event, log_decision
 from app.domain.models import (
     Actor,
     AgentSession,
@@ -37,16 +40,22 @@ from app.domain.models import (
     SessionEvent,
 )
 from app.domain.ports import UnitOfWork, UnitOfWorkFactory
-from app.domain.states import ActorRole, EventType, SessionKind, SessionState
+from app.domain.states import ActorRole, EventType, IssueState, SessionKind, SessionState
 from app.domain.transitions import TransitionService
 from app.integrations.codeowners import OwnerKind, ReviewerRouter, RoutingStatus
 from app.integrations.devin_automations import (
     AUTOMATION_KINDS,
+    DEFAULT_TRIGGER_LABEL,
+    GITHUB_ISSUES_EVENT_TYPE,
     AutomationHandle,
     AutomationSecretStore,
+    AutomationSessionRow,
     DevinAutomationClient,
     InMemoryAutomationSecretStore,
     LiveDevinAutomationClient,
+    NativeTriageOutput,
+    native_issue_number,
+    parse_native_triage_output,
 )
 from app.integrations.devin_review import (
     DevinReviewClient,
@@ -85,6 +94,18 @@ from app.integrations.tasks import (
 from app.integrations.transport import HttpxTransport
 
 SYSTEM_LOGIN = "relay-worker"
+NATIVE_SOURCE = "devin-automation"
+LOGGER = logging.getLogger("relay.native_intake")
+
+
+@dataclass
+class NativeIntakeState:
+    """What the worker last saw when polling the native reproduction automation."""
+
+    automation_id: str | None = None
+    last_polled_at: datetime | None = None
+    last_error: str | None = None
+    ignored_session_ids: set[str] = field(default_factory=set)
 
 
 def _required_secret(name: str) -> str:
@@ -128,6 +149,9 @@ class LiveWorkerRuntime:
     review: DevinReviewClient
     default_branch: str = "master"
     automations: DevinAutomationClient | None = None
+    gate_policy: GatePolicy = field(default_factory=GatePolicy.from_env)
+    trigger_label: str = DEFAULT_TRIGGER_LABEL
+    native_intake: NativeIntakeState = field(default_factory=NativeIntakeState)
 
     def automation_handles(self) -> dict[TaskKind, AutomationHandle]:
         """Find-or-create Relay's reproduction and fix automations."""
@@ -224,6 +248,7 @@ class LiveWorkerRuntime:
         raise RuntimeError(f"unsupported live job kind: {job.kind.value}")
 
     def sync(self) -> None:
+        self._adopt_native_sessions()
         self._link_dispatched_sessions()
         with self.uow_factory() as uow:
             sessions = [
@@ -236,13 +261,229 @@ class LiveWorkerRuntime:
             self._sync_session(session.id)
         self._sync_reviews()
 
+    # ------------------------------------------------------- native intake
+
+    def _adopt_native_sessions(self) -> None:
+        """Enroll issues from sessions Devin's own GitHub trigger started.
+
+        The reproduction automation fires on ``github:issues`` inside Devin, so
+        Relay learns about new work by listing that automation's sessions. A
+        session is adopted only once its structured output names a Superset
+        issue; the issue is then re-checked against the deterministic gate
+        and enrolled with the data read back from GitHub. Sessions that never
+        identify an issue, or fail the gate, are left alone.
+        """
+        if self.automations is None:
+            return
+        now = self.service.clock.now()
+        state = self.native_intake
+        try:
+            handle = self.automations.ensure_automation(TaskKind.REPRODUCTION, now=now)
+            if not handle.native:
+                return
+            rows = self.automations.list_automation_sessions(handle.automation_id)
+        except Exception as error:
+            state.last_error = f"{type(error).__name__}: {error}"
+            LOGGER.warning("native intake poll failed: %s", state.last_error)
+            return
+        state.automation_id = handle.automation_id
+        state.last_polled_at = now
+        state.last_error = None
+        with self.uow_factory() as uow:
+            known = {s.external_session_id for s in uow.list_sessions() if s.external_session_id}
+        for row in sorted(rows, key=lambda r: r.created_at):
+            if row.session_id in known or row.session_id in state.ignored_session_ids:
+                continue
+            number = native_issue_number(row.structured_output)
+            if number is None:
+                if row.is_terminal:
+                    state.ignored_session_ids.add(row.session_id)
+                    LOGGER.info(
+                        "ignoring automation session %s: it never identified an issue",
+                        row.session_id,
+                    )
+                continue
+            try:
+                adopted = self._adopt_native_session(handle, row, number, now)
+            except Exception:
+                LOGGER.exception("adopting automation session %s failed", row.session_id)
+                continue
+            if adopted is True:
+                known.add(row.session_id)
+            elif adopted is False:
+                state.ignored_session_ids.add(row.session_id)
+        self._expire_waiting_native_reproductions()
+
+    def _expire_waiting_native_reproductions(self) -> None:
+        with self.uow_factory() as uow:
+            waiting = [
+                s
+                for s in uow.list_sessions()
+                if self._is_native(s)
+                and s.kind is SessionKind.REPRODUCTION
+                and s.external_session_id is None
+                and s.state is SessionState.RUNNING
+            ]
+        for session in waiting:
+            self._expire_dispatch(session)
+
+    def _adopt_native_session(
+        self,
+        handle: AutomationHandle,
+        row: AutomationSessionRow,
+        number: int,
+        now: datetime,
+    ) -> bool | None:
+        """``True`` once linked, ``False`` to ignore for good, ``None`` to retry later."""
+        snapshot = self.github.get_issue(number)
+        policy = replace(
+            self.gate_policy,
+            trusted_label=self.gate_policy.trusted_label or self.trigger_label,
+        )
+        decision = evaluate_issue_event(
+            policy,
+            repository=SUPERSET_REPOSITORY.full_name,
+            action="opened",
+            issue_state=snapshot.state,
+            labels=snapshot.labels,
+            label_added=None,
+            sender=snapshot.reporter_login,
+        )
+        log_decision(decision, f"devin:{row.session_id}")
+        if not decision.accepted:
+            return False
+        with self.uow_factory() as uow:
+            repo = uow.get_repository()
+            issue = uow.get_issue_by_number(repo.id, number) if repo is not None else None
+            if issue is not None:
+                waiting = self._waiting_native_reproduction(uow, issue)
+                if waiting is not None:
+                    self._bind_native_row(waiting, handle, row, now)
+                    uow.save_session(waiting)
+                    uow.add_session_event(
+                        SessionEvent(
+                            session_id=waiting.id,
+                            label="Devin session adopted",
+                            detail=f"Automation {handle.automation_id} started {row.session_id}",
+                            created_at=now,
+                        )
+                    )
+                    return True
+            if issue is None:
+                event = Event(
+                    issue_id=None,
+                    source="devin",
+                    delivery_id=f"automation:{row.session_id}",
+                    type=EventType.ISSUE_OPENED,
+                    actor=self._actor(ActorRole.SYSTEM),
+                    payload={
+                        "repository": SUPERSET_REPOSITORY.full_name,
+                        "number": number,
+                        "title": snapshot.title,
+                        "body": snapshot.body,
+                        "reporter": snapshot.reporter_login,
+                        "labels": list(snapshot.labels),
+                    },
+                    correlation_id=f"devin:{row.session_id}",
+                )
+                issue = self.service.apply(uow, event).issue
+                if issue is None:
+                    raise RuntimeError("native enrollment returned no issue")
+            if issue.state is not IssueState.TRIAGE:
+                LOGGER.info(
+                    "issue #%s is %s; not adopting automation session %s",
+                    number,
+                    issue.state.value,
+                    row.session_id,
+                )
+                return False
+            if any(
+                s.kind == SessionKind.TRIAGE and s.issue_revision == issue.revision
+                for s in uow.list_sessions(issue_id=issue.id)
+            ):
+                # Relay's own classification is underway; the reproduction it may
+                # create will wait for this session, so look again next poll.
+                return None
+            target = self._target_commit(uow, issue)
+            session = AgentSession(
+                issue_id=issue.id,
+                issue_revision=issue.revision,
+                kind=SessionKind.TRIAGE,
+                title=f"Triage {issue.key}",
+                state=SessionState.RUNNING,
+                target_commit=target.sha,
+                budget=SessionBudget(
+                    wall_clock_seconds=5_400,
+                    max_retries=1,
+                    allowed_capabilities=["read_issue_context", "read_superset_repository"],
+                    max_output_bytes=262_144,
+                ),
+                workspace_released=False,
+                workspace_name=f"superset-triage-{issue.external_number}",
+                trigger=GITHUB_ISSUES_EVENT_TYPE,
+                correlation_id=issue.correlation_id,
+                created_at=row.created_at,
+                updated_at=now,
+            )
+            self._bind_native_row(session, handle, row, now)
+            uow.add_session(session)
+            uow.add_session_event(
+                SessionEvent(
+                    session_id=session.id,
+                    label="Devin session adopted",
+                    detail=(
+                        f"Started by automation {handle.automation_id} on"
+                        f" {GITHUB_ISSUES_EVENT_TYPE} for #{number}"
+                    ),
+                    created_at=now,
+                )
+            )
+        return True
+
+    @staticmethod
+    def _bind_native_row(
+        session: AgentSession, handle: AutomationHandle, row: AutomationSessionRow, now: datetime
+    ) -> None:
+        session.automation_id = handle.automation_id
+        session.dispatched_at = session.dispatched_at or row.created_at
+        session.trigger = GITHUB_ISSUES_EVENT_TYPE
+        session.external_session_id = row.session_id
+        session.external_session_url = row.url
+        session.current_action = "Devin session running"
+        session.progress_source = NATIVE_SOURCE
+        session.progress_synced_at = now
+        session.started_at = session.started_at or row.created_at
+        session.last_heartbeat_at = row.updated_at
+        session.updated_at = now
+
+    @staticmethod
+    def _waiting_native_reproduction(uow: UnitOfWork, issue: Issue) -> AgentSession | None:
+        return next(
+            (
+                s
+                for s in uow.list_sessions(issue_id=issue.id)
+                if s.kind is SessionKind.REPRODUCTION
+                and s.trigger == GITHUB_ISSUES_EVENT_TYPE
+                and s.external_session_id is None
+                and s.state is SessionState.RUNNING
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _is_native(session: AgentSession) -> bool:
+        return session.trigger == GITHUB_ISSUES_EVENT_TYPE and session.automation_id is not None
+
+    # ----------------------------------------------------- inbox dispatch
+
     def _link_dispatched_sessions(self) -> None:
-        """Bind automation-spawned Devin sessions to the Relay sessions that asked for them.
+        """Bind inbox-dispatched Devin sessions to the Relay sessions that asked for them.
 
         Devin creates the session asynchronously after the inbox post, so the
         external id is unknown at dispatch time. Spawned sessions are matched
         by ``structured_output.task_id`` when the agent has already echoed it,
-        otherwise oldest-unlinked to oldest-dispatched per automation.
+        otherwise oldest-unlinked to oldest-dispatched per automation. Native
+        (``github:issues``) sessions never wait here: they are adopted by issue.
         """
         if self.automations is None:
             return
@@ -257,6 +498,7 @@ class LiveWorkerRuntime:
                 and s.external_session_id is None
                 and s.dispatched_at is not None
                 and s.state is SessionState.RUNNING
+                and not self._is_native(s)
             ),
             key=lambda s: (s.dispatched_at or s.created_at, s.created_at),
         )
@@ -400,7 +642,11 @@ class LiveWorkerRuntime:
                 raise RuntimeError(
                     f"{task.kind.value} sessions are launched only through Devin Automations"
                 )
-            self._dispatch_to_automation(uow, issue, session, task)
+            handle = self.automations.ensure_automation(task.kind, now=self.service.clock.now())
+            if handle.native:
+                self._await_native_session(uow, issue, session, handle)
+            else:
+                self._dispatch_to_automation(uow, issue, session, task)
             return
         snapshot = self.devin.create_session(
             task,
@@ -417,6 +663,39 @@ class LiveWorkerRuntime:
                 label="Devin session created",
                 detail=f"Bound to {task.target_commit.short_sha}",
                 created_at=self.service.clock.now(),
+            )
+        )
+
+    def _await_native_session(
+        self, uow: UnitOfWork, issue: Issue, session: AgentSession, handle: AutomationHandle
+    ) -> None:
+        """Park a Relay-started reproduction until Devin's ``github:issues`` session shows up.
+
+        Relay cannot post to a native automation; the session Devin starts for
+        the same issue is bound to this record by issue number during adoption.
+        """
+        now = self.service.clock.now()
+        session.automation_id = handle.automation_id
+        session.dispatched_at = now
+        session.trigger = GITHUB_ISSUES_EVENT_TYPE
+        session.state = SessionState.RUNNING
+        session.current_action = (
+            f"Waiting for Devin's {GITHUB_ISSUES_EVENT_TYPE} automation session"
+            f" for #{issue.external_number}"
+        )
+        session.progress_source = NATIVE_SOURCE
+        session.progress_synced_at = now
+        session.updated_at = now
+        uow.save_session(session)
+        uow.add_session_event(
+            SessionEvent(
+                session_id=session.id,
+                label="Awaiting Devin automation",
+                detail=(
+                    f"Automation {handle.automation_id} starts sessions from Devin's GitHub"
+                    f" integration; Relay links the one for #{issue.external_number}."
+                ),
+                created_at=now,
             )
         )
 
@@ -495,6 +774,9 @@ class LiveWorkerRuntime:
     def _complete_session(self, uow: UnitOfWork, issue: Issue, session: AgentSession) -> None:
         task = self._task(uow, issue, session)
         external_id = session.external_session_id or ""
+        if self._is_native(session):
+            self._complete_native_session(uow, issue, session, task)
+            return
         if session.automation_id is not None:
             # Automation-spawned sessions carry no per-task tag, so the only
             # identity proof is the task_id the agent echoes in its output.
@@ -601,6 +883,187 @@ class LiveWorkerRuntime:
             )
         else:
             raise RuntimeError("unsupported Devin result payload")
+
+    def _complete_native_session(
+        self, uow: UnitOfWork, issue: Issue, session: AgentSession, task: TaskEnvelope
+    ) -> None:
+        """Apply the triage + reproduction outcome of a natively triggered session.
+
+        One Devin session covers both phases, so its output is replayed as a
+        classification result and, when the context gate passed, as the
+        reproduction result of the session the lifecycle created for it.
+        """
+        external_id = session.external_session_id or ""
+        snapshot = self.devin.get_session(external_id, task=task)
+        output = parse_native_triage_output(snapshot.structured_output)
+        if output.issue_number != issue.external_number:
+            raise RuntimeError(
+                f"Devin session {external_id} reported issue #{output.issue_number},"
+                f" expected #{issue.external_number}"
+            )
+        if session.kind is SessionKind.REPRODUCTION:
+            self._apply_native_reproduction(uow, issue, session, output, task.target_commit)
+            return
+        if session.kind is not SessionKind.TRIAGE:
+            raise RuntimeError("native sessions only cover triage and reproduction")
+        if output.classification is None:
+            raise RuntimeError(f"Devin session {external_id} ended without a classification")
+        category = output.effective_classification
+        missing_fields: list[dict[str, object]] = [
+            {
+                "field": item.field,
+                "prompt": item.prompt,
+                "why_it_matters": item.why_it_matters,
+                "safe_example": item.safe_example,
+            }
+            for item in output.missing_fields
+        ]
+        if category == "needs_information" and not missing_fields:
+            missing_fields.append(
+                {
+                    "field": "reproduction_context",
+                    "prompt": output.rationale or "Please add reproduction context.",
+                    "why_it_matters": (
+                        "Relay needs portable context before isolated reproduction."
+                    ),
+                    "safe_example": "Version, minimal steps, expected result, and actual result.",
+                }
+            )
+        payload: dict[str, object] = {
+            "category": category,
+            "security_signal": category == "suspected_security",
+            "missing_fields": missing_fields,
+        }
+        if output.duplicate_of is not None:
+            payload["duplicate_of"] = output.duplicate_of
+        self._apply_session(uow, session, EventType.CLASSIFICATION_RESULT, payload)
+        self._finish_native_triage(uow, session, output)
+        refreshed = uow.get_issue(issue.id)
+        if refreshed is None or refreshed.state is not IssueState.REPRODUCING:
+            return
+        reproduction = next(
+            (
+                s
+                for s in uow.list_sessions(issue_id=issue.id)
+                if s.kind is SessionKind.REPRODUCTION
+                and s.issue_revision == refreshed.revision
+                and s.external_session_id is None
+                and s.state is SessionState.RUNNING
+            ),
+            None,
+        )
+        if reproduction is None:
+            return
+        reproduction.automation_id = session.automation_id
+        reproduction.dispatched_at = session.dispatched_at
+        reproduction.trigger = GITHUB_ISSUES_EVENT_TYPE
+        reproduction.target_commit = reproduction.target_commit or session.target_commit
+        self._attach_snapshot(reproduction, snapshot)
+        reproduction.progress_source = NATIVE_SOURCE
+        reproduction.progress_synced_at = self.service.clock.now()
+        uow.save_session(reproduction)
+        uow.add_session_event(
+            SessionEvent(
+                session_id=reproduction.id,
+                label="Devin session adopted",
+                detail=f"Reproduction ran inside triage session {external_id}",
+                created_at=self.service.clock.now(),
+            )
+        )
+        self._apply_native_reproduction(
+            uow,
+            refreshed,
+            reproduction,
+            output,
+            TargetCommit(sha=reproduction.target_commit) if reproduction.target_commit else None,
+        )
+
+    def _finish_native_triage(
+        self, uow: UnitOfWork, session: AgentSession, output: NativeTriageOutput
+    ) -> None:
+        current = uow.get_session(session.id)
+        if current is None or current.state is not SessionState.RUNNING:
+            return
+        now = self.service.clock.now()
+        current.state = SessionState.COMPLETED
+        current.finished_at = now
+        current.workspace_released = True
+        current.workspace_released_at = current.workspace_released_at or now
+        current.workspace_name = None
+        current.current_action = None
+        current.next_checkpoint = None
+        current.updated_at = now
+        uow.save_session(current)
+        completeness = (
+            "unknown" if output.context_completeness is None else f"{output.context_completeness}%"
+        )
+        uow.add_session_event(
+            SessionEvent(
+                session_id=current.id,
+                label="Triage complete",
+                detail=(
+                    f"Classified as {output.effective_classification};"
+                    f" context completeness {completeness}"
+                ),
+                created_at=now,
+            )
+        )
+
+    def _apply_native_reproduction(
+        self,
+        uow: UnitOfWork,
+        issue: Issue,
+        session: AgentSession,
+        output: NativeTriageOutput,
+        target: TargetCommit | None,
+    ) -> None:
+        reproduction = output.reproduction
+        if reproduction is None:
+            self._fail_session(
+                uow, issue, session, "Devin session ended without reproduction evidence"
+            )
+            return
+        payload = {
+            "session_id": str(session.id),
+            "reproduced": reproduction.reproduced,
+            "observed_behavior": reproduction.observed_behavior,
+            "expected_behavior": reproduction.target_behavior,
+            "control_behavior": reproduction.control_behavior,
+            "attempts": reproduction.attempts,
+            "evidence": [
+                {
+                    "kind": "run_log",
+                    "title": "Observed behavior",
+                    "summary": reproduction.observed_behavior,
+                },
+                {
+                    "kind": "result_matrix",
+                    "title": "Target and control behavior",
+                    "summary": (
+                        f"Target: {reproduction.target_behavior}; "
+                        f"control: {reproduction.control_behavior}"
+                    ),
+                },
+            ],
+        }
+        self._apply_session(uow, session, EventType.REPRODUCTION_RESULT, payload)
+        commit = reproduction.target_commit or (
+            target.short_sha if target else "the default branch"
+        )
+        self.github.execute(
+            PostIssueComment(
+                repository=SUPERSET_REPOSITORY,
+                issue_number=issue.external_number,
+                body=format_reproduction_outcome_comment(
+                    reproduced=reproduction.reproduced,
+                    observed_behavior=reproduction.observed_behavior,
+                    verification=(
+                        f"Attempted {reproduction.attempts} isolated run(s) against "
+                        f"{commit}. Human bug confirmation is still required."
+                    ),
+                ),
+            )
+        )
 
     def _fail_session(
         self,
@@ -994,12 +1457,15 @@ def live_runtime_from_env(
         org_id=org_id,
         policy=task_policy,
     )
+    gate_policy = GatePolicy.from_env()
+    trigger_label = gate_policy.trusted_label or DEFAULT_TRIGGER_LABEL
     automations = LiveDevinAutomationClient(
         transport=transport,
         token_provider=StaticTokenProvider(devin_token),
         org_id=org_id,
         sessions=devin,
         secret_store=automation_secrets or InMemoryAutomationSecretStore(),
+        trigger_label=trigger_label,
     )
     return LiveWorkerRuntime(
         service=service,
@@ -1015,4 +1481,6 @@ def live_runtime_from_env(
         ),
         default_branch=os.environ.get("GITHUB_DEFAULT_BRANCH", "master"),
         automations=automations,
+        gate_policy=gate_policy,
+        trigger_label=trigger_label,
     )
