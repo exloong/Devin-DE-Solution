@@ -31,6 +31,8 @@ The initial implementation uses:
 - live adapters restricted to `exloong/superset`;
 - `/api/v1` for frontend/backend communication;
 - UUID resource IDs, UTC timestamps, and explicit resource versions;
+- server-derived authenticated principals for every command;
+- `Idempotency-Key` and `If-Match` command headers;
 - deterministic lifecycle transitions and human gates.
 
 Agents may implement live adapter clients, but tests must not require network
@@ -71,6 +73,8 @@ request, close an issue as fixed, or publish a suspected security report.
 - illegal transitions return a stable conflict code;
 - unavailable reporter evidence does not become reproduction-ready;
 - owner confirmation is required before `fix_authorized`;
+- callers cannot assign themselves owner, security, or operator roles;
+- approval and review evidence are bound to the current pull-request head;
 - waiting states do not report a running workspace;
 - tests, formatting, lint, and type checking pass.
 
@@ -90,7 +94,9 @@ request, close an issue as fixed, or publish a suspected security report.
 4. A GitHub client boundary restricted to `exloong/superset`, including
    reviewer requests and `.github/CODEOWNERS`-based candidate routing.
 5. Typed Devin session task/result envelopes and a v3 client boundary for
-   create, inspect, list, message, cancel, outputs, and canonical session links.
+   create, inspect, list, message, outputs, and canonical session links.
+   Cancellation must be explicitly unavailable unless a documented endpoint
+   exists; the client must not invent one.
 6. A Devin Review client boundary for trigger, status, and findings.
 7. Deterministic mock adapters for classification, reproduction, evidence,
    fix, session progress, conversation, and review results.
@@ -102,6 +108,7 @@ request, close an issue as fixed, or publish a suspected security report.
 
 - no network call is required by tests;
 - all repository operations reject targets other than `exloong/superset`;
+- reviewer routing covers every changed path and fails closed on ambiguity;
 - public writes and agent capabilities are explicit typed commands;
 - merge, issue closure, security publication, and reporter script execution
   have no supported command;
