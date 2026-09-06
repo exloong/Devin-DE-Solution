@@ -10,6 +10,7 @@ from types import MappingProxyType
 from uuid import UUID
 
 from .errors import ContractValidationError, ValidationCode
+from .json_values import JsonObject
 from .repository import (
     SUPERSET_REPOSITORY,
     RepositoryIdentity,
@@ -60,6 +61,135 @@ OUTPUT_SCHEMAS: Mapping[TaskKind, str] = MappingProxyType(
         TaskKind.FIX: "fix_result.v1",
     }
 )
+
+JSON_SCHEMA_DRAFT = "http://json-schema.org/draft-07/schema#"
+
+_STRING: JsonObject = {"type": "string", "minLength": 1}
+_STRING_ARRAY: JsonObject = {"type": "array", "items": dict(_STRING)}
+_POSITIVE_INT: JsonObject = {"type": "integer", "minimum": 1}
+_PULL_REQUEST: JsonObject = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["repository", "number", "html_url", "head_branch"],
+    "properties": {
+        "repository": {"const": SUPERSET_REPOSITORY.full_name},
+        "number": dict(_POSITIVE_INT),
+        "html_url": {
+            "type": "string",
+            "pattern": (
+                "^https://github\\.com/"
+                f"{SUPERSET_REPOSITORY.owner}/{SUPERSET_REPOSITORY.name}"
+                "/pull/[1-9][0-9]*$"
+            ),
+        },
+        "head_branch": dict(_STRING),
+    },
+}
+
+
+def _draft7_object(
+    schema_id: str,
+    properties: Mapping[str, JsonObject],
+    required: tuple[str, ...],
+) -> JsonObject:
+    """Build one closed Draft-7 object schema.
+
+    ``additionalProperties`` is false so a session cannot return extra keys
+    that the platform's own structured-output validation would let through.
+    """
+    return {
+        "$schema": JSON_SCHEMA_DRAFT,
+        "title": schema_id,
+        "type": "object",
+        "additionalProperties": False,
+        "required": list(required),
+        "properties": {name: dict(value) for name, value in properties.items()},
+    }
+
+
+OUTPUT_JSON_SCHEMAS: Mapping[TaskKind, JsonObject] = MappingProxyType(
+    {
+        TaskKind.CLASSIFICATION: _draft7_object(
+            OUTPUT_SCHEMAS[TaskKind.CLASSIFICATION],
+            {
+                "classification": {
+                    "enum": [
+                        "bug",
+                        "not_a_bug",
+                        "needs_information",
+                        "suspected_security",
+                        "duplicate",
+                        "unsupported",
+                    ]
+                },
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "rationale": _STRING,
+                "schema": _STRING,
+            },
+            ("classification", "confidence", "rationale"),
+        ),
+        TaskKind.REPRODUCTION: _draft7_object(
+            OUTPUT_SCHEMAS[TaskKind.REPRODUCTION],
+            {
+                "reproduced": {"type": "boolean"},
+                "attempts": _POSITIVE_INT,
+                "observed_behavior": _STRING,
+                "target_behavior": _STRING,
+                "control_behavior": _STRING,
+                "schema": _STRING,
+            },
+            (
+                "reproduced",
+                "attempts",
+                "observed_behavior",
+                "target_behavior",
+                "control_behavior",
+            ),
+        ),
+        TaskKind.EVIDENCE_PACKET: _draft7_object(
+            OUTPUT_SCHEMAS[TaskKind.EVIDENCE_PACKET],
+            {
+                "observed_behavior": _STRING,
+                "expected_behavior_evidence": _STRING,
+                "environment": _STRING,
+                "minimal_condition": _STRING,
+                "repeat_count": _POSITIVE_INT,
+                "remaining_uncertainty": _STRING,
+                "schema": _STRING,
+            },
+            (
+                "observed_behavior",
+                "expected_behavior_evidence",
+                "environment",
+                "minimal_condition",
+                "repeat_count",
+                "remaining_uncertainty",
+            ),
+        ),
+        TaskKind.FIX: _draft7_object(
+            OUTPUT_SCHEMAS[TaskKind.FIX],
+            {
+                "summary": _STRING,
+                "branch_name": _STRING,
+                "regression_test_paths": _STRING_ARRAY,
+                "pull_requests": {"type": "array", "items": dict(_PULL_REQUEST)},
+                "schema": _STRING,
+            },
+            ("summary", "branch_name", "regression_test_paths"),
+        ),
+    }
+)
+
+
+def output_json_schema(kind: TaskKind) -> JsonObject:
+    """Return the Draft-7 schema a session of ``kind`` must satisfy."""
+    schema = OUTPUT_JSON_SCHEMAS.get(kind)
+    if schema is None:
+        raise ContractValidationError(
+            ValidationCode.MALFORMED_ENVELOPE, "task kind has no output schema"
+        )
+    return schema
+
 
 DEFAULT_ALLOWED_CAPABILITIES: Mapping[TaskKind, frozenset[AgentCapability]] = (
     MappingProxyType(
@@ -138,8 +268,18 @@ class CapabilityBudget:
     wall_seconds: int
     retry_limit: int = 1
     max_output_bytes: int = 262_144
+    max_acu: int | None = None
 
     def __post_init__(self) -> None:
+        if self.max_acu is not None and (
+            isinstance(self.max_acu, bool)
+            or not isinstance(self.max_acu, int)
+            or self.max_acu < 1
+        ):
+            raise ContractValidationError(
+                ValidationCode.INVALID_BUDGET,
+                "max_acu must be a positive ACU count when set",
+            )
         if self.wall_seconds < 1:
             raise ContractValidationError(
                 ValidationCode.INVALID_BUDGET, "wall_seconds must be positive"
@@ -161,6 +301,7 @@ class TaskPolicy:
     max_wall_seconds: int = 3_600
     max_retry_limit: int = 2
     max_output_bytes: int = 1_048_576
+    max_acu_ceiling: int = 10
     allowed_capabilities: Mapping[TaskKind, frozenset[AgentCapability]] = (
         DEFAULT_ALLOWED_CAPABILITIES
     )
@@ -415,6 +556,10 @@ def validate_task(task: TaskEnvelope, policy: TaskPolicy | None = None) -> None:
         task.budget.wall_seconds > policy.max_wall_seconds
         or task.budget.retry_limit > policy.max_retry_limit
         or task.budget.max_output_bytes > policy.max_output_bytes
+        or (
+            task.budget.max_acu is not None
+            and task.budget.max_acu > policy.max_acu_ceiling
+        )
     ):
         raise ContractValidationError(
             ValidationCode.INVALID_BUDGET, "task exceeds its budget policy"

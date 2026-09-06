@@ -268,6 +268,7 @@ def test_documented_statuses_and_details_map_onto_relay_states() -> None:
     assert map_session_status("resuming") is SessionStatus.RUNNING
     assert map_session_status("suspended") is SessionStatus.NEEDS_ATTENTION
     assert map_session_status("exit", "finished") is SessionStatus.COMPLETED
+    assert map_session_status("running", "finished") is SessionStatus.COMPLETED
     assert map_session_status("exit", "user_request") is SessionStatus.CANCELLED
     assert map_session_status("exit", "out_of_credits") is SessionStatus.FAILED
     assert map_session_status("error") is SessionStatus.FAILED
@@ -293,6 +294,16 @@ def test_organization_id_is_validated_before_any_request() -> None:
     assert transport.requests == ()
 
 
+def relay_tags() -> list[JsonValue]:
+    return [
+        "relay",
+        "kind:classification",
+        "task:11111111-1111-1111-1111-111111111111",
+        "repo:exloong/superset",
+        f"commit:{TARGET_SHA}",
+    ]
+
+
 def session_payload(**overrides: JsonValue) -> dict[str, JsonValue]:
     payload: dict[str, JsonValue] = {
         "session_id": "devin-abc123",
@@ -301,14 +312,13 @@ def session_payload(**overrides: JsonValue) -> dict[str, JsonValue]:
         "status_detail": "working",
         "created_at": CREATED_AT,
         "updated_at": UPDATED_AT,
-        "tags": [
-            "relay",
-            "kind:classification",
-            "task:11111111-1111-1111-1111-111111111111",
-            f"commit:{TARGET_SHA}",
-        ],
+        "tags": relay_tags(),
     }
     payload.update(overrides)
+    if "url" not in payload:
+        session_id = payload["session_id"]
+        assert isinstance(session_id, str)
+        payload["url"] = canonical_session_url(session_id)
     return payload
 
 
@@ -327,7 +337,18 @@ def test_live_client_creates_a_session_on_the_organization_scoped_path() -> None
     assert request.method == "POST"
     assert request.url == SESSIONS_URL
     assert request.json_body is not None
-    assert set(request.json_body) == {"prompt", "title", "max_acu_limit", "tags"}
+    assert set(request.json_body) == {
+        "prompt",
+        "title",
+        "repos",
+        "resumable",
+        "bypass_approval",
+        "secret_ids",
+        "knowledge_ids",
+        "structured_output_required",
+        "structured_output_schema",
+        "tags",
+    }
     tags = request.json_body["tags"]
     assert isinstance(tags, list)
     assert f"commit:{task.target_commit.sha}" in tags
@@ -383,8 +404,8 @@ def test_live_client_follows_the_documented_session_cursor() -> None:
         "devin-abc123",
         "devin-def456",
     ]
-    assert transport.requests[0].query == {"first": "5"}
-    assert transport.requests[1].query == {"first": "4", "after": "cursor-1"}
+    assert transport.requests[0].query == {"first": "50"}
+    assert transport.requests[1].query == {"first": "50", "after": "cursor-1"}
 
 
 def test_live_client_rejects_a_page_that_claims_a_missing_cursor() -> None:
@@ -681,3 +702,236 @@ def test_structured_output_pull_requests_must_target_superset() -> None:
             },
         )
     assert error.value.code is ValidationCode.UNAUTHORIZED_REPOSITORY
+
+
+def create_body(task: TaskEnvelope) -> dict[str, JsonValue]:
+    transport = RecordedTransport([HttpResponse(200, session_payload())])
+    live_client(transport).create_session(task)
+    body = transport.requests[0].json_body
+    assert body is not None
+    return dict(body)
+
+
+def test_create_states_every_grant_explicitly() -> None:
+    body = create_body(make_task())
+
+    assert body["repos"] == ["exloong/superset"]
+    assert body["resumable"] is False
+    assert body["bypass_approval"] is False
+    assert body["secret_ids"] == []
+    assert body["knowledge_ids"] == []
+
+
+def test_configured_knowledge_ids_are_the_only_ones_sent() -> None:
+    transport = RecordedTransport([HttpResponse(200, session_payload())])
+    client = LiveDevinSessionClient(
+        transport=transport,
+        token_provider=TOKEN,
+        org_id=ORG_ID,
+        knowledge_ids=("note-abc123",),
+    )
+
+    client.create_session(make_task())
+
+    body = transport.requests[0].json_body
+    assert body is not None
+    assert body["knowledge_ids"] == ["note-abc123"]
+
+
+def test_wall_clock_budget_is_never_sent_as_an_acu_limit() -> None:
+    body = create_body(make_task(wall_seconds=3_600))
+
+    assert "max_acu_limit" not in body
+
+
+def test_an_explicit_acu_budget_is_sent_verbatim() -> None:
+    body = create_body(make_task(max_acu=3))
+
+    assert body["max_acu_limit"] == 3
+
+
+def test_an_acu_budget_above_the_policy_ceiling_is_rejected() -> None:
+    transport = RecordedTransport()
+
+    with pytest.raises(ContractValidationError) as error:
+        live_client(transport).create_session(make_task(max_acu=1_000))
+
+    assert error.value.code is ValidationCode.INVALID_BUDGET
+    assert transport.requests == ()
+
+
+def test_a_non_positive_acu_budget_is_rejected() -> None:
+    with pytest.raises(ContractValidationError) as error:
+        make_task(max_acu=0)
+    assert error.value.code is ValidationCode.INVALID_BUDGET
+
+
+@pytest.mark.parametrize("kind", list(TaskKind))
+def test_each_kind_sends_a_draft_seven_schema_and_requires_output(
+    kind: TaskKind,
+) -> None:
+    body = create_body(make_task(kind))
+
+    assert body["structured_output_required"] is True
+    schema = body["structured_output_schema"]
+    assert isinstance(schema, dict)
+    assert schema["$schema"] == "http://json-schema.org/draft-07/schema#"
+    assert schema["type"] == "object"
+    assert schema["additionalProperties"] is False
+    assert schema["title"] == make_task(kind).output_schema
+    assert isinstance(schema["required"], list)
+    assert schema["required"]
+    properties = schema["properties"]
+    assert isinstance(properties, dict)
+    for name in schema["required"]:
+        assert isinstance(name, str)
+        assert name in properties
+
+
+def test_a_running_session_reported_as_finished_is_completed_and_released() -> None:
+    transport = RecordedTransport(
+        [HttpResponse(200, session_payload(status="running", status_detail="finished"))]
+    )
+
+    snapshot = live_client(transport).get_session("devin-abc123")
+
+    assert snapshot.status is SessionStatus.COMPLETED
+    assert snapshot.workspace_status is WorkspaceStatus.RELEASED
+
+
+def test_a_desktop_url_in_the_response_is_not_parsed() -> None:
+    transport = RecordedTransport(
+        [
+            HttpResponse(
+                200, session_payload(desktop_url="https://app.devin.ai/desktop/abc123")
+            )
+        ]
+    )
+
+    snapshot = live_client(transport).get_session("devin-abc123")
+
+    assert snapshot.links.desktop_url is None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://app.devin.ai/sessions/other",
+        "https://app.devin.example/sessions/abc123",
+        "http://app.devin.ai/sessions/abc123",
+        "https://app.devin.ai/sessions/abc123/messages",
+    ],
+)
+def test_a_session_url_that_is_not_canonical_fails_closed(url: str) -> None:
+    transport = RecordedTransport([HttpResponse(200, session_payload(url=url))])
+
+    with pytest.raises(ContractValidationError) as error:
+        live_client(transport).get_session("devin-abc123")
+    assert error.value.code is ValidationCode.MALFORMED_RESPONSE
+
+
+def test_a_session_without_a_url_fails_closed() -> None:
+    payload = session_payload()
+    del payload["url"]
+    transport = RecordedTransport([HttpResponse(200, payload)])
+
+    with pytest.raises(ContractValidationError) as error:
+        live_client(transport).get_session("devin-abc123")
+    assert error.value.code is ValidationCode.MALFORMED_RESPONSE
+
+
+def foreign_session_payload(session_id: str, **tags: JsonValue) -> dict[str, JsonValue]:
+    """A session in the same organization that Relay did not create."""
+    payload = session_payload(session_id=session_id)
+    payload.update(tags)
+    return payload
+
+
+def test_listing_skips_sessions_that_are_not_relays_own() -> None:
+    other_repo_tags: list[JsonValue] = [
+        tag if tag != "repo:exloong/superset" else "repo:exloong/other"
+        for tag in relay_tags()
+    ]
+    transport = RecordedTransport(
+        [
+            HttpResponse(
+                200,
+                {
+                    "items": [
+                        foreign_session_payload("devin-untagged", tags=[]),
+                        foreign_session_payload("devin-partial", tags=["relay"]),
+                        foreign_session_payload(
+                            "devin-otherrepo", tags=other_repo_tags
+                        ),
+                        session_payload(),
+                    ],
+                    "has_next_page": False,
+                    "end_cursor": None,
+                },
+            )
+        ]
+    )
+
+    listed = live_client(transport).list_sessions(limit=10)
+
+    assert [snapshot.session_id for snapshot in listed] == ["devin-abc123"]
+
+
+def test_listing_keeps_paginating_until_the_relay_limit_is_reached() -> None:
+    transport = RecordedTransport(
+        [
+            HttpResponse(
+                200,
+                {
+                    "items": [foreign_session_payload("devin-noise1", tags=[])],
+                    "has_next_page": True,
+                    "end_cursor": "cursor-1",
+                },
+            ),
+            HttpResponse(
+                200,
+                {
+                    "items": [
+                        foreign_session_payload("devin-noise2", tags=[]),
+                        session_payload(session_id="devin-relay1"),
+                    ],
+                    "has_next_page": True,
+                    "end_cursor": "cursor-2",
+                },
+            ),
+            HttpResponse(
+                200,
+                {
+                    "items": [session_payload(session_id="devin-relay2")],
+                    "has_next_page": True,
+                    "end_cursor": "cursor-3",
+                },
+            ),
+        ]
+    )
+
+    listed = live_client(transport).list_sessions(limit=2)
+
+    assert [snapshot.session_id for snapshot in listed] == [
+        "devin-relay1",
+        "devin-relay2",
+    ]
+    assert len(transport.requests) == 3
+    assert transport.requests[2].query == {"first": "50", "after": "cursor-2"}
+
+
+def test_listing_stops_at_the_end_even_without_enough_relay_sessions() -> None:
+    transport = RecordedTransport(
+        [
+            HttpResponse(
+                200,
+                {
+                    "items": [foreign_session_payload("devin-noise", tags=[])],
+                    "has_next_page": False,
+                    "end_cursor": None,
+                },
+            )
+        ]
+    )
+
+    assert live_client(transport).list_sessions(limit=10) == ()

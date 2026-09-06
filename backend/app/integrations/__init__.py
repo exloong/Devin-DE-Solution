@@ -44,6 +44,7 @@ from .devin_sessions import (
     SessionStatus,
     build_session_prompt,
     canonical_session_url,
+    is_relay_session,
     map_session_status,
     parse_result_payload,
 )
@@ -99,6 +100,7 @@ from .repository import (
 )
 from .tasks import (
     DEFAULT_TASK_POLICY,
+    OUTPUT_JSON_SCHEMAS,
     PROHIBITED_CAPABILITIES,
     AgentCapability,
     CapabilityBudget,
@@ -114,6 +116,7 @@ from .tasks import (
     TaskKind,
     TaskPolicy,
     WorkspaceStatus,
+    output_json_schema,
     utc_now,
     validate_result,
     validate_task,
@@ -134,6 +137,7 @@ from .transport import (
 __all__ = [
     "CODEOWNERS_PATH",
     "DEFAULT_TASK_POLICY",
+    "OUTPUT_JSON_SCHEMAS",
     "PROHIBITED_CAPABILITIES",
     "PROHIBITED_COMMANDS",
     "REDACTED",
@@ -219,8 +223,10 @@ __all__ = [
     "assert_command_supported",
     "build_session_prompt",
     "canonical_session_url",
+    "is_relay_session",
     "map_review_status",
     "map_session_status",
+    "output_json_schema",
     "parse_codeowners",
     "parse_result_payload",
     "parse_timestamp",

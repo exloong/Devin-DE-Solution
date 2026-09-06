@@ -35,6 +35,7 @@ from .tasks import (
     TaskKind,
     TaskPolicy,
     WorkspaceStatus,
+    output_json_schema,
     validate_task,
 )
 from .transport import (
@@ -128,6 +129,14 @@ _ATTENTION_DETAILS: frozenset[str] = frozenset(
     {"waiting_for_user", "waiting_for_approval"}
 )
 
+RELAY_TAG = "relay"
+REQUIRED_RELAY_TAG_PREFIXES: tuple[str, ...] = (
+    "task:",
+    "kind:",
+    "repo:",
+    "commit:",
+)
+
 
 def map_session_status(value: object, status_detail: object = None) -> SessionStatus:
     """Map a v3 ``status``/``status_detail`` pair onto a Relay session state.
@@ -147,6 +156,10 @@ def map_session_status(value: object, status_detail: object = None) -> SessionSt
         )
     status = value.strip().lower()
     detail = None if status_detail is None else status_detail.strip().lower()
+    if detail == "finished":
+        # A finished session has released its work whether or not the platform
+        # has moved it out of ``running`` yet.
+        return SessionStatus.COMPLETED
     if status == "exit":
         if detail is None:
             return SessionStatus.NEEDS_ATTENTION
@@ -639,6 +652,7 @@ class LiveDevinSessionClient:
     policy: TaskPolicy = field(default_factory=TaskPolicy)
     api_root: str = DEVIN_API_ROOT
     correlation_id: str | None = None
+    knowledge_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         self.org_id = validate_organization_id(self.org_id)
@@ -682,25 +696,45 @@ class LiveDevinSessionClient:
             self._send(
                 "POST",
                 self.sessions_path,
-                json_body={
-                    "prompt": prompt,
-                    "title": (
-                        f"Relay {task.kind.value} for issue revision "
-                        f"{task.issue_revision}"
-                    ),
-                    "max_acu_limit": max(task.budget.wall_seconds // 60, 1),
-                    "tags": [
-                        "relay",
-                        f"task:{task.task_id}",
-                        f"kind:{task.kind.value}",
-                        f"repo:{task.repository.full_name}",
-                        f"commit:{task.target_commit.sha}",
-                    ],
-                },
+                json_body=self._create_body(task, prompt),
             ),
             action="create session",
         )
         return self._snapshot_from_payload(payload, task=task)
+
+    def _create_body(self, task: TaskEnvelope, prompt: str) -> JsonObject:
+        """Build the create payload with every grant stated explicitly.
+
+        Secrets, knowledge, approval bypass, and resumption are all sent as
+        empty or false rather than omitted, so an API default can never widen
+        a session beyond the single repository and capability set Relay
+        authorized. ``max_acu_limit`` is sent only when the task states an
+        explicit ACU budget: ACUs are not seconds, so a wall-clock deadline
+        must never be reinterpreted as a spend ceiling.
+        """
+        body: dict[str, JsonValue] = {
+            "prompt": prompt,
+            "title": (
+                f"Relay {task.kind.value} for issue revision {task.issue_revision}"
+            ),
+            "repos": [task.repository.full_name],
+            "resumable": False,
+            "bypass_approval": False,
+            "secret_ids": [],
+            "knowledge_ids": list(self.knowledge_ids),
+            "structured_output_required": True,
+            "structured_output_schema": dict(output_json_schema(task.kind)),
+            "tags": [
+                RELAY_TAG,
+                f"task:{task.task_id}",
+                f"kind:{task.kind.value}",
+                f"repo:{task.repository.full_name}",
+                f"commit:{task.target_commit.sha}",
+            ],
+        }
+        if task.budget.max_acu is not None:
+            body["max_acu_limit"] = task.budget.max_acu
+        return body
 
     def get_session(self, session_id: str) -> SessionSnapshot:
         normalized = normalize_session_id(session_id)
@@ -720,7 +754,7 @@ class LiveDevinSessionClient:
         snapshots: list[SessionSnapshot] = []
         cursor: str | None = None
         for _page in range(MAX_SESSION_PAGES):
-            query = {"first": str(min(limit - len(snapshots), DEVIN_SESSION_PAGE_SIZE))}
+            query = {"first": str(DEVIN_SESSION_PAGE_SIZE)}
             if cursor is not None:
                 query["after"] = cursor
             payload = require_json_object(
@@ -729,11 +763,15 @@ class LiveDevinSessionClient:
             for entry in object_array(
                 require_array(payload, "items", action=action), action=action
             ):
+                # The organization holds sessions Relay never created; they are
+                # skipped rather than reported as Superset work.
+                if not is_relay_session(string_tuple(entry.get("tags"), action=action)):
+                    continue
                 snapshots.append(self._snapshot_from_payload(entry))
-            if len(snapshots) >= limit or not require_bool(
-                payload, "has_next_page", action=action
-            ):
-                return tuple(snapshots[:limit])
+                if len(snapshots) >= limit:
+                    return tuple(snapshots)
+            if not require_bool(payload, "has_next_page", action=action):
+                return tuple(snapshots)
             cursor = require_str(payload, "end_cursor", action=action)
         raise ContractValidationError(
             ValidationCode.MALFORMED_RESPONSE,
@@ -897,13 +935,14 @@ class LiveDevinSessionClient:
             repository_full_name=SUPERSET_FULL_NAME,
             target_commit=target_commit,
             budget_seconds=(
-                task.budget.wall_seconds if task is not None else _budget(payload)
+                task.budget.wall_seconds
+                if task is not None
+                else self.policy.max_wall_seconds
             ),
             created_at=created_at,
             updated_at=updated_at,
             links=SessionLinks(
-                session_url=canonical_session_url(session_id),
-                desktop_url=_optional_https(payload.get("desktop_url")),
+                session_url=_validated_session_url(payload, session_id, action=action)
             ),
             conversation_availability=ConversationAvailability.SYNCHRONIZED,
             structured_output=(
@@ -916,13 +955,6 @@ class LiveDevinSessionClient:
 
 def _task_created_at(task: TaskEnvelope | None) -> datetime | None:
     return None if task is None else task.created_at
-
-
-def _budget(payload: JsonObject) -> int:
-    value = payload.get("max_acu_limit")
-    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-        return value * 60
-    return 3_600
 
 
 def _optional_bool(payload: JsonObject, key: str, *, action: str) -> bool | None:
@@ -986,14 +1018,35 @@ def _commit_from_tags(tags: Sequence[str], task: TaskEnvelope | None) -> TargetC
     )
 
 
-def _optional_https(value: object) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value.startswith("https://"):
+def is_relay_session(tags: Sequence[str]) -> bool:
+    """Return whether a session's tags identify it as Relay's own work.
+
+    A session counts as Relay's only when it carries the Relay marker plus
+    the task, kind, repository, and commit it was bounded to, and that
+    repository is Superset.
+    """
+    if RELAY_TAG not in tags:
+        return False
+    if any(_tag_value(tags, prefix) is None for prefix in REQUIRED_RELAY_TAG_PREFIXES):
+        return False
+    return _tag_value(tags, "repo:") == SUPERSET_FULL_NAME
+
+
+def _validated_session_url(payload: JsonObject, session_id: str, *, action: str) -> str:
+    """Validate the response ``url`` against the canonical session link.
+
+    The URL is required, so it is checked rather than ignored: a link that
+    points at another host, path, or session id is a response Relay must not
+    surface to an operator.
+    """
+    expected = canonical_session_url(session_id)
+    url = require_str(payload, "url", action=action)
+    if url.rstrip("/") != expected:
         raise ContractValidationError(
-            ValidationCode.MALFORMED_RESPONSE, "desktop URL must be an https link"
+            ValidationCode.MALFORMED_RESPONSE,
+            "session url is not the canonical link for this session",
         )
-    return value
+    return expected
 
 
 def _structured_pull_requests(

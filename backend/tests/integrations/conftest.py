@@ -43,6 +43,7 @@ def make_task(
     capabilities: frozenset[AgentCapability] | None = None,
     wall_seconds: int = 900,
     max_output_bytes: int = 262_144,
+    max_acu: int | None = None,
 ) -> TaskEnvelope:
     """Build a valid task envelope for ``kind`` with policy-compliant limits."""
     default_capabilities = {
@@ -83,7 +84,9 @@ def make_task(
         created_at=CREATED_AT,
         target_commit=TargetCommit(sha=target_commit),
         budget=CapabilityBudget(
-            wall_seconds=wall_seconds, max_output_bytes=max_output_bytes
+            wall_seconds=wall_seconds,
+            max_output_bytes=max_output_bytes,
+            max_acu=max_acu,
         ),
         allowed_capabilities=(
             default_capabilities[kind] if capabilities is None else capabilities
