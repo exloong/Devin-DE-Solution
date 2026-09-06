@@ -1,48 +1,275 @@
 # Relay issue operations control plane
 
-Relay is a standalone control plane for a Devin-powered issue intake,
-reproduction, and fix workflow. It accepts signed GitHub events only from
-`exloong/superset`, runs bounded Devin sessions against an immutable Superset
-commit, and keeps every consequential decision behind a human gate.
+Relay is a standalone control plane for a human-governed, Devin-powered issue
+workflow. It turns GitHub issue events into a durable process for triage,
+reporter follow-up, reproduction, fix authorization, implementation, review,
+and owner approval.
 
-Relay never automatically merges a pull request or closes an issue. Devin
-Review is advisory and does not count as owner approval. Private Devin session
-and desktop links are available only to authenticated dashboard operators and
-are rejected from public GitHub issue comments.
+This repository contains the Relay product itself: the React operator
+dashboard, FastAPI API, durable worker, PostgreSQL persistence, GitHub and
+Devin integrations, and a credential-free local demo. The only supported
+target repository is currently `exloong/superset`.
 
-## Architecture
+## What Relay does
 
-The Docker stack contains four long-running services:
+- Accepts and verifies signed GitHub issue, comment, pull-request, and review
+  events from `exloong/superset`.
+- Stores issue revisions, lifecycle transitions, jobs, conversations,
+  evidence, sessions, pull requests, reviews, approvals, and audit history.
+- Runs deterministic policy separately from AI judgment.
+- Starts bounded Devin reproduction and fix sessions against an immutable
+  Superset commit.
+- Asks reporters for only the evidence still needed to reproduce an issue.
+- Routes reproduced bugs and pull requests to human owners for explicit
+  decisions.
+- Exposes live operational state, session details, evidence, and owner gates in
+  the dashboard.
+- Recovers safely from duplicate webhooks, retries, restarts, stale jobs, and
+  synchronized pull-request heads.
 
-| Service | Responsibility |
-| --- | --- |
-| `web` | React dashboard plus an Nginx same-origin proxy for `/api/v1`. |
-| `api` | FastAPI lifecycle API, signed GitHub webhook ingress, authentication, migrations, and human commands. |
-| `worker` | Durable job consumer that calls GitHub, Devin Sessions, and Devin Review through bounded HTTPS clients. |
-| `postgres` | Persistent issues, revisions, jobs, sessions, evidence, conversations, PR bindings, reviews, and approvals. |
+## What Relay does not do
 
-The lifecycle is:
+- It does not support repositories other than `exloong/superset`.
+- It does not automatically merge pull requests or close confirmed bugs.
+- It does not treat Devin or Devin Review as a substitute for human approval.
+- It does not execute reporter-provided commands or download untrusted
+  attachments.
+- It does not publish security-sensitive reports or private Devin
+  session/desktop links into public GitHub comments.
+- It does not keep an agent workspace alive while waiting for a reporter or
+  owner.
+- It does not treat text matches, model confidence, or a passing review as
+  authoritative proof that a bug was reproduced or fixed.
+- It does not put GitHub, Devin, Review, or webhook credentials in the browser
+  bundle or lifecycle records.
+
+## How it works
+
+```text
+GitHub webhook
+      │
+      ▼
+Relay API ── validates signature, repository, delivery, and command
+      │
+      ▼
+PostgreSQL ── stores lifecycle state, audit history, and durable jobs
+      │
+      ▼
+Relay worker ── claims jobs and calls GitHub, Devin, and Devin Review
+      │
+      ▼
+Human gates ── authorize code work and approve the exact PR head
+      │
+      ▼
+React dashboard ── reads the API and exposes actions to authenticated operators
+```
+
+The normal lifecycle is:
 
 ```text
 new → triage → awaiting_reporter → reproducing → needs_owner_decision
-    → fix_authorized → fixing → pr_open → awaiting_owner
+    → fix_authorized → fixing → pr_open → awaiting_owner → completed
 ```
 
-Each issue revision, session, review, and approval is bound to its repository,
-issue revision, target commit, PR number, and PR head SHA. A synchronized PR
-invalidates review and owner-approval evidence for the previous head.
+There are also explicit holding or terminal states for environment blockers,
+requested changes, duplicates, non-bugs, unsupported reports, and inactivity.
 
-Detailed documents:
+Each event is handled as follows:
 
-- [Issue automation platform architecture](docs/architecture/issue-automation-platform.md)
-- [Parallel implementation and approval plan](docs/plans/parallel-implementation-plan.md)
-- [Superset issue-intake research](public/reports/apache-superset/issue-intake-2025-09-05-to-2026-09-04.html)
+1. GitHub sends a signed event to `/api/v1/webhooks/github`.
+2. The API verifies the HMAC signature, delivery ID, event shape, and repository
+   scope, then records the event and its resulting transition atomically.
+3. The transition creates durable work for the worker; duplicate deliveries and
+   stale commands cannot advance the issue twice.
+4. The worker claims jobs and uses either deterministic demo adapters or live
+   GitHub, Devin Sessions, Devin Review, and CODEOWNERS integrations.
+5. Structured results are accepted only for the issue revision and immutable
+   commit that created the task.
+6. A human owner must confirm the bug before a fix session starts. Review and
+   approval are bound to the exact PR head SHA, so a new push invalidates
+   evidence for the previous head.
 
-## Production configuration
+### Services
 
-Production is the default: `RELAY_MODE=live` and `RELAY_SEED=0`. Relay starts
-with an empty database and never falls back to browser demo fixtures. Copy the
-example, replace every placeholder, and restrict access to the resulting file:
+| Service | Responsibility |
+| --- | --- |
+| `web` | Builds and serves the React dashboard; Nginx proxies `/api/v1` to the API on the same origin. |
+| `api` | Provides FastAPI query/command endpoints, authentication, database migrations, health/readiness, and signed webhook ingress. |
+| `worker` | Claims durable jobs, advances timers and transitions, and calls external providers through bounded HTTPS clients. |
+| `postgres` | Persists lifecycle state, idempotency records, jobs, evidence, sessions, PR bindings, reviews, approvals, and worker status. |
+
+The API and worker share the backend package but run as separate processes.
+PostgreSQL is both the system of record and the first implementation's durable
+job queue, avoiding a second state system.
+
+### Demo and live modes
+
+| Mode | Purpose | External effects |
+| --- | --- | --- |
+| `demo` | Local evaluation and UI exploration with seeded scenarios. | None. GitHub, Devin, Review, and CODEOWNERS behavior is deterministic and fake. |
+| `live` | Operate the real workflow for `exloong/superset`. | Sends authenticated requests to GitHub and Devin after policy and human gates allow them. |
+
+Live mode is the default and fails closed if required configuration is absent.
+It never silently substitutes demo records or fake provider results.
+
+## Run locally
+
+### Prerequisites
+
+For the recommended full-stack setup:
+
+- Docker Engine with Docker Compose v2;
+- `curl` for the health checks below.
+
+For source-level development, also install:
+
+- Node.js 20 or newer and npm;
+- Python 3.10 or newer;
+- [`uv`](https://docs.astral.sh/uv/).
+
+### Quick start: credential-free demo
+
+The demo is the safest and fastest way to run the complete application locally.
+It builds all services, creates the database, applies migrations, seeds example
+records, and starts a worker without calling GitHub or Devin.
+
+```bash
+git clone https://github.com/exloong/Devin-DE-Solution.git
+cd Devin-DE-Solution
+
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.demo.yml \
+  up --build --wait
+```
+
+Verify the stack:
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.demo.yml \
+  ps
+
+curl --fail http://127.0.0.1:4173/api/v1/health
+curl --fail http://127.0.0.1:4173/api/v1/ready
+```
+
+Open `http://127.0.0.1:4173`. Demo mode authenticates commands with a local demo
+principal, so no operator or provider token is required.
+
+To use another host port:
+
+```bash
+APP_PORT=8080 docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.demo.yml \
+  up --build --wait
+```
+
+Then open `http://127.0.0.1:8080`.
+
+Useful lifecycle commands:
+
+```bash
+# Follow API and worker activity.
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.demo.yml \
+  logs -f api worker
+
+# Stop containers but retain PostgreSQL data.
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.demo.yml \
+  down
+
+# Stop containers and delete all local Relay state.
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.demo.yml \
+  down --volumes
+```
+
+### Develop components from source
+
+Use Docker Compose when you need the integrated browser, API, worker, and
+PostgreSQL flow. The commands below are useful for isolated frontend or backend
+development.
+
+Install frontend dependencies and start Vite:
+
+```bash
+npm ci
+npm run dev
+```
+
+Vite serves the frontend at `http://127.0.0.1:4173`. The production frontend
+expects `/api/v1` on the same origin; the Docker `web` service provides that
+proxy. A standalone Vite process without a proxying API will show the
+fail-closed API-unavailable state rather than silently loading demo data.
+
+Install backend dependencies:
+
+```bash
+cd backend
+uv sync --extra dev
+```
+
+Run an isolated demo API with SQLite:
+
+```bash
+RELAY_MODE=demo RELAY_SEED=1 \
+  uv run uvicorn app.api.app:default_app --factory --reload
+```
+
+The API is available at `http://127.0.0.1:8000`; interactive OpenAPI
+documentation is at `http://127.0.0.1:8000/api/v1/docs`. In another terminal,
+from the same `backend` directory, start the demo worker against the same
+SQLite database:
+
+```bash
+RELAY_MODE=demo uv run python -m app.runtime.worker
+```
+
+Delete `backend/relay.sqlite3` when both processes are stopped to reset this
+isolated backend environment.
+
+### Validate changes
+
+Frontend:
+
+```bash
+npm run typecheck
+npm run build
+npm run test:fixtures
+```
+
+Backend:
+
+```bash
+cd backend
+uv run pytest
+uv run ruff check app tests
+uv run mypy app
+```
+
+Integrated smoke test:
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.demo.yml \
+  up --build --wait
+
+curl --fail http://127.0.0.1:4173/api/v1/ready
+```
+
+## Configure live mode
+
+Do not use live mode until GitHub and Devin credentials are scoped for this
+deployment. Copy the example, replace every placeholder, and restrict access to
+the resulting file:
 
 ```bash
 cp .env.example .env
@@ -51,6 +278,8 @@ chmod 600 .env
 
 | Variable | Service | Purpose |
 | --- | --- | --- |
+| `RELAY_MODE` | API, worker | `live` for real providers or `demo` for deterministic local adapters. |
+| `RELAY_SEED` | API | Set to `0` for an empty live database; demo overlay sets it to `1`. |
 | `RELAY_AUTH_TOKENS` | API | Semicolon-separated `token:login:role` entries. Use a random URL-safe token of at least 8 characters and the `operator` role for dashboard access. |
 | `GITHUB_WEBHOOK_SECRET` | API | High-entropy HMAC secret shared only with the GitHub webhook. |
 | `GITHUB_TOKEN` | Worker | Dedicated GitHub App installation token or fine-grained token scoped only to `exloong/superset`. |
@@ -58,46 +287,40 @@ chmod 600 .env
 | `DEVIN_API_TOKEN` | Worker | Devin service-user API key or personal access token. |
 | `DEVIN_ORG_ID` | Worker | Devin organization identifier used by the v3 session API. |
 | `DEVIN_REVIEW_TOKEN` | Worker | Optional separate Devin Review token; defaults to `DEVIN_API_TOKEN`. |
-| `APP_PORT` | Web | Loopback-only HTTP port, default `4173`. |
+| `APP_PORT` | Web | Loopback-only HTTP port; defaults to `4173`. |
 
 Every secret except `DEVIN_ORG_ID` also supports a mutually exclusive `_FILE`
 variant, for example `GITHUB_TOKEN_FILE=/run/secrets/github_token`. Secret
-values are read at runtime; they are not persisted in lifecycle records,
-returned by the API, logged by the HTTPS transport, or embedded in the frontend
-bundle.
+values are read at runtime; they are not returned by the API, logged by the
+HTTPS transport, persisted in lifecycle records, or embedded in the frontend.
 
-For Docker-managed secret files, set these host paths and add the secrets
-overlay:
+Start a clean live stack:
 
 ```bash
-export RELAY_AUTH_TOKENS_FILE_HOST=/secure/relay_auth_tokens
-export GITHUB_WEBHOOK_SECRET_FILE_HOST=/secure/github_webhook_secret
-export GITHUB_TOKEN_FILE_HOST=/secure/github_token
-export DEVIN_API_TOKEN_FILE_HOST=/secure/devin_api_token
-
-docker compose -f docker-compose.yml -f docker-compose.secrets.yml up --build -d
+docker compose up --build --wait
+curl --fail http://127.0.0.1:4173/api/v1/health
+curl --fail http://127.0.0.1:4173/api/v1/ready
 ```
 
-The `relay_auth_tokens` file contains the same
-`token:login:role[;token:login:role...]` format as the environment variable.
-Do not commit `.env`, secret files, API keys, webhook secrets, or credentials.
+Open `http://127.0.0.1:4173`, go to **Configuration → Connections**, and enter
+the Relay operator token. The browser keeps it in `sessionStorage`; provider
+credentials remain server-side.
 
-## Provision GitHub
+### GitHub requirements
 
-Create a dedicated GitHub App installed only on `exloong/superset`, or a
+Use a dedicated GitHub App installed only on `exloong/superset`, or a
 fine-grained token restricted to that repository. Relay needs:
 
 - repository metadata: read;
-- issues: read and write, for intake and reporter comments;
-- contents: read and write, for immutable commit reads and fix branches;
-- pull requests: read and write, for PR creation, synchronization, review
-  state, and reviewer requests.
+- issues: read and write;
+- contents: read and write;
+- pull requests: read and write.
 
 Relay has no merge or issue-close command in its typed GitHub boundary. Still
 protect the default branch with required human review and do not grant the App
 an administrative bypass.
 
-Create a GitHub webhook with:
+Configure a GitHub webhook with:
 
 - payload URL: `https://<relay-host>/api/v1/webhooks/github`;
 - content type: `application/json`;
@@ -106,20 +329,19 @@ Create a GitHub webhook with:
 - SSL verification enabled.
 
 Relay verifies HMAC-SHA256 over the raw request body, rejects bodies larger than
-1 MiB, validates the delivery ID and event envelope, deduplicates deliveries,
-and rejects repositories other than `exloong/superset`.
+1 MiB, validates and deduplicates deliveries, and rejects repositories other
+than `exloong/superset`. GitHub `ping` events are accepted for webhook setup
+verification without creating lifecycle work.
 
-## Provision Devin and Devin Review
+### Devin and Devin Review requirements
 
 Create a service user under **Devin Settings → Service users**, assign the
 minimum role that can create, read, message, and cancel organization sessions,
-then generate its API key. Set the key as `DEVIN_API_TOKEN` and copy the
-organization ID from the same settings area into `DEVIN_ORG_ID`. Devin's API
-documentation is at
-[Authentication](https://docs.devin.ai/api-reference/authentication).
+then generate its API key. Set the key as `DEVIN_API_TOKEN` and set
+`DEVIN_ORG_ID` to the corresponding `org-...` identifier. See Devin's
+[authentication documentation](https://docs.devin.ai/api-reference/authentication).
 
-The GitHub identity available to that Devin organization must have access only
-to the intended target repository for this deployment. Relay session requests:
+Relay session requests:
 
 - allow only `repos: ["exloong/superset"]`;
 - set `resumable: false`;
@@ -129,137 +351,72 @@ to the intended target repository for this deployment. Relay session requests:
 - request typed structured results;
 - quote reporter context as untrusted, inert data.
 
-Devin Review uses `POST /v3/enterprise/pr-reviews` for the exact Superset PR.
-The response must name the PR head SHA Relay requested; a different head fails
-closed. Use `DEVIN_REVIEW_TOKEN` when Review has a separate credential, or omit
-it to use the Devin service-user key. See
+Devin Review runs against the exact Superset PR and requested head SHA. Use
+`DEVIN_REVIEW_TOKEN` when Review has a separate credential, or omit it to reuse
+the Devin service-user key. See
 [Trigger Devin Review](https://docs.devin.ai/api-reference/v3/pr-reviews/post-enterprise-pr-reviews).
 
-## Start a clean deployment
+### Docker secret files
+
+For Docker-managed secret files, set the host paths and add the secrets overlay:
 
 ```bash
-docker compose up --build -d
-docker compose ps
-curl --fail http://127.0.0.1:4173/api/v1/health
-curl --fail http://127.0.0.1:4173/api/v1/ready
+export RELAY_AUTH_TOKENS_FILE_HOST=/secure/relay_auth_tokens
+export GITHUB_WEBHOOK_SECRET_FILE_HOST=/secure/github_webhook_secret
+export GITHUB_TOKEN_FILE_HOST=/secure/github_token
+export DEVIN_API_TOKEN_FILE_HOST=/secure/devin_api_token
+
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.secrets.yml \
+  up --build --wait
 ```
 
-`health` confirms the API process and repository scope. `ready` checks the
-database migration and reports the worker heartbeat as `ok`, `stale`, or
-`unavailable`. A live worker exits with a clear missing-configuration error
-rather than substituting fake sessions, PRs, reviews, or routing.
+The `relay_auth_tokens` file uses
+`token:login:role[;token:login:role...]`. Do not commit `.env`, secret files,
+API keys, webhook secrets, or credentials.
 
-Open `http://127.0.0.1:4173`, go to **Configuration → Connections**, and enter
-the Relay operator token. The browser keeps it in `sessionStorage`; GitHub and
-Devin provider secrets remain server-side.
-
-PostgreSQL state is retained in the `relay_postgres` volume:
-
-```bash
-docker compose down                 # keep state
-docker compose down --volumes       # remove all Relay state
-docker compose up --build -d        # clean start: zero lifecycle records
-```
-
-## HTTPS deployment
+### HTTPS
 
 Point a public DNS name at the host, allow inbound TCP 80/443 and UDP 443, then
 run the Caddy overlay:
 
 ```bash
 export RELAY_HOST=relay.example.com
-docker compose -f docker-compose.yml -f docker-compose.https.yml up --build -d
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.https.yml \
+  up --build --wait
 ```
 
-Caddy obtains and renews the public certificate, redirects HTTP to HTTPS, and
-proxies the dashboard and API over the internal Docker network. The base web
-port remains bound to host loopback only. In cloud or Kubernetes deployments,
-terminate TLS at the load balancer/Ingress and forward to `web:80`; preserve the
-raw webhook request body.
-
-Outbound GitHub and Devin clients accept HTTPS URLs only, use bounded timeouts
-and retries, propagate correlation IDs, and map network failures to typed
-errors without logging authorization tokens.
-
-## Verify signed webhook handling
-
-With the stack running, create a minimal delivery and sign its exact bytes:
-
-```bash
-payload='{"action":"opened","repository":{"full_name":"exloong/superset"},"issue":{"number":123,"title":"Relay verification","body":"Steps to reproduce: ...","user":{"login":"relay-test"}}}'
-signature="sha256=$(printf '%s' "$payload" | openssl dgst -sha256 -hmac "$GITHUB_WEBHOOK_SECRET" -hex | sed 's/^.* //')"
-
-curl --fail-with-body -X POST \
-  http://127.0.0.1:4173/api/v1/webhooks/github \
-  -H 'Content-Type: application/json' \
-  -H 'X-GitHub-Event: issues' \
-  -H 'X-GitHub-Delivery: relay-readme-verification-1' \
-  -H "X-Hub-Signature-256: $signature" \
-  --data-binary "$payload"
-```
-
-The response is `202 Accepted`. Changing either the body or signature produces
-`401`, replaying the delivery ID produces `409`, and changing
-`repository.full_name` produces `403`.
-
-Use a dedicated, clearly labelled test issue in `exloong/superset` for the
-final callback test. Leave its generated PR unmerged and the issue open until a
-human has inspected the complete flow.
-
-## Explicit demo mode
-
-Demo mode is credential-free, seeded, and performs no network side effects:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.demo.yml up --build -d
-```
-
-It uses deterministic fake GitHub, Devin, Review, and CODEOWNERS behavior. It
-must not be used to validate production credentials or callback delivery.
+Caddy obtains and renews the certificate, redirects HTTP to HTTPS, and proxies
+the dashboard and API over the internal Docker network. The base web port
+remains bound to host loopback only. In cloud or Kubernetes deployments,
+terminate TLS at the load balancer or Ingress, forward to `web:80`, and
+preserve the raw webhook request body.
 
 ## Troubleshooting
 
-- **Worker exits immediately:** inspect `docker compose logs worker`; live mode
-  names the first missing `GITHUB_TOKEN`, `DEVIN_API_TOKEN`, or `DEVIN_ORG_ID`.
-- **`ready` says `unavailable`:** the worker has not written a heartbeat; check
-  its credentials, organization ID, and logs.
-- **Dashboard returns 401:** connect a token that exactly matches an entry in
-  `RELAY_AUTH_TOKENS`; provider credentials cannot authenticate the dashboard.
-- **Webhook returns 401:** verify GitHub and Relay use the same secret and that
-  no proxy rewrites the raw body.
-- **Webhook returns 403:** Relay received an event for a repository other than
-  `exloong/superset`.
-- **Devin request fails:** confirm the service user can use organization
+- **A live worker exits immediately:** inspect `docker compose logs worker`.
+  Live mode names the first missing `GITHUB_TOKEN`, `DEVIN_API_TOKEN`, or
+  `DEVIN_ORG_ID`.
+- **`ready` reports `unavailable`:** the worker has not written a heartbeat;
+  check its mode, credentials, organization ID, and logs.
+- **The dashboard returns 401:** enter a token that exactly matches an entry in
+  `RELAY_AUTH_TOKENS`. Provider credentials cannot authenticate the dashboard.
+- **A webhook returns 401:** verify GitHub and Relay use the same secret and
+  that no proxy rewrites the raw request body.
+- **A webhook returns 403:** Relay received an event for a repository other
+  than `exloong/superset`.
+- **A webhook returns 409:** the delivery ID was already processed.
+- **A Devin request fails:** confirm the service user can use organization
   sessions and that `DEVIN_ORG_ID` has the `org-...` form.
-- **Review stays pending:** confirm Devin Review is enabled for the account and
-  its token can call the enterprise PR-review endpoint.
+- **Review remains pending:** confirm Devin Review is enabled and its token can
+  call the enterprise PR-review endpoint.
+- **Port 4173 is already in use:** set `APP_PORT` to another host port.
 
-## Local development and validation
+## Further reading
 
-```bash
-npm install
-npm run dev
-```
-
-```bash
-cd backend
-uv sync --extra dev
-uv run uvicorn app.api.app:default_app --factory --reload
-uv run python -m app.runtime.worker
-```
-
-Validation:
-
-```bash
-npm run typecheck
-npm run build
-npm run test:fixtures
-
-cd backend
-uv run pytest
-uv run ruff check app tests
-uv run mypy app
-
-docker compose -f docker-compose.yml -f docker-compose.demo.yml up --build --wait
-curl --fail http://127.0.0.1:4173/api/v1/ready
-```
+- [Issue automation platform architecture](docs/architecture/issue-automation-platform.md)
+- [Parallel implementation and approval plan](docs/plans/parallel-implementation-plan.md)
+- [Superset issue-intake research](public/reports/apache-superset/issue-intake-2025-09-05-to-2026-09-04.html)
