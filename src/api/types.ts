@@ -412,6 +412,13 @@ export interface RecentSession {
   devin_session_url: string | null;
 }
 
+export interface AutomationStatus {
+  kind: 'reproduction' | 'fix';
+  automation_id: string;
+  enabled: boolean;
+  updated_at: IsoTimestamp;
+}
+
 export interface Heartbeat {
   database: ProbeStatus;
   worker: ProbeStatus;
@@ -421,6 +428,7 @@ export interface Heartbeat {
   last_webhook_received_at: IsoTimestamp | null;
   last_webhook_event: string | null;
   last_session_launched_at: IsoTimestamp | null;
+  automations: AutomationStatus[];
   overall: SystemStatus;
   reasons: string[];
 }

@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import uuid
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from statistics import median
 
 from app.api.queries import _WORKFLOW_STEPS
 from app.api.schemas import (
+    AutomationStatus,
     DashboardSummary,
     Heartbeat,
     Period,
@@ -30,6 +31,7 @@ from app.domain.models import AgentSession, Issue
 from app.domain.ports import UnitOfWork
 from app.domain.states import TERMINAL_STATES, SessionKind, SessionState
 from app.persistence import runtime_status
+from app.persistence.automation_registry import AutomationRecord
 from app.persistence.runtime_status import StatusRow
 
 THROUGHPUT_DAYS = 14
@@ -159,6 +161,7 @@ def heartbeat(
     now: datetime,
     *,
     database: ProbeStatus = "ok",
+    automations: Sequence[AutomationRecord] = (),
 ) -> Heartbeat:
     worker_row = rows.get(runtime_status.WORKER)
     worker = _probe(worker_row, now)
@@ -198,6 +201,15 @@ def heartbeat(
         last_webhook_received_at=webhook.updated_at if webhook else None,
         last_webhook_event=webhook.instance_id if webhook else None,
         last_session_launched_at=max((s.created_at for s in sessions), default=None),
+        automations=[
+            AutomationStatus(
+                kind=SessionKind(record.kind),
+                automation_id=record.automation_id,
+                enabled=record.enabled,
+                updated_at=record.updated_at,
+            )
+            for record in automations
+        ],
         overall=overall,
         reasons=reasons,
     )
@@ -209,6 +221,7 @@ def summary(
     rows: Mapping[str, StatusRow],
     *,
     database: ProbeStatus = "ok",
+    automations: Sequence[AutomationRecord] = (),
 ) -> DashboardSummary:
     issues = list(uow.list_issues())
     sessions = list(uow.list_sessions())
@@ -223,6 +236,6 @@ def summary(
             session_health(sessions, SessionKind.FIX),
         ],
         recent_sessions=recent_sessions(sessions, by_id),
-        heartbeat=heartbeat(rows, sessions, now, database=database),
+        heartbeat=heartbeat(rows, sessions, now, database=database, automations=automations),
         generated_at=now,
     )

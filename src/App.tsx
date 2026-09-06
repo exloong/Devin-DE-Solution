@@ -1295,8 +1295,10 @@ function connectionCards(heartbeat: Heartbeat | null, live: boolean, now: number
       icon: <Zap size={22} />,
       badge: devinBadge,
       tone: devinTone,
-      copy: 'Reproduction sessions launch automatically; fix sessions launch only on owner authorization.',
-      detail: heartbeat ? `Last session launched ${formatAgo(heartbeat.last_session_launched_at, now)}` : 'No session has been launched.',
+      copy: 'Two Relay-managed Devin Automations (webhook inbox → start_session): reproduction dispatched by the controller gate, fix dispatched only on owner authorization.',
+      detail: heartbeat
+        ? `Last session launched ${formatAgo(heartbeat.last_session_launched_at, now)}${heartbeat.automations.length ? ` · ${heartbeat.automations.map((a) => `${a.kind} ${a.automation_id}${a.enabled ? '' : ' (disabled)'}`).join(', ')}` : ' · automations not provisioned'}`
+        : 'No session has been launched.',
     },
     {
       name: 'Owner routing',

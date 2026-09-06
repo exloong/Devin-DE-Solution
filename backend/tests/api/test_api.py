@@ -102,7 +102,7 @@ def test_health_and_ready(client: TestClient) -> None:
         "database": "ok",
         "worker": "unavailable",
         "last_worker_heartbeat_at": None,
-        "migrations": "0003",
+        "migrations": "0004",
         "dry_run": True,
     }
 

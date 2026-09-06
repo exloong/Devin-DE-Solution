@@ -15,7 +15,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.domain.states import ActorRole, DecisionKind, IssueState
+from app.domain.states import ActorRole, DecisionKind, IssueState, SessionKind
 
 
 class ApiModel(BaseModel):
@@ -500,6 +500,13 @@ class RecentSession(ApiModel):
     devin_session_url: str | None = None
 
 
+class AutomationStatus(ApiModel):
+    kind: SessionKind
+    automation_id: str
+    enabled: bool
+    updated_at: datetime
+
+
 class Heartbeat(ApiModel):
     database: ProbeStatus
     worker: ProbeStatus
@@ -509,6 +516,7 @@ class Heartbeat(ApiModel):
     last_webhook_received_at: datetime | None = None
     last_webhook_event: str | None = None
     last_session_launched_at: datetime | None = None
+    automations: list[AutomationStatus] = []
     overall: SystemStatus
     reasons: list[str]
 

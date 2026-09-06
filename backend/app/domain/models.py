@@ -343,6 +343,8 @@ class AgentSession(Record):
     external_session_id: str | None = None
     external_session_url: str | None = None
     external_desktop_url: str | None = None
+    automation_id: str | None = None
+    dispatched_at: datetime | None = None
     correlation_id: str
     started_at: datetime | None = None
     last_heartbeat_at: datetime | None = None
