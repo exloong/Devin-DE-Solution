@@ -36,18 +36,34 @@ export class ApiError extends Error {
   readonly code: ApiErrorCode;
   readonly status: number | null;
   readonly correlationId: string | null;
+  readonly details: unknown;
+  /** False only when no Relay API answered at all (network failure, timeout, or a non-API response at this origin). */
+  readonly reachable: boolean;
 
-  constructor(code: ApiErrorCode, message: string, status: number | null = null, correlationId: string | null = null) {
+  constructor(
+    code: ApiErrorCode,
+    message: string,
+    status: number | null = null,
+    correlationId: string | null = null,
+    details: unknown = undefined,
+    reachable: boolean = status !== null,
+  ) {
     super(message);
     this.name = 'ApiError';
     this.code = code;
     this.status = status;
     this.correlationId = correlationId;
+    this.details = details;
+    this.reachable = reachable;
   }
 
-  /** True when the backend is absent or unreachable, so demo data is an acceptable fallback. */
+  /**
+   * True only when the backend is genuinely absent. A reachable API that
+   * answers 401/403, 5xx, malformed JSON, or a policy error is NOT absent and
+   * must never fall back to demo data.
+   */
   get apiAbsent(): boolean {
-    return this.code === 'unavailable' || this.code === 'timeout' || (this.code === 'not_found' && this.status === 404 && this.correlationId === null);
+    return !this.reachable;
   }
 }
 
@@ -62,6 +78,17 @@ export class RepositorySafetyError extends ApiError {
     this.name = 'RepositorySafetyError';
     this.repository = repository;
   }
+}
+
+export interface MutationTarget {
+  id: string;
+  /** Current resource version, sent as `If-Match`. Omitted when the caller does not hold the resource. */
+  version?: number;
+}
+
+interface RequestOptions {
+  idempotencyKey?: string;
+  ifMatchVersion?: number;
 }
 
 export interface ApiClientOptions {
@@ -123,14 +150,15 @@ export class ApiClient {
     this.fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
   }
 
-  private async request<T>(method: 'GET' | 'POST', path: string, body?: unknown, idempotencyKey?: string): Promise<T> {
+  private async request<T>(method: 'GET' | 'POST', path: string, body?: unknown, options: RequestOptions = {}): Promise<T> {
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), this.timeoutMs);
     let response: Response;
     try {
       const headers: Record<string, string> = { Accept: 'application/json' };
       if (body !== undefined) headers['Content-Type'] = 'application/json';
-      if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
+      if (options.idempotencyKey) headers['Idempotency-Key'] = options.idempotencyKey;
+      if (options.ifMatchVersion !== undefined) headers['If-Match'] = `"${options.ifMatchVersion}"`;
       response = await this.fetchImpl(`${this.baseUrl}${path}`, {
         method,
         headers,
@@ -150,22 +178,29 @@ export class ApiClient {
     const correlationId = response.headers.get('x-correlation-id');
     const contentType = response.headers.get('content-type') ?? '';
 
+    const isJson = contentType.includes('application/json');
+
     if (!response.ok) {
+      if (!isJson && (response.status === 404 || response.status === 405)) {
+        // Vite/nginx answering for an unknown route: no API is mounted at this origin.
+        throw new ApiError('unavailable', 'Relay API is not mounted at this origin', response.status, correlationId, undefined, false);
+      }
       let message = `Relay API returned ${response.status}`;
       let code = mapStatusToCode(response.status);
-      if (contentType.includes('application/json')) {
+      let details: unknown;
+      if (isJson) {
         const payload: unknown = await response.json().catch(() => null);
-        if (isObject(payload)) {
-          if (typeof payload.message === 'string') message = payload.message;
-          if (typeof payload.code === 'string') code = normalizeCode(payload.code, code);
-        }
+        const envelope = readErrorEnvelope(payload);
+        if (envelope.message) message = envelope.message;
+        if (envelope.code) code = normalizeCode(envelope.code, code);
+        details = envelope.details;
       }
-      throw new ApiError(code, message, response.status, correlationId);
+      throw new ApiError(code, message, response.status, correlationId, details);
     }
 
-    if (!contentType.includes('application/json')) {
+    if (!isJson) {
       // Vite/nginx returning index.html for an unknown route means no API is mounted.
-      throw new ApiError('unavailable', 'Relay API is not mounted at this origin', response.status, correlationId);
+      throw new ApiError('unavailable', 'Relay API is not mounted at this origin', response.status, correlationId, undefined, false);
     }
 
     try {
@@ -220,28 +255,38 @@ export class ApiClient {
     return this.request<AnalyticsSummary>('GET', '/analytics/summary');
   }
 
-  respondToIssue(issueId: string, command: ReporterResponseCommand, idempotencyKey = newIdempotencyKey()): Promise<CommandAccepted> {
-    return this.request<CommandAccepted>('POST', `/issues/${encodeURIComponent(issueId)}/responses`, command, idempotencyKey);
+  /*
+   * Mutations. The browser never sends actor identity; the backend derives it
+   * from the authenticated request. `target.version` is sent as an `If-Match`
+   * precondition so stale decisions are rejected server-side.
+   */
+
+  respondToIssue(target: MutationTarget, command: ReporterResponseCommand, idempotencyKey = newIdempotencyKey()): Promise<CommandAccepted> {
+    return this.mutate(`/issues/${encodeURIComponent(target.id)}/responses`, target, command, idempotencyKey);
   }
 
-  decideIssue(issueId: string, command: OwnerDecisionCommand, idempotencyKey = newIdempotencyKey()): Promise<CommandAccepted> {
-    return this.request<CommandAccepted>('POST', `/issues/${encodeURIComponent(issueId)}/decisions`, command, idempotencyKey);
+  decideIssue(target: MutationTarget, command: OwnerDecisionCommand, idempotencyKey = newIdempotencyKey()): Promise<CommandAccepted> {
+    return this.mutate(`/issues/${encodeURIComponent(target.id)}/decisions`, target, command, idempotencyKey);
   }
 
-  retryIssue(issueId: string, command: RetryCommand, idempotencyKey = newIdempotencyKey()): Promise<CommandAccepted> {
-    return this.request<CommandAccepted>('POST', `/issues/${encodeURIComponent(issueId)}/actions/retry`, command, idempotencyKey);
+  retryIssue(target: MutationTarget, command: RetryCommand, idempotencyKey = newIdempotencyKey()): Promise<CommandAccepted> {
+    return this.mutate(`/issues/${encodeURIComponent(target.id)}/actions/retry`, target, command, idempotencyKey);
   }
 
-  cancelSession(sessionId: string, command: CancelSessionCommand, idempotencyKey = newIdempotencyKey()): Promise<CommandAccepted> {
-    return this.request<CommandAccepted>('POST', `/sessions/${encodeURIComponent(sessionId)}/actions/cancel`, command, idempotencyKey);
+  cancelSession(target: MutationTarget, command: CancelSessionCommand, idempotencyKey = newIdempotencyKey()): Promise<CommandAccepted> {
+    return this.mutate(`/sessions/${encodeURIComponent(target.id)}/actions/cancel`, target, command, idempotencyKey);
   }
 
-  messageSession(sessionId: string, command: SessionMessageCommand, idempotencyKey = newIdempotencyKey()): Promise<CommandAccepted> {
-    return this.request<CommandAccepted>('POST', `/sessions/${encodeURIComponent(sessionId)}/messages`, command, idempotencyKey);
+  messageSession(target: MutationTarget, command: SessionMessageCommand, idempotencyKey = newIdempotencyKey()): Promise<CommandAccepted> {
+    return this.mutate(`/sessions/${encodeURIComponent(target.id)}/messages`, target, command, idempotencyKey);
   }
 
   createDryRun(idempotencyKey = newIdempotencyKey()): Promise<CommandAccepted> {
-    return this.request<CommandAccepted>('POST', '/dry-runs', {}, idempotencyKey);
+    return this.request<CommandAccepted>('POST', '/dry-runs', {}, { idempotencyKey });
+  }
+
+  private mutate(path: string, target: MutationTarget, command: unknown, idempotencyKey: string): Promise<CommandAccepted> {
+    return this.request<CommandAccepted>('POST', path, command, { idempotencyKey, ifMatchVersion: target.version });
   }
 }
 
@@ -257,6 +302,17 @@ const knownCodes: ApiErrorCode[] = [
   'malformed_response',
   'wrong_repository',
 ];
+
+/** Accepts the backend envelope `{error:{code,message,details}}` and a defensive top-level `{code,message}` form. */
+function readErrorEnvelope(payload: unknown): { code?: string; message?: string; details?: unknown } {
+  if (!isObject(payload)) return {};
+  const inner = isObject(payload.error) ? payload.error : payload;
+  return {
+    code: typeof inner.code === 'string' ? inner.code : undefined,
+    message: typeof inner.message === 'string' ? inner.message : typeof payload.error === 'string' ? payload.error : undefined,
+    details: inner.details,
+  };
+}
 
 function normalizeCode(candidate: string, fallback: ApiErrorCode): ApiErrorCode {
   return (knownCodes as string[]).includes(candidate) ? (candidate as ApiErrorCode) : fallback;

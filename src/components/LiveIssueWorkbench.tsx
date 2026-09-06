@@ -16,13 +16,14 @@ import {
   ShieldCheck,
   Users,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { InformationRequest, IssueDetail, IssueSummary, LifecycleEvent, LifecycleState, OwnerDecisionCommand } from '../api';
 import {
   formatDateTime,
   formatRelative,
   useIssue,
   useIssues,
+  parseTime,
   useNow,
   useOwnerDecision,
   useReporterResponse,
@@ -34,6 +35,7 @@ import type { Page } from '../api';
 import { DataSourceBadge, ResourceNotice } from './DataSourceBadge';
 import { OwnerRoutingPanel } from './OwnerRoutingPanel';
 import { RepositorySafetyNotice, isRepositorySafetyError } from './RepositorySafetyNotice';
+import { SafeLink } from './SafeLink';
 
 export const lifecycleLabel: Record<LifecycleState, string> = {
   new: 'New',
@@ -180,7 +182,7 @@ export function LiveIssueWorkbench({
             <button key={issue.id} className={effectiveId === issue.id ? 'issue-list-item selected' : 'issue-list-item'} onClick={() => onSelect(issue.id)}>
               <div className="list-item-meta">
                 <span>{issue.key}</span>
-                <small>{formatRelative(Date.parse(issue.updated_at), now)}</small>
+                <small>{formatRelative(parseTime(issue.updated_at), now)}</small>
               </div>
               <strong>{issue.title}</strong>
               <div className="list-item-footer">
@@ -223,15 +225,15 @@ function LiveIssueDetail({
 }) {
   const issue = detail.data;
   const head = issue ?? summary;
-  const headId = head?.id ?? null;
+  const target = useMemo(() => (head ? { id: head.id, version: head.version } : null), [head]);
 
   const accepted = (message: string) => () => {
     notify(message);
     void detail.refresh();
   };
-  const respond = useReporterResponse(headId, accepted('Reporter response accepted'));
-  const decide = useOwnerDecision(headId, accepted('Owner decision recorded'));
-  const retry = useRetryIssue(headId, accepted('Retry accepted'));
+  const respond = useReporterResponse(target, accepted('Reporter response accepted'));
+  const decide = useOwnerDecision(target, accepted('Owner decision recorded'));
+  const retry = useRetryIssue(target, accepted('Retry accepted'));
 
   if (detail.state.kind === 'error' && isRepositorySafetyError(detail.state.error)) {
     return (
@@ -266,7 +268,7 @@ function LiveIssueDetail({
               <span>·</span>
               <span>{head.category ?? 'Uncategorized'}</span>
               <span>·</span>
-              <span>Opened {formatRelative(Date.parse(head.opened_at), now)}</span>
+              <span>Opened {formatRelative(parseTime(head.opened_at), now)}</span>
               <DataSourceBadge state={detail.state} compact />
             </div>
             <h2>{head.title}</h2>
@@ -280,9 +282,9 @@ function LiveIssueDetail({
             </div>
           </div>
           <div className="detail-actions">
-            <a className="secondary-button" href={head.html_url} target="_blank" rel="noreferrer">
+            <SafeLink className="secondary-button" href={head.html_url} policy="github">
               <ExternalLink size={15} /> {head.repository.full_name}#{head.external_number}
-            </a>
+            </SafeLink>
           </div>
         </div>
 
@@ -338,7 +340,7 @@ function LiveIssueDetail({
                   <div>
                     <Bot size={17} />
                     <strong>Relay status</strong>
-                    <span>Updated {formatRelative(Date.parse(issue.updated_at), now)}</span>
+                    <span>Updated {formatRelative(parseTime(issue.updated_at), now)}</span>
                   </div>
                   <span className={`micro-badge ${lifecycleTone[issue.state]}`}>{lifecycleLabel[issue.state]}</span>
                 </div>
@@ -477,9 +479,9 @@ function LiveIssueDetail({
           <div className="context-section">
             <p className="context-title">Pull requests</p>
             {issue.pull_requests.map(pr => (
-              <a className="context-pr" key={`${pr.repository}#${pr.number}`} href={pr.html_url} target="_blank" rel="noreferrer">
+              <SafeLink className="context-pr" key={`${pr.repository}#${pr.number}`} href={pr.html_url} policy="github">
                 <GitPullRequest size={14} /> {pr.repository}#{pr.number} <small>{pr.state}</small>
-              </a>
+              </SafeLink>
             ))}
           </div>
         )}

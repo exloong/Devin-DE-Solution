@@ -21,8 +21,10 @@ import {
   Sparkles,
   Square,
   TerminalSquare,
+  ShieldAlert,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
+import type { CommandAccepted } from '../api';
 import type { ConversationMessage, DevinReviewState, PullRequestRef } from '../api';
 import {
   elapsedSeconds,
@@ -32,6 +34,8 @@ import {
   formatDuration,
   formatRelative,
   isActiveStatus,
+  parseTime,
+  isWaitingOnHuman,
   useCancelSession,
   useNow,
   useRetryIssue,
@@ -41,6 +45,8 @@ import {
   type SessionView,
 } from '../hooks';
 import { DataSourceBadge, ResourceNotice } from './DataSourceBadge';
+import { SafeLink } from './SafeLink';
+import { safeHref, validateLink, type LinkPolicy } from '../api/links';
 
 export const sessionStateClass: Record<SessionView['status'], string> = {
   Running: 'running',
@@ -87,11 +93,16 @@ export function SessionDetailView({
     notify(message);
     onRefresh?.();
   };
-  const cancel = useCancelSession(live ? session.id : null, accepted('Cancellation accepted by Relay'));
-  const message = useSessionMessage(live ? session.id : null, accepted('Message accepted; it will appear once Devin echoes it back'));
-  const retry = useRetryIssue(live ? session.issueId : null, accepted('Retry accepted; a new bounded session will be scheduled'));
+  const sessionTarget = useMemo(
+    () => (live ? { id: session.id, version: session.version ?? undefined } : null),
+    [live, session.id, session.version],
+  );
+  const issueTarget = useMemo(() => (live ? { id: session.issueId } : null), [live, session.issueId]);
+  const cancel = useCancelSession(sessionTarget, accepted('Cancellation accepted by Relay'));
+  const message = useSessionMessage(sessionTarget, accepted('Message accepted; it will appear once Devin echoes it back'));
+  const retry = useRetryIssue(issueTarget, accepted('Retry accepted; a new bounded session will be scheduled'));
 
-  const waitingOnHuman = session.status === 'Waiting on owner' || (session.humanGate !== null && session.humanGate.kind !== 'none');
+  const waitingOnHuman = isWaitingOnHuman(session);
   const workspaceInconsistent = waitingOnHuman && live && !session.workspaceReleased;
 
   const outputsCount =
@@ -182,16 +193,16 @@ export function SessionDetailView({
       <div className="session-facts">
         <span>
           <small>Repository</small>
-          <a href={session.repositoryUrl} target="_blank" rel="noreferrer">
+          <SafeLink href={session.repositoryUrl} policy="github">
             {session.repository} <ExternalLink size={11} />
-          </a>
+          </SafeLink>
         </span>
         <span>
           <small>Commit</small>
           {session.commit ? (
-            <a href={`${session.repositoryUrl}/commit/${session.commit}`} target="_blank" rel="noreferrer">
+            <SafeLink href={`${session.repositoryUrl}/commit/${encodeURIComponent(session.commit)}`} policy="github">
               <GitCommitHorizontal size={12} /> {session.commit.slice(0, 10)}
-            </a>
+            </SafeLink>
           ) : (
             <strong className="muted">Not recorded in demo data</strong>
           )}
@@ -199,9 +210,9 @@ export function SessionDetailView({
         <span>
           <small>Branch</small>
           {session.branch ? (
-            <a href={`${session.repositoryUrl}/tree/${session.branch}`} target="_blank" rel="noreferrer">
+            <SafeLink href={`${session.repositoryUrl}/tree/${session.branch.split('/').map(encodeURIComponent).join('/')}`} policy="github">
               {session.branch}
-            </a>
+            </SafeLink>
           ) : (
             <strong className="muted">None</strong>
           )}
@@ -274,7 +285,7 @@ export function SessionDetailView({
           )}
 
           {tab === 'conversation' && (
-            <SessionConversation session={session} messageState={message.state} onSend={body => void message.run({ body })} onDismiss={message.reset} notify={notify} />
+            <SessionConversation session={session} messageState={message.state} onSend={body => message.run({ body })} onDismiss={message.reset} notify={notify} />
           )}
 
           {tab === 'outputs' && <SessionOutputs session={session} notify={notify} />}
@@ -346,9 +357,9 @@ export function SessionDetailView({
                   Review recovery options
                 </button>
               )
-            ) : session.status === 'Waiting on owner' ? (
+            ) : waitingOnHuman ? (
               <button className="primary-button" onClick={() => goToIssue(session.issueId)}>
-                Open owner decision
+                Open issue · {gateLabel(session.humanGate?.kind ?? 'owner').toLowerCase()}
               </button>
             ) : (
               <button className="secondary-button" onClick={() => notify(live ? 'Run log export is not exposed by the API yet' : 'Session logs exported (simulated)')}>
@@ -392,21 +403,47 @@ function ExternalSessionLinks({ session, notify }: { session: SessionView; notif
   const links = session.links;
   return (
     <>
-      {links?.devin_session_url ? (
-        <a className="secondary-button" href={links.devin_session_url} target="_blank" rel="noreferrer">
-          Open in Devin <ExternalLink size={14} />
-        </a>
-      ) : (
-        <span className="secondary-button disabled" title="The API did not supply a canonical Devin session link">
-          No Devin link
-        </span>
-      )}
+      <SafeLink
+        className="secondary-button"
+        href={links?.devin_session_url}
+        policy="devin"
+        fallback={
+          <span className="secondary-button disabled" title={linkProblem(links?.devin_session_url, 'devin') ?? 'The API did not supply a canonical Devin session link'}>
+            {links?.devin_session_url ? <ShieldAlert size={14} /> : null} {links?.devin_session_url ? 'Devin link withheld' : 'No Devin link'}
+          </span>
+        }
+      >
+        Open in Devin <ExternalLink size={14} />
+      </SafeLink>
       {links?.devin_desktop_url && (
-        <a className="secondary-button" href={links.devin_desktop_url} target="_blank" rel="noreferrer" title="Authenticated Devin Desktop / remote computer">
+        <SafeLink
+          className="secondary-button"
+          href={links.devin_desktop_url}
+          policy="devin"
+          title="Authenticated Devin Desktop / remote computer"
+          fallback={
+            <span className="secondary-button disabled" title={linkProblem(links.devin_desktop_url, 'devin') ?? undefined}>
+              <ShieldAlert size={14} /> Desktop link withheld
+            </span>
+          }
+        >
           <Monitor size={14} /> Remote computer
-        </a>
+        </SafeLink>
       )}
     </>
+  );
+}
+
+function linkProblem(url: string | null | undefined, policy: LinkPolicy): string | null {
+  const check = validateLink(url, policy);
+  return check.ok ? null : check.reason;
+}
+
+function LinkWithheld({ url, policy }: { url: string; policy: LinkPolicy }) {
+  return (
+    <small className="unsafe-link" title={url}>
+      <ShieldAlert size={11} /> Link withheld · {linkProblem(url, policy)}
+    </small>
   );
 }
 
@@ -448,11 +485,12 @@ function SessionConversation({
 }: {
   session: SessionView;
   messageState: CommandState;
-  onSend: (body: string) => void;
+  onSend: (body: string) => Promise<CommandAccepted | null>;
   onDismiss: () => void;
   notify: (message: string) => void;
 }) {
   const [draft, setDraft] = useState('');
+  const [sending, setSending] = useState(false);
   const live = session.source === 'live';
   const conversation = session.conversation;
   const embeddable = session.links?.conversation_embeddable ?? false;
@@ -485,9 +523,9 @@ function SessionConversation({
             <span>
               The approved Devin API does not expose this session&apos;s messages to Relay.{' '}
               {session.links?.devin_session_url ? (
-                <a href={session.links.devin_session_url} target="_blank" rel="noreferrer">
+                <SafeLink href={session.links.devin_session_url} policy="devin">
                   Open the authenticated Devin session
-                </a>
+                </SafeLink>
               ) : (
                 'No authenticated session link was supplied.'
               )}
@@ -523,14 +561,20 @@ function SessionConversation({
         />
         <button
           className="primary-button"
-          disabled={!live || draft.trim().length === 0 || messageState.kind === 'pending'}
-          onClick={() => {
+          disabled={!live || sending || draft.trim().length === 0 || messageState.kind === 'pending'}
+          onClick={async () => {
             if (!live) {
               notify('Messaging requires a live session');
               return;
             }
-            onSend(draft.trim());
-            setDraft('');
+            const body = draft.trim();
+            setSending(true);
+            try {
+              const accepted = await onSend(body);
+              if (accepted) setDraft(current => (current.trim() === body ? '' : current));
+            } finally {
+              setSending(false);
+            }
           }}
         >
           {messageState.kind === 'pending' ? <Loader2 size={15} className="spin" /> : <Send size={15} />} Send
@@ -569,9 +613,9 @@ function ConversationBubble({ message }: { message: ConversationMessage }) {
                 <li key={attachment.id}>
                   <Paperclip size={12} />
                   {attachment.url ? (
-                    <a href={attachment.url} target="_blank" rel="noreferrer">
+                    <SafeLink href={attachment.url} policy="artifact" fallback={<span>{attachment.name}</span>}>
                       {attachment.name}
-                    </a>
+                    </SafeLink>
                   ) : (
                     attachment.name
                   )}
@@ -627,7 +671,7 @@ function SessionOutputs({ session, notify }: { session: SessionView; notify: (me
                   {output.label} <code>{output.schema}</code>
                 </strong>
                 <small>
-                  {output.accepted ? 'Accepted' : 'Rejected · cannot advance the lifecycle'} · {formatRelative(Date.parse(output.produced_at), now)}
+                  {output.accepted ? 'Accepted' : 'Rejected · cannot advance the lifecycle'} · {formatRelative(parseTime(output.produced_at), now)}
                 </small>
                 {output.summary && <span>{output.summary}</span>}
               </div>
@@ -645,8 +689,8 @@ function SessionOutputs({ session, notify }: { session: SessionView; notify: (me
                   key={artifact.id}
                   label={artifact.label}
                   meta={`${artifact.kind} · ${artifact.content_type} · ${Math.max(1, Math.round(artifact.size_bytes / 1024))} KB${artifact.retained ? '' : ' · not retained'}`}
-                  href={artifact.url}
-                  onClick={() => notify(artifact.url ? 'Opening artifact' : 'Artifact content is not exposed by the API')}
+                  href={safeHref(artifact.url, 'artifact') ?? undefined}
+                  onClick={() => notify(artifact.url ? 'Artifact link withheld: it did not pass the HTTPS link policy' : 'Artifact content is not exposed by the API')}
                 />
               ))
             : session.artifactLabels.map((artifact, index) => (
@@ -690,7 +734,7 @@ function ArtifactRow({ label, meta, href, onClick }: { label: string; meta: stri
   );
   if (href) {
     return (
-      <a href={href} target="_blank" rel="noreferrer" className="artifact-link">
+      <a href={href} target="_blank" rel="noreferrer noopener" className="artifact-link">
         {inner}
       </a>
     );
@@ -705,9 +749,10 @@ function PullRequestRow({ pr }: { pr: PullRequestRef }) {
         <GitPullRequest size={16} />
       </span>
       <div>
-        <a href={pr.html_url} target="_blank" rel="noreferrer">
+        <SafeLink href={pr.html_url} policy="github" fallback={<strong>{pr.repository}#{pr.number} · {pr.title}</strong>}>
           {pr.repository}#{pr.number} · {pr.title} <ExternalLink size={11} />
-        </a>
+        </SafeLink>
+        {!safeHref(pr.html_url, 'github') && <LinkWithheld url={pr.html_url} policy="github" />}
         <small>
           {pr.head_branch} → {pr.base_branch} · {pr.head_sha.slice(0, 10)} · {pr.draft ? 'draft' : pr.state}
         </small>
@@ -731,9 +776,9 @@ function ReviewPanel({ review }: { review: DevinReviewState }) {
         {review.head_sha && <small>head {review.head_sha.slice(0, 10)}</small>}
         {review.completed_at && <small>completed {formatDateTime(review.completed_at)}</small>}
         {review.url && (
-          <a href={review.url} target="_blank" rel="noreferrer">
+          <SafeLink href={review.url} policy="devin">
             Open review <ExternalLink size={11} />
-          </a>
+          </SafeLink>
         )}
       </div>
       {review.findings.length > 0 && (

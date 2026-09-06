@@ -308,6 +308,7 @@ export interface SessionSummary {
   current_action: string;
   next_checkpoint?: string;
   correlation_id: string;
+  human_gate?: HumanGate;
 }
 
 export interface SessionDetail extends SessionSummary {

@@ -30,6 +30,8 @@ import {
   Play,
   Plus,
   RefreshCw,
+  Loader2,
+  ShieldAlert,
   RotateCcw,
   Search,
   Send,
@@ -60,6 +62,7 @@ import {
 import {
   fromApiDetail,
   fromApiSummary,
+  isWaitingOnHuman,
   fromDemoSession,
   useAnalytics,
   useApiStatus,
@@ -122,13 +125,18 @@ function App() {
 
   const api = useApiStatus();
   const live = api.mode === 'live' || api.mode === 'degraded';
+  const demo = api.mode === 'demo';
+  // While checking, or after a reachable API failure, no issue/session records may render — live or demo.
+  const gated = api.mode === 'checking' || api.mode === 'error';
   const liveSessions = useSessions({}, live);
   const liveIssues = useLiveIssueList(issueFilter, issueSearch, live);
   const analytics = useAnalytics(live);
   const runningSessionCount = live
     ? liveSessions.data?.items.filter(session => session.status === 'running').length ?? 0
-    : devinSessions.filter(session => session.status === 'Running').length;
-  const issueCount = live ? liveIssues.data?.total ?? 0 : issues.length;
+    : demo
+      ? devinSessions.filter(session => session.status === 'Running').length
+      : null;
+  const issueCount = live ? liveIssues.data?.total ?? 0 : demo ? issues.length : null;
 
   const notify = (message: string) => {
     setToast(message);
@@ -146,7 +154,8 @@ function App() {
   const runDryTest = () => {
     setView('sessions');
     if (live) void dryRun.run();
-    else notify('Dry-run reproduction session queued (simulated)');
+    else if (demo) notify('Dry-run reproduction session queued (simulated)');
+    else notify('Relay API is not available; dry-run was not sent');
   };
 
   return (
@@ -178,8 +187,8 @@ function App() {
               >
                 <Icon size={18} strokeWidth={1.9} />
                 <span>{item.label}</span>
-                {item.key === 'sessions' && <b>{runningSessionCount}</b>}
-                {item.key === 'issues' && <b>{issueCount}</b>}
+                {item.key === 'sessions' && <b>{runningSessionCount ?? '–'}</b>}
+                {item.key === 'issues' && <b>{issueCount ?? '–'}</b>}
               </button>
             );
           })}
@@ -195,7 +204,7 @@ function App() {
             ] as [IssueListFilter, string, string, string[], number][]
           ).map(([key, dot, label, states, demoCount]) => {
             const counts = analytics.data?.state_counts;
-            const count = live ? states.reduce((sum, state) => sum + (counts?.[state as keyof typeof counts] ?? 0), 0) : demoCount;
+            const count = live ? states.reduce((sum, state) => sum + (counts?.[state as keyof typeof counts] ?? 0), 0) : demo ? demoCount : null;
             return (
               <button
                 className="saved-view"
@@ -207,7 +216,7 @@ function App() {
               >
                 <span className={`dot ${dot}`} />
                 {label}
-                <b>{live && !analytics.data ? '–' : count}</b>
+                <b>{count === null || (live && !analytics.data) ? '–' : count}</b>
               </button>
             );
           })}
@@ -217,12 +226,18 @@ function App() {
         <div className="environment-card">
           <div className="environment-title">
             <span className={`pulse-dot ${api.mode}`} />
-            {api.mode === 'checking' ? 'Checking API…' : live ? 'Connected to Relay API' : 'Demo environment'}
+            {api.mode === 'checking' ? 'Checking API…' : api.mode === 'error' ? 'Relay API error' : live ? 'Connected to Relay API' : 'Demo environment'}
           </div>
           <p>
-            {live
-              ? <>Events, sessions, and PRs are scoped to <strong>exloong/superset</strong>.{api.mode === 'degraded' && api.reason ? <> Degraded: {api.reason}.</> : null}</>
-              : <>API unreachable; showing committed demo data for <strong>exloong/superset</strong>. Nothing here is live.</>}
+            {live ? (
+              <>Events, sessions, and PRs are scoped to <strong>exloong/superset</strong>.{api.mode === 'degraded' && api.reason ? <> Degraded: {api.reason}.</> : null}</>
+            ) : api.mode === 'error' ? (
+              <>The API answered but is not usable: {api.reason}. No records are shown; demo data is disabled.</>
+            ) : api.mode === 'checking' ? (
+              <>Waiting for the Relay API health and readiness probes.</>
+            ) : (
+              <>API unreachable; showing committed demo data for <strong>exloong/superset</strong>. Nothing here is live.</>
+            )}
           </p>
           <button onClick={() => setView('settings')}>
             Review safeguards <ArrowRight size={14} />
@@ -265,11 +280,12 @@ function App() {
         </header>
 
         <div className="page">
-          {view === 'overview' && <Overview goToIssue={goToIssue} live={live} analytics={analytics} />}
+          {gated && view !== 'workflow' && view !== 'settings' && <ApiGate api={api} />}
+          {!gated && view === 'overview' && <Overview goToIssue={goToIssue} live={live} analytics={analytics} />}
           {view === 'workflow' && <Workflow notify={notify} />}
-          {view === 'experience' && <ExperiencePreview notify={notify} />}
-          {view === 'sessions' && <DevinSessions goToIssue={goToIssue} notify={notify} live={live} sessions={liveSessions} onRunDryTest={runDryTest} />}
-          {view === 'issues' && !live && (
+          {!gated && view === 'experience' && <ExperiencePreview notify={notify} />}
+          {!gated && view === 'sessions' && <DevinSessions goToIssue={goToIssue} notify={notify} live={live} sessions={liveSessions} onRunDryTest={runDryTest} />}
+          {view === 'issues' && demo && (
             <IssueWorkbench
               selected={selectedIssue}
               onSelect={setSelectedIssueId}
@@ -315,9 +331,48 @@ function App() {
   );
 }
 
+function ApiGate({ api }: { api: ApiStatus }) {
+  if (api.mode === 'checking') {
+    return (
+      <section className="api-gate checking" role="status" aria-live="polite">
+        <Loader2 size={22} className="spin" />
+        <div>
+          <strong>Checking the Relay API</strong>
+          <p>Waiting for <code>/api/v1/health</code>{api.health ? <> and <code>/api/v1/ready</code></> : null} before showing any records.</p>
+        </div>
+      </section>
+    );
+  }
+  return (
+    <section className="api-gate error" role="alert">
+      <ShieldAlert size={22} />
+      <div>
+        <strong>Relay API returned an error — no records shown</strong>
+        <p>
+          {api.reason ?? 'The API answered but the response could not be trusted.'}
+          {api.error?.status ? <> (HTTP {api.error.status}, {api.error.code})</> : api.error ? <> ({api.error.code})</> : null}
+          {api.error?.correlationId ? <> · correlation {api.error.correlationId}</> : null}
+        </p>
+        <p>Demo data is disabled because an API is reachable at this origin. Fix the API or authentication and retry.</p>
+        <button className="secondary-button" onClick={() => void api.refresh()}>
+          <RefreshCw size={15} /> Retry health check
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function ModePill({ api }: { api: ApiStatus }) {
   const label =
-    api.mode === 'checking' ? 'Checking API' : api.mode === 'live' ? 'Live · exloong/superset' : api.mode === 'degraded' ? `Degraded · ${api.reason ?? 'API'}` : 'Demo data';
+    api.mode === 'checking'
+      ? 'Checking API'
+      : api.mode === 'live'
+        ? 'Live · exloong/superset'
+        : api.mode === 'degraded'
+          ? `Degraded · ${api.reason ?? 'API'}`
+          : api.mode === 'error'
+            ? `API error · ${api.reason ?? 'unusable response'}`
+            : 'Demo data';
   return (
     <div className={`mode-pill ${api.mode}`} title={api.reason ?? (api.health?.version ? `API ${api.health.version}` : undefined)} role="status">
       <span />
@@ -704,7 +759,7 @@ function DevinSessions({
   const visibleSessions = allSessions.filter(session => {
     if (filter === 'attention') return session.status === 'Needs attention' || session.status === 'Failed';
     if (filter === 'all') return true;
-    return session.status !== 'Completed' && session.status !== 'Cancelled' && session.status !== 'Failed';
+    return isWaitingOnHuman(session) || (session.status !== 'Completed' && session.status !== 'Cancelled' && session.status !== 'Failed');
   });
   const selectedSummary = visibleSessions.find(session => session.id === selectedSessionId) ?? visibleSessions[0] ?? allSessions[0] ?? null;
   const detail = useSession(live && selectedSummary ? selectedSummary.id : null, live);
@@ -714,7 +769,7 @@ function DevinSessions({
   const count = (status: SessionView['status']) => allSessions.filter(session => session.status === status).length;
   const capacity = live ? sessions.data?.capacity : undefined;
   const slots = capacity?.slots ?? (live ? null : 6);
-  const releasedWaiting = allSessions.filter(session => session.status === 'Waiting on owner');
+  const releasedWaiting = allSessions.filter(isWaitingOnHuman);
   const allReleased = releasedWaiting.every(session => session.workspaceReleased);
 
   return (

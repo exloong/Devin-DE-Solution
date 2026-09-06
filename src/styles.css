@@ -5567,6 +5567,70 @@ input[type="range"] {
   box-shadow: 0 0 0 4px rgba(225, 154, 73, 0.14);
 }
 
+.mode-pill.error {
+  border-color: #f3c6c6;
+  color: #b3261e;
+  background: #fdf0ef;
+}
+
+.mode-pill.error span,
+.pulse-dot.error {
+  background: #d64545;
+  box-shadow: 0 0 0 3px rgba(214, 69, 69, 0.16);
+}
+
+.api-gate {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  padding: 22px 24px;
+  border: 1px solid #e4e6ec;
+  border-radius: 14px;
+  background: #fff;
+  max-width: 760px;
+}
+
+.api-gate.checking {
+  color: #4a5162;
+}
+
+.api-gate.error {
+  border-color: #f3c6c6;
+  background: #fdf5f4;
+  color: #7a1f1a;
+}
+
+.api-gate strong {
+  display: block;
+  font-size: 15px;
+  margin-bottom: 4px;
+}
+
+.api-gate p {
+  margin: 0 0 8px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.api-gate code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.unsafe-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #b3261e;
+  font-size: 12px;
+  cursor: help;
+}
+
+.secondary-button.disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .command-feedback {
   display: flex;
   align-items: center;

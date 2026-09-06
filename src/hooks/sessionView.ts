@@ -11,6 +11,7 @@ import type {
   SessionOutput,
   SessionSummary,
 } from '../api';
+import { TARGET_REPOSITORY_URL, safeHref } from '../api/links';
 import { TARGET_REPOSITORY } from '../api';
 import type { DevinSession, DevinSessionEvent, DevinSessionStatus } from '../data';
 
@@ -24,6 +25,7 @@ export type DataSource = 'demo' | 'live';
 export interface SessionView {
   source: DataSource;
   id: string;
+  version: number | null;
   shortId: string;
   issueId: string;
   issueKey: string;
@@ -66,6 +68,7 @@ export function fromDemoSession(session: DevinSession): SessionView {
   return {
     source: 'demo',
     id: session.id,
+    version: null,
     shortId: session.id,
     issueId: String(session.issueId),
     issueKey: session.issueKey,
@@ -89,7 +92,7 @@ export function fromDemoSession(session: DevinSession): SessionView {
     currentAction: session.currentAction,
     nextCheckpoint: session.nextCheckpoint,
     repository: TARGET_REPOSITORY,
-    repositoryUrl: `https://github.com/${TARGET_REPOSITORY}`,
+    repositoryUrl: TARGET_REPOSITORY_URL,
     commit: null,
     branch: session.branch ?? null,
     events: session.events,
@@ -123,8 +126,7 @@ export function transitionLabel(transition: string): string {
   return transitionLabels[transition] ?? transition.replace(/_/g, ' ');
 }
 
-export function mapApiStatus(status: AgentSessionStatus, gate?: HumanGate | null): DevinSessionStatus {
-  if (status === 'completed' && gate && gate.kind !== 'none' && gate.workspace_released) return 'Waiting on owner';
+export function mapApiStatus(status: AgentSessionStatus): DevinSessionStatus {
   switch (status) {
     case 'running':
       return 'Running';
@@ -206,6 +208,7 @@ export function fromApiSummary(session: SessionSummary, now: number): SessionVie
   return {
     source: 'live',
     id: session.id,
+    version: session.version,
     shortId: `DEV-${session.id.slice(0, 8)}`,
     issueId: session.issue_id,
     issueKey: session.issue_key,
@@ -229,7 +232,7 @@ export function fromApiSummary(session: SessionSummary, now: number): SessionVie
     currentAction: session.current_action,
     nextCheckpoint: session.next_checkpoint ?? '—',
     repository: session.repository.full_name,
-    repositoryUrl: session.repository.html_url,
+    repositoryUrl: safeHref(session.repository.html_url, 'github') ?? TARGET_REPOSITORY_URL,
     commit: session.target_commit,
     branch: session.branch ?? null,
     events: [],
@@ -240,7 +243,7 @@ export function fromApiSummary(session: SessionSummary, now: number): SessionVie
     pullRequests: null,
     review: null,
     links: null,
-    humanGate: null,
+    humanGate: session.human_gate ?? null,
     correlationId: session.correlation_id,
   };
 }
@@ -249,7 +252,7 @@ export function fromApiDetail(session: SessionDetail, now: number): SessionView 
   const base = fromApiSummary(session, now);
   return {
     ...base,
-    status: mapApiStatus(session.status, session.human_gate),
+    status: mapApiStatus(session.status),
     events: eventsFromApi(session.events, now),
     artifactLabels: session.artifacts.map(artifact => artifact.label),
     artifacts: session.artifacts,
@@ -264,4 +267,8 @@ export function fromApiDetail(session: SessionDetail, now: number): SessionView 
 
 export function isActiveStatus(status: DevinSessionStatus): boolean {
   return status === 'Running' || status === 'Queued';
+}
+
+export function isWaitingOnHuman(session: Pick<SessionView, 'status' | 'humanGate'>): boolean {
+  return session.status === 'Waiting on owner' || (session.humanGate !== null && session.humanGate.kind !== 'none');
 }

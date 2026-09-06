@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  ApiError,
   apiClient,
   type AnalyticsSummary,
   type CancelSessionCommand,
@@ -7,6 +8,7 @@ import {
   type IssueDetail,
   type IssueFilters,
   type IssueSummary,
+  type MutationTarget,
   type OwnerDecisionCommand,
   type Page,
   type Readiness,
@@ -26,18 +28,27 @@ const LIST_POLL_MS = 15_000;
 const DETAIL_POLL_MS = 5_000;
 const STALE_AFTER_MS = 60_000;
 
-export type ApiMode = 'checking' | 'live' | 'degraded' | 'demo';
+/**
+ * `demo`     — no Relay API answered at all; the committed demo dataset is shown.
+ * `checking` — health and readiness have not both resolved yet.
+ * `live`     — API healthy and ready.
+ * `degraded` — API reachable but reports degraded health or readiness.
+ * `error`    — API reachable but health failed (401/403, malformed JSON, policy or server error).
+ *              No demo records may be shown in this mode.
+ */
+export type ApiMode = 'checking' | 'live' | 'degraded' | 'demo' | 'error';
 
 export interface ApiStatus {
   mode: ApiMode;
   health?: Health;
   readiness?: Readiness;
   reason?: string;
+  error?: ApiError;
   checkedAt?: number;
   refresh: () => Promise<void>;
 }
 
-/** Probes /health and /ready to decide whether the dashboard runs live or on demo data. */
+/** Probes /health and /ready to decide whether the dashboard runs live, on demo data, or must show an API error. */
 export function useApiStatus(pollMs = 30_000): ApiStatus {
   const health = useResource(() => apiClient.health(), [], { pollMs });
   const readiness = useResource(() => apiClient.ready(), [], { pollMs, enabled: health.isLive });
@@ -49,18 +60,43 @@ export function useApiStatus(pollMs = 30_000): ApiStatus {
 
   if (health.state.kind === 'loading') return { mode: 'checking', refresh };
   if (health.state.kind === 'demo') return { mode: 'demo', reason: health.state.reason, refresh };
-  if (health.state.kind === 'error') return { mode: 'demo', reason: health.state.error.message, refresh };
-  if (health.state.kind === 'empty') return { mode: 'demo', reason: 'Health endpoint returned nothing', refresh };
+  if (health.state.kind === 'error') {
+    return { mode: 'error', reason: health.state.error.message, error: health.state.error, refresh };
+  }
+  if (health.state.kind === 'empty') {
+    const error = new ApiError('malformed_response', 'Health endpoint returned no payload');
+    return { mode: 'error', reason: error.message, error, refresh };
+  }
 
   const healthData = health.state.data;
-  const readinessData = readiness.data;
-  const degraded = healthData.status === 'degraded' || (readinessData && (readinessData.database !== 'ok' || readinessData.worker !== 'ok'));
+  const checkedAt = health.state.fetchedAt;
+
+  if (readiness.state.kind === 'loading') return { mode: 'checking', health: healthData, checkedAt, refresh };
+  if (readiness.state.kind === 'error' || readiness.state.kind === 'demo' || readiness.state.kind === 'empty') {
+    const reason =
+      readiness.state.kind === 'error'
+        ? `Readiness check failed: ${readiness.state.error.message}`
+        : readiness.state.kind === 'demo'
+          ? `Readiness check unreachable: ${readiness.state.reason}`
+          : 'Readiness endpoint returned no payload';
+    return {
+      mode: 'degraded',
+      health: healthData,
+      reason,
+      error: readiness.state.kind === 'error' ? readiness.state.error : undefined,
+      checkedAt,
+      refresh,
+    };
+  }
+
+  const readinessData = readiness.state.data;
+  const degraded = healthData.status === 'degraded' || readinessData.database !== 'ok' || readinessData.worker !== 'ok';
   return {
     mode: degraded ? 'degraded' : 'live',
     health: healthData,
     readiness: readinessData,
     reason: degraded ? describeDegraded(healthData, readinessData) : undefined,
-    checkedAt: health.state.fetchedAt,
+    checkedAt,
     refresh,
   };
 }
@@ -118,66 +154,76 @@ export function useAnalytics(enabled = true): Resource<AnalyticsSummary> {
   return useResource(() => apiClient.analyticsSummary(), [], { pollMs: LIST_POLL_MS * 4, staleAfterMs: STALE_AFTER_MS * 5, enabled });
 }
 
-export function useReporterResponse(issueId: string | null, onAccepted?: () => void) {
+export function useReporterResponse(target: MutationTarget | null, onAccepted?: () => void) {
+  const id = target?.id ?? null;
+  const version = target?.version;
   return useCommand(
     useCallback(
       (key: string, command: ReporterResponseCommand) => {
-        if (!issueId) return Promise.reject(new Error('No issue selected'));
-        return apiClient.respondToIssue(issueId, command, key);
+        if (!id) return Promise.reject(new Error('No issue selected'));
+        return apiClient.respondToIssue({ id, version }, command, key);
       },
-      [issueId],
+      [id, version],
     ),
     onAccepted,
   );
 }
 
-export function useOwnerDecision(issueId: string | null, onAccepted?: () => void) {
+export function useOwnerDecision(target: MutationTarget | null, onAccepted?: () => void) {
+  const id = target?.id ?? null;
+  const version = target?.version;
   return useCommand(
     useCallback(
       (key: string, command: OwnerDecisionCommand) => {
-        if (!issueId) return Promise.reject(new Error('No issue selected'));
-        return apiClient.decideIssue(issueId, command, key);
+        if (!id) return Promise.reject(new Error('No issue selected'));
+        return apiClient.decideIssue({ id, version }, command, key);
       },
-      [issueId],
+      [id, version],
     ),
     onAccepted,
   );
 }
 
-export function useRetryIssue(issueId: string | null, onAccepted?: () => void) {
+export function useRetryIssue(target: MutationTarget | null, onAccepted?: () => void) {
+  const id = target?.id ?? null;
+  const version = target?.version;
   return useCommand(
     useCallback(
       (key: string, command: RetryCommand) => {
-        if (!issueId) return Promise.reject(new Error('No issue selected'));
-        return apiClient.retryIssue(issueId, command, key);
+        if (!id) return Promise.reject(new Error('No issue selected'));
+        return apiClient.retryIssue({ id, version }, command, key);
       },
-      [issueId],
+      [id, version],
     ),
     onAccepted,
   );
 }
 
-export function useCancelSession(sessionId: string | null, onAccepted?: () => void) {
+export function useCancelSession(target: MutationTarget | null, onAccepted?: () => void) {
+  const id = target?.id ?? null;
+  const version = target?.version;
   return useCommand(
     useCallback(
       (key: string, command: CancelSessionCommand) => {
-        if (!sessionId) return Promise.reject(new Error('No session selected'));
-        return apiClient.cancelSession(sessionId, command, key);
+        if (!id) return Promise.reject(new Error('No session selected'));
+        return apiClient.cancelSession({ id, version }, command, key);
       },
-      [sessionId],
+      [id, version],
     ),
     onAccepted,
   );
 }
 
-export function useSessionMessage(sessionId: string | null, onAccepted?: () => void) {
+export function useSessionMessage(target: MutationTarget | null, onAccepted?: () => void) {
+  const id = target?.id ?? null;
+  const version = target?.version;
   return useCommand(
     useCallback(
       (key: string, command: SessionMessageCommand) => {
-        if (!sessionId) return Promise.reject(new Error('No session selected'));
-        return apiClient.messageSession(sessionId, command, key);
+        if (!id) return Promise.reject(new Error('No session selected'));
+        return apiClient.messageSession({ id, version }, command, key);
       },
-      [sessionId],
+      [id, version],
     ),
     onAccepted,
   );
