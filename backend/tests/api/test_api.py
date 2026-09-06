@@ -4,8 +4,10 @@ import hashlib
 import hmac
 import json
 import uuid
+from pathlib import Path
 
 import pytest
+from app.api.app import auth_from_env
 from app.domain.scenarios import SCENARIO_NAMES
 from app.domain.states import TARGET_REPOSITORY, ActorRole
 from app.persistence import tables
@@ -152,6 +154,48 @@ def test_github_webhook_is_signed_scoped_and_idempotent(
     )
     assert unsigned.status_code == 401
     assert unsigned.json()["error"]["code"] == "invalid_signature"
+
+
+def test_github_webhook_secret_can_be_loaded_from_file(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    secret_file = tmp_path / "webhook-secret"
+    secret_file.write_text(f"{WEBHOOK_SECRET}\n", encoding="utf-8")
+    monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET_FILE", str(secret_file))
+    payload: dict[str, object] = {
+        "action": "opened",
+        "repository": {"full_name": TARGET_REPOSITORY},
+        "issue": {
+            "number": 999002,
+            "title": "Webhook file-secret test",
+            "body": "A reproducible failure.",
+            "user": {"login": "reporter-1"},
+            "labels": [],
+        },
+        "sender": {"login": "reporter-1"},
+    }
+
+    accepted = _webhook(client, payload, "webhook-file-secret")
+
+    assert accepted.status_code == 202
+
+
+def test_operator_auth_tokens_can_be_loaded_from_file(tmp_path: Path) -> None:
+    token_file = tmp_path / "operator-tokens"
+    token_file.write_text("test-token:relay-operator:operator\n", encoding="utf-8")
+
+    auth = auth_from_env(
+        {
+            "RELAY_MODE": "live",
+            "RELAY_AUTH_TOKENS_FILE": str(token_file),
+        }
+    )
+
+    assert auth.enabled
+    assert auth.demo_principal is None
 
 
 def test_seeded_issues_match_scenarios(client: TestClient) -> None:

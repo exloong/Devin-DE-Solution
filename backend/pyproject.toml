@@ -10,12 +10,12 @@ dependencies = [
     "alembic==1.19.1",
     "psycopg2-binary==2.9.10",
     "uvicorn==0.52.4",
+    "httpx==0.28.1",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest==9.1.1",
-    "httpx==0.28.1",
     "ruff==0.16.5",
     "mypy==2.3.1",
 ]

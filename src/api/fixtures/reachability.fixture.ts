@@ -4,10 +4,9 @@
  *   npm run test:fixtures
  *
  * Bundles this file with esbuild and runs it under Node. It proves that
- * demo data is selected only when no API answered, and that every reachable
- * failure — wrong repository, malformed live payload, 401/403, schema
- * mapping errors — resolves to an explicit `error` state. It also covers the
- * link policy, invalid-time formatting and the session-status mapping.
+ * production fails closed when no API answers, demo fallback is opt-in, and
+ * every reachable failure resolves to an explicit `error` state. It also
+ * covers link policy, invalid-time formatting and session-status mapping.
  */
 import { ApiClient, ApiError, RepositorySafetyError } from '../client';
 import { validateLink } from '../links';
@@ -107,12 +106,13 @@ async function main(): Promise<void> {
   const policy = await failureOf(() => clientReplying({ status: 451, body: JSON.stringify({ code: 'policy_rejected', message: 'Blocked by policy' }) }).listSessions());
   check('top-level envelope parsed', policy.code === 'policy_rejected' && policy.message === 'Blocked by policy', policy);
 
-  // 6. Genuinely absent API → demo.
+  // 6. Genuinely absent API → production error; explicit mockup → demo.
   const network = await failureOf(() => clientReplying(new TypeError('fetch failed')).listSessions());
   check('network failure is apiAbsent', network.apiAbsent);
-  check('network failure resolves to demo', resolveFailureState(loading, network).kind === 'demo');
+  check('network failure fails closed by default', resolveFailureState(loading, network).kind === 'error');
+  check('network failure resolves to demo only when enabled', resolveFailureState(loading, network, true).kind === 'demo');
   const html404 = await failureOf(() => clientReplying({ status: 404, contentType: 'text/html', body: '<!doctype html>' }).listSessions());
-  check('HTML 404 (no API mounted) resolves to demo', resolveFailureState(loading, html404).kind === 'demo');
+  check('HTML 404 (no API mounted) fails closed', resolveFailureState(loading, html404).kind === 'error');
 
   // 7. Previously live data stays visible as stale on any failure.
   const live: ResourceState<number> = { kind: 'live', data: 1, fetchedAt: 1, stale: false };

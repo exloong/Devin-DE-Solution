@@ -3,7 +3,7 @@ services:
     build:
       context: .
     ports:
-      - "${APP_PORT:-4173}:80"
+      - "127.0.0.1:${APP_PORT:-4173}:80"
     depends_on:
       api:
         condition: service_healthy
@@ -19,9 +19,12 @@ services:
       context: ./backend
     environment:
       DATABASE_URL: postgresql+psycopg2://relay:relay@postgres:5432/relay
-      RELAY_MODE: demo
-      RELAY_SEED: "1"
-      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-relay-local-webhook-secret}
+      RELAY_MODE: ${RELAY_MODE:-live}
+      RELAY_SEED: ${RELAY_SEED:-0}
+      RELAY_AUTH_TOKENS: ${RELAY_AUTH_TOKENS:-}
+      RELAY_AUTH_TOKENS_FILE: ${RELAY_AUTH_TOKENS_FILE:-}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      GITHUB_WEBHOOK_SECRET_FILE: ${GITHUB_WEBHOOK_SECRET_FILE:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -45,8 +48,16 @@ services:
     command: ["python", "-m", "app.runtime.worker"]
     environment:
       DATABASE_URL: postgresql+psycopg2://relay:relay@postgres:5432/relay
-      RELAY_MODE: demo
+      RELAY_MODE: ${RELAY_MODE:-live}
       WORKER_POLL_SECONDS: "1"
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_TOKEN_FILE: ${GITHUB_TOKEN_FILE:-}
+      GITHUB_DEFAULT_BRANCH: ${GITHUB_DEFAULT_BRANCH:-master}
+      DEVIN_API_TOKEN: ${DEVIN_API_TOKEN:-}
+      DEVIN_API_TOKEN_FILE: ${DEVIN_API_TOKEN_FILE:-}
+      DEVIN_ORG_ID: ${DEVIN_ORG_ID:-}
+      DEVIN_REVIEW_TOKEN: ${DEVIN_REVIEW_TOKEN:-}
+      DEVIN_REVIEW_TOKEN_FILE: ${DEVIN_REVIEW_TOKEN_FILE:-}
     depends_on:
       postgres:
         condition: service_healthy

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from pathlib import Path
 
 from fastapi import APIRouter, Header, Request, status
 
@@ -60,7 +61,22 @@ async def github_webhook(
     x_github_event: str = Header(alias="X-GitHub-Event", min_length=1, max_length=60),
     x_hub_signature_256: str = Header(alias="X-Hub-Signature-256", min_length=1, max_length=200),
 ) -> dict[str, object]:
-    secret = os.environ.get("GITHUB_WEBHOOK_SECRET")
+    secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "").strip()
+    secret_file = os.environ.get("GITHUB_WEBHOOK_SECRET_FILE", "").strip()
+    if secret and secret_file:
+        raise DomainError(
+            ErrorCode.INTERNAL,
+            "GitHub webhook ingress is misconfigured",
+            {"hint": "configure only one webhook secret source"},
+        )
+    if secret_file:
+        try:
+            secret = Path(secret_file).read_text(encoding="utf-8").strip()
+        except OSError as error:
+            raise DomainError(
+                ErrorCode.INTERNAL,
+                "GitHub webhook secret file cannot be read",
+            ) from error
     if not secret:
         raise DomainError(
             ErrorCode.INTERNAL,

@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Protocol
 
+import httpx
+
 from .errors import ContractValidationError, ValidationCode
 from .json_values import JsonArray, JsonObject, JsonValue
 from .redaction import redact_mapping, redact_text
@@ -98,6 +100,59 @@ class HttpTransport(Protocol):
 
     def send(self, request: HttpRequest) -> HttpResponse:
         """Perform ``request`` and return its response."""
+
+
+@dataclass
+class HttpxTransport:
+    """Production HTTPS transport with bounded timeouts and retries."""
+
+    timeout_seconds: float = 30.0
+    retries: int = 2
+    user_agent: str = "relay-control-plane/0.1"
+
+    def __post_init__(self) -> None:
+        if self.timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        if self.retries < 0:
+            raise ValueError("retries cannot be negative")
+
+    def send(self, request: HttpRequest) -> HttpResponse:
+        headers = {"Accept": "application/json", "User-Agent": self.user_agent}
+        headers.update(request.headers)
+        if request.correlation_id:
+            headers["X-Relay-Correlation-ID"] = request.correlation_id
+        last_error: httpx.HTTPError | None = None
+        for attempt in range(self.retries + 1):
+            try:
+                response = httpx.request(
+                    request.method,
+                    request.url,
+                    headers=headers,
+                    params=request.query,
+                    json=request.json_body,
+                    timeout=self.timeout_seconds,
+                    follow_redirects=False,
+                )
+                try:
+                    json_body = response.json() if response.content else None
+                except ValueError:
+                    json_body = response.text
+                return HttpResponse(
+                    status_code=response.status_code,
+                    json_body=json_body,
+                    headers=dict(response.headers),
+                    correlation_id=request.correlation_id,
+                )
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as error:
+                last_error = error
+                if attempt == self.retries:
+                    break
+        if last_error is None:
+            raise RuntimeError("HTTP transport failed without an error")
+        raise ContractValidationError(
+            ValidationCode.TRANSPORT_FAILURE,
+            f"upstream request failed after {self.retries + 1} attempts",
+        ) from last_error
 
 
 class RecordedTransport:

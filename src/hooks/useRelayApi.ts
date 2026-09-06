@@ -29,7 +29,7 @@ const DETAIL_POLL_MS = 5_000;
 const STALE_AFTER_MS = 60_000;
 
 /**
- * `demo`     — no Relay API answered at all; the committed demo dataset is shown.
+ * `demo`     — an explicit mockup build could not reach the API.
  * `checking` — health and readiness have not both resolved yet.
  * `live`     — API healthy and ready.
  * `degraded` — API reachable but reports degraded health or readiness.
@@ -48,9 +48,10 @@ export interface ApiStatus {
   refresh: () => Promise<void>;
 }
 
-/** Probes /health and /ready to decide whether the dashboard runs live, on demo data, or must show an API error. */
+/** Probes /health and /ready to decide whether the dashboard is usable. */
 export function useApiStatus(pollMs = 30_000): ApiStatus {
-  const health = useResource(() => apiClient.health(), [], { pollMs });
+  const demoFallback = import.meta.env.VITE_ALLOW_DEMO_DATA === 'true';
+  const health = useResource(() => apiClient.health(), [], { pollMs, demoFallback });
   const readiness = useResource(() => apiClient.ready(), [], { pollMs, enabled: health.isLive });
 
   const refresh = useCallback(async () => {

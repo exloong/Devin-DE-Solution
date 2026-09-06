@@ -75,6 +75,12 @@ class GitHubClient(Protocol):
     def list_pull_request_files(self, pull_request_number: int) -> tuple[str, ...]:
         """List paths changed by a Superset pull request."""
 
+    def get_branch_head(self, branch: str) -> TargetCommit:
+        """Resolve a branch to an immutable commit."""
+
+    def get_pull_request_head(self, pull_request_number: int) -> TargetCommit:
+        """Resolve a pull request to its immutable current head."""
+
 
 def _authorize(
     command: GitHubCommand, allowed_capabilities: frozenset[GitHubCapability]
@@ -112,7 +118,9 @@ class FakeGitHubAdapter:
         allowed_capabilities: frozenset[GitHubCapability] | None = None,
         codeowners_content: str = "",
         pull_request_files: Mapping[int, tuple[str, ...]] | None = None,
+        pull_request_heads: Mapping[int, TargetCommit] | None = None,
         known_reviewers: frozenset[str] | None = None,
+        branch_head: TargetCommit | None = None,
     ) -> None:
         if allowed_capabilities is not None and any(
             not isinstance(capability, GitHubCapability)
@@ -129,7 +137,9 @@ class FakeGitHubAdapter:
         )
         self._codeowners_content = codeowners_content
         self._pull_request_files = dict(pull_request_files or {})
+        self._pull_request_heads = dict(pull_request_heads or {})
         self._known_reviewers = known_reviewers
+        self._branch_head = branch_head or TargetCommit(sha="0" * 40)
         self._recorded: list[RecordedCommand] = []
         self._comment_ids = count(start=9_001)
         self._pull_request_numbers = count(start=101)
@@ -230,6 +240,22 @@ class FakeGitHubAdapter:
                 f"no recorded files for pull request {pull_request_number}",
             )
         return self._pull_request_files[pull_request_number]
+
+    def get_branch_head(self, branch: str) -> TargetCommit:
+        if not isinstance(branch, str) or not branch.strip():
+            raise ContractValidationError(
+                ValidationCode.MALFORMED_ENVELOPE, "branch must be non-empty text"
+            )
+        return self._branch_head
+
+    def get_pull_request_head(self, pull_request_number: int) -> TargetCommit:
+        try:
+            return self._pull_request_heads[pull_request_number]
+        except KeyError as error:
+            raise ContractValidationError(
+                ValidationCode.MALFORMED_RESPONSE,
+                f"no recorded head for pull request {pull_request_number}",
+            ) from error
 
     @property
     def recorded(self) -> tuple[RecordedCommand, ...]:
@@ -476,6 +502,32 @@ class LiveGitHubClient:
             ValidationCode.MALFORMED_RESPONSE,
             f"pull request changed more than {MAX_PULL_REQUEST_FILES} files",
         )
+
+    def get_branch_head(self, branch: str) -> TargetCommit:
+        if not isinstance(branch, str) or not branch.strip():
+            raise ContractValidationError(
+                ValidationCode.MALFORMED_ENVELOPE, "branch must be non-empty text"
+            )
+        payload = require_json_object(
+            self._send("GET", f"/commits/{branch.strip()}"),
+            action="resolve branch head",
+        )
+        return TargetCommit(sha=require_str(payload, "sha", action="resolve branch head"))
+
+    def get_pull_request_head(self, pull_request_number: int) -> TargetCommit:
+        _require_positive(pull_request_number, "pull request number")
+        payload = require_json_object(
+            self._send("GET", f"/pulls/{pull_request_number}"),
+            action="resolve pull request head",
+        )
+        _validate_pull_request_number(payload, pull_request_number)
+        head = payload.get("head")
+        if not isinstance(head, Mapping):
+            raise ContractValidationError(
+                ValidationCode.MALFORMED_RESPONSE,
+                "pull request response has no head object",
+            )
+        return TargetCommit(sha=require_str(head, "sha", action="resolve pull request head"))
 
 
 def _require_positive(value: int, field_name: str) -> int:

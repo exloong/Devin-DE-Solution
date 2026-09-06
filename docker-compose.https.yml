@@ -1,0 +1,21 @@
+services:
+  caddy:
+    image: caddy:2.9.1-alpine
+    restart: unless-stopped
+    environment:
+      RELAY_HOST: ${RELAY_HOST:?set RELAY_HOST to the public DNS name}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - relay_caddy_data:/data
+      - relay_caddy_config:/config
+    depends_on:
+      web:
+        condition: service_healthy
+
+volumes:
+  relay_caddy_data:
+  relay_caddy_config:

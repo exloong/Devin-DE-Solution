@@ -423,6 +423,13 @@ class SqlAlchemyUnitOfWork:
             created_at=message.created_at,
         )
 
+    def save_message(self, message: ConversationMessage) -> None:
+        self._update(
+            t.conversation_messages,
+            message.id,
+            message,
+        )
+
     def list_messages(self, session_id: uuid.UUID) -> Sequence[ConversationMessage]:
         return self._many(
             t.conversation_messages,

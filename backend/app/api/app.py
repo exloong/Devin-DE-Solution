@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -30,12 +31,22 @@ DEFAULT_DATABASE_URL = "sqlite:///./relay.sqlite3"
 DEFAULT_DEMO_PRINCIPAL = "demo-operator:operator"
 
 
+def _secret_from_env(env: Mapping[str, str], name: str) -> str:
+    inline = env.get(name, "").strip()
+    file_name = env.get(f"{name}_FILE", "").strip()
+    if inline and file_name:
+        raise ValueError(f"configure only one of {name} or {name}_FILE")
+    if file_name:
+        return Path(file_name).read_text(encoding="utf-8").strip()
+    return inline
+
+
 def auth_from_env(environ: Mapping[str, str] | None = None) -> AuthConfig:
     """RELAY_AUTH_TOKENS configures bearer principals. RELAY_MODE=demo enables
     the explicit demo principal (RELAY_DEMO_PRINCIPAL, `login:role`) for dry
     runs. With neither set, every command is denied."""
     env = os.environ if environ is None else environ
-    tokens = env.get("RELAY_AUTH_TOKENS", "").strip()
+    tokens = _secret_from_env(env, "RELAY_AUTH_TOKENS")
     demo = env.get("RELAY_MODE", "").strip().lower() == "demo"
     return AuthConfig(
         authenticator=parse_token_table(tokens) if tokens else None,
@@ -121,4 +132,12 @@ def create_app(
 
 
 def default_app() -> FastAPI:
-    return create_app(seed_scenarios=os.environ.get("RELAY_SEED", "1") == "1", auth=auth_from_env())
+    mode = os.environ.get("RELAY_MODE", "live").strip().lower()
+    return create_app(
+        seed_scenarios=os.environ.get("RELAY_SEED", "0") == "1",
+        scope=RepositoryScope(
+            default_branch=os.environ.get("GITHUB_DEFAULT_BRANCH", "master"),
+            dry_run=mode == "demo",
+        ),
+        auth=auth_from_env(),
+    )

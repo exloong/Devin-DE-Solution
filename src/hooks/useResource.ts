@@ -2,9 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError } from '../api';
 
 /**
- * A resource is either backed by live API data or by the committed demo
- * dataset. The two never coexist in one value: `demo` carries no records and
- * callers must fall back to `src/data.ts` explicitly.
+ * A resource is backed by the Relay API. An explicitly enabled mockup build
+ * may opt into the committed demo dataset; production builds never do.
  */
 export type ResourceState<T> =
   | { kind: 'loading' }
@@ -23,6 +22,8 @@ export interface ResourceOptions<T> {
   isEmpty?: (data: T) => boolean;
   /** Skip fetching entirely (e.g. no selected id). */
   enabled?: boolean;
+  /** Allow the committed mockup dataset when no API answers. */
+  demoFallback?: boolean;
 }
 
 export interface Resource<T> {
@@ -41,20 +42,23 @@ export function toApiError(error: unknown): ApiError {
 }
 
 /**
- * Decides the resource state after a failed fetch. Demo is chosen only when
- * no API answered (`apiAbsent`); every reachable failure — 401/403, malformed
- * JSON, wrong repository, policy/server errors — is an explicit `error`.
+ * Decides the resource state after a failed fetch. Production treats an
+ * absent API as an error. Mockup builds may explicitly allow demo fallback.
  */
-export function resolveFailureState<T>(previous: ResourceState<T>, error: ApiError): ResourceState<T> {
+export function resolveFailureState<T>(
+  previous: ResourceState<T>,
+  error: ApiError,
+  demoFallback = false,
+): ResourceState<T> {
   if (previous.kind === 'live' || previous.kind === 'stale') {
     return { kind: 'stale', data: previous.data, fetchedAt: previous.fetchedAt, stale: true, error };
   }
-  if (error.apiAbsent) return { kind: 'demo', reason: error.message };
+  if (demoFallback && error.apiAbsent) return { kind: 'demo', reason: error.message };
   return { kind: 'error', error };
 }
 
 export function useResource<T>(fetcher: () => Promise<T>, deps: readonly unknown[], options: ResourceOptions<T> = {}): Resource<T> {
-  const { pollMs = 0, staleAfterMs = 0, isEmpty, enabled = true } = options;
+  const { pollMs = 0, staleAfterMs = 0, isEmpty, enabled = true, demoFallback = false } = options;
   const [state, setState] = useState<ResourceState<T>>({ kind: 'loading' });
   const latest = useRef<ResourceState<T>>(state);
   latest.current = state;
@@ -75,10 +79,10 @@ export function useResource<T>(fetcher: () => Promise<T>, deps: readonly unknown
       else setState({ kind: 'live', data, fetchedAt, stale: false });
     } catch (raw) {
       if (id !== requestId.current) return;
-      setState(resolveFailureState(latest.current, toApiError(raw)));
+      setState(resolveFailureState(latest.current, toApiError(raw), demoFallback));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, ...deps]);
+  }, [enabled, demoFallback, ...deps]);
 
   useEffect(() => {
     if (!enabled) return;

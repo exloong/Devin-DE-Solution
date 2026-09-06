@@ -18,6 +18,7 @@ from app.domain.transitions import TransitionService
 from app.persistence import tables
 from app.persistence.database import make_engine, upgrade
 from app.persistence.sqlalchemy_uow import SqlAlchemyUnitOfWorkFactory
+from app.runtime.live_worker import LiveWorkerRuntime, live_runtime_from_env
 
 LOGGER = logging.getLogger("relay.worker")
 SYSTEM = Actor(role=ActorRole.SYSTEM, login="relay-worker")
@@ -30,6 +31,7 @@ class Worker:
     service: TransitionService
     uow_factory: SqlAlchemyUnitOfWorkFactory
     instance_id: str
+    live_runtime: LiveWorkerRuntime | None = None
 
     def heartbeat(self) -> None:
         now = datetime.now(timezone.utc)
@@ -70,10 +72,18 @@ class Worker:
                 completed += 1
             except Exception:
                 LOGGER.exception("job %s failed", job.id)
+        if self.live_runtime is not None:
+            try:
+                self.live_runtime.sync()
+            except Exception:
+                LOGGER.exception("live runtime synchronization failed")
         self.heartbeat()
         return completed
 
     def execute(self, uow: UnitOfWork, job: Job) -> None:
+        if self.live_runtime is not None:
+            self.live_runtime.execute(uow, job)
+            return
         if job.issue_id is None:
             return
         issue = uow.get_issue(job.issue_id)
@@ -320,15 +330,22 @@ def main() -> None:
         or os.environ.get("RELAY_DATABASE_URL")
         or "sqlite:///./relay.sqlite3"
     )
-    if os.environ.get("RELAY_MODE", "demo") != "demo":
-        raise RuntimeError("live worker execution is disabled until credentials are configured")
     engine = make_engine(database_url)
     upgrade(engine)
+    mode = os.environ.get("RELAY_MODE", "live").strip().lower()
+    if mode not in {"demo", "live"}:
+        raise RuntimeError("RELAY_MODE must be demo or live")
+    service = TransitionService()
+    uow_factory = SqlAlchemyUnitOfWorkFactory(engine)
+    live_runtime = (
+        live_runtime_from_env(service, uow_factory) if mode == "live" else None
+    )
     worker = Worker(
         engine=engine,
-        service=TransitionService(),
-        uow_factory=SqlAlchemyUnitOfWorkFactory(engine),
+        service=service,
+        uow_factory=uow_factory,
         instance_id=os.environ.get("WORKER_ID", socket.gethostname()),
+        live_runtime=live_runtime,
     )
     interval = max(float(os.environ.get("WORKER_POLL_SECONDS", "1")), 0.1)
     LOGGER.info("worker %s started", worker.instance_id)

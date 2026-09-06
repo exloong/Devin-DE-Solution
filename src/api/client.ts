@@ -99,11 +99,19 @@ export interface ApiClientOptions {
   baseUrl?: string;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
+  accessToken?: () => string | null;
 }
+
+export const OPERATOR_TOKEN_STORAGE_KEY = 'relay.operator_token';
 
 function readBaseUrl(): string {
   const configured = import.meta.env.VITE_API_BASE as string | undefined;
   return (configured && configured.trim()) || '/api/v1';
+}
+
+function readAccessToken(): string | null {
+  if (typeof window === 'undefined' || typeof window.sessionStorage === 'undefined') return null;
+  return window.sessionStorage.getItem(OPERATOR_TOKEN_STORAGE_KEY);
 }
 
 export function newIdempotencyKey(): string {
@@ -147,11 +155,13 @@ export class ApiClient {
   readonly baseUrl: string;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
+  private readonly accessToken: () => string | null;
 
   constructor(options: ApiClientOptions = {}) {
     this.baseUrl = (options.baseUrl ?? readBaseUrl()).replace(/\/$/, '');
     this.timeoutMs = options.timeoutMs ?? 8000;
     this.fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
+    this.accessToken = options.accessToken ?? readAccessToken;
   }
 
   private async request<T>(method: 'GET' | 'POST', path: string, body?: unknown, options: RequestOptions = {}): Promise<T> {
@@ -160,6 +170,8 @@ export class ApiClient {
     let response: Response;
     try {
       const headers: Record<string, string> = { Accept: 'application/json' };
+      const accessToken = this.accessToken();
+      if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
       if (body !== undefined) headers['Content-Type'] = 'application/json';
       if (options.idempotencyKey) headers['Idempotency-Key'] = options.idempotencyKey;
       if (options.ifMatchVersion !== undefined) headers['If-Match'] = `"${options.ifMatchVersion}"`;

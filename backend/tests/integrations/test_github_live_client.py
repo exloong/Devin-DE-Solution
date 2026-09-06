@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import pytest
-from conftest import TARGET_SHA
-
 from app.integrations import (
     SUPERSET_REPOSITORY,
     CommentPosted,
@@ -24,10 +22,32 @@ from app.integrations.github_client import (
 )
 from app.integrations.json_values import JsonValue
 
+from conftest import TARGET_SHA
+
 TOKEN = StaticTokenProvider("test-token")
 FILES_URL = "https://api.github.com/repos/exloong/superset/pulls/101/files"
 COMMENTS_URL = "https://api.github.com/repos/exloong/superset/issues/40/comments"
 PULLS_URL = "https://api.github.com/repos/exloong/superset/pulls"
+
+
+def test_branch_head_is_resolved_to_an_immutable_commit() -> None:
+    transport = RecordedTransport([HttpResponse(200, {"sha": TARGET_SHA})])
+
+    head = client(transport).get_branch_head("master")
+
+    assert head.sha == TARGET_SHA
+    assert transport.requests[0].url.endswith("/commits/master")
+
+
+def test_pull_request_head_is_bound_to_the_requested_number() -> None:
+    transport = RecordedTransport(
+        [HttpResponse(200, {"number": 101, "head": {"sha": TARGET_SHA}})]
+    )
+
+    head = client(transport).get_pull_request_head(101)
+
+    assert head.sha == TARGET_SHA
+    assert transport.requests[0].url.endswith("/pulls/101")
 
 
 def client(transport: RecordedTransport) -> LiveGitHubClient:

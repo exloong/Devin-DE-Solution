@@ -355,7 +355,7 @@ export interface AnalyticsSummary {
   issues_processed: number;
   confirmed_bugs: number;
   reproduced_autonomously_pct: number;
-  median_to_owner_decision_hours: number;
+  median_to_owner_decision_hours: number | null;
   state_counts: Partial<Record<LifecycleState, number>>;
   outcome_mix: { label: string; value: number }[];
   owner_load: { owner: string; initials: string; active: number; waiting: number; sla: number }[];
