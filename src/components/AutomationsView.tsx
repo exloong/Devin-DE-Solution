@@ -10,7 +10,7 @@ type Editor = { mode: 'create' } | { mode: 'edit'; automation: Automation } | nu
 
 /**
  * Manages the organization's Devin Automations through Relay's proxy. Devin
- * owns the records; Relay only adds who may edit them and hides inbox secrets.
+ * owns the records; Relay only adds who may edit them.
  */
 /** Flatten Devin trigger conditions ({any:[{all:[{field,operator,value}]}]}) into readable lines. */
 function describeConditions(conditions: Record<string, unknown> | null): string[] {
@@ -249,7 +249,7 @@ function AutomationDetailPanel({
             <AlertTriangle size={16} />
             <p>
               {automation.managed_by_relay
-                ? `Delete "${automation.name}" from Devin? Relay recreates it the next time the worker starts, but its inbox secret will change.`
+                ? `Delete "${automation.name}" from Devin? Relay recreates it the next time the worker starts.`
                 : `Delete "${automation.name}" from Devin? This cannot be undone from Relay.`}
             </p>
             <button className="secondary-button" onClick={() => setConfirmingDelete(false)} disabled={pending}>
@@ -301,9 +301,9 @@ function AutomationDetailPanel({
             <dt>Relay role</dt>
             <dd>
               {automation.relay_kind === 'reproduction'
-                ? 'Reproduction — dispatched automatically after deterministic triage (context ≥ 80%)'
+                ? 'Triage + reproduction — fired by Devin on every new Superset issue and on reporter follow-ups'
                 : automation.relay_kind === 'fix'
-                  ? 'Fix — dispatched only after the owner authorizes the fix'
+                  ? 'Fix — fired by Devin on its own “reproduced” issue comment; opens a PR linked to the issue, never merges'
                   : 'Not used by Relay’s gated pipeline'}
             </dd>
           </div>

@@ -1,7 +1,7 @@
-"""Server-side store for Relay's Devin automation handles (``devin_automations``).
+"""Registry of Relay's Devin automation handles (``devin_automations``).
 
-The inbox secret is returned by Devin exactly once, at creation; this table is
-the only place Relay keeps it. It is never exposed through the API.
+Holds only the ids the worker found or created in Devin, so the API can show
+which automations the dashboard mirrors without calling Devin itself.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from app.integrations.tasks import TaskKind
 from app.persistence import tables
 
 
-class DatabaseAutomationSecretStore:
+class DatabaseAutomationRegistry:
     def __init__(self, engine: Engine, *, clock: Clock) -> None:
         self._engine = engine
         self._clock = clock
@@ -39,16 +39,12 @@ class DatabaseAutomationSecretStore:
         return AutomationHandle(
             automation_id=row["automation_id"],
             kind=kind,
-            inbox_url=row["inbox_url"],
-            inbox_secret=row["inbox_secret"],
             enabled=bool(row["enabled"]),
         )
 
     def save(self, handle: AutomationHandle) -> None:
         values = {
             "automation_id": handle.automation_id,
-            "inbox_url": handle.inbox_url,
-            "inbox_secret": handle.inbox_secret,
             "enabled": handle.enabled,
             "updated_at": self._clock.now(),
         }
@@ -72,7 +68,7 @@ class DatabaseAutomationSecretStore:
 
 @dataclass(frozen=True)
 class AutomationRecord:
-    """A registered automation as exposed by the API: ids only, never the secret."""
+    """A registered automation as exposed by the API."""
 
     kind: str
     automation_id: str

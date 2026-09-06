@@ -95,22 +95,6 @@ def safe_issue_comment_text(value: object, *, field_name: str = "body") -> str:
     return text
 
 
-def format_reproduction_outcome_comment(
-    *, reproduced: bool, observed_behavior: str, verification: str
-) -> str:
-    """Build a public reproduction update from outcome evidence."""
-    observed = safe_issue_comment_text(observed_behavior, field_name="observed_behavior").strip()
-    verification_text = safe_issue_comment_text(verification, field_name="verification").strip()
-    outcome = (
-        "Relay reproduced the reported behavior."
-        if reproduced
-        else "Relay could not reproduce the reported behavior in the current environment."
-    )
-    return safe_issue_comment_text(
-        f"{outcome}\n\n**Observed behavior**\n{observed}\n\n**Verification**\n{verification_text}"
-    )
-
-
 def quote_untrusted_text(value: str, *, max_length: int = 2_000) -> str:
     """Return reporter-provided text as inert quoted Markdown.
 
@@ -184,9 +168,7 @@ class AddIssueLabels(_SupersetCommand):
                 ValidationCode.MALFORMED_ENVELOPE, "labels must be unique"
             )
         if any(not _LABEL_PATTERN.fullmatch(label) for label in self.labels):
-            raise ContractValidationError(
-                ValidationCode.MALFORMED_ENVELOPE, "label is malformed"
-            )
+            raise ContractValidationError(ValidationCode.MALFORMED_ENVELOPE, "label is malformed")
 
     @property
     def capability(self) -> GitHubCapability:
@@ -287,9 +269,9 @@ class RequestReviewers(_SupersetCommand):
             raise ContractValidationError(
                 ValidationCode.MALFORMED_ENVELOPE, "too many review requests"
             )
-        if len(set(self.reviewers)) != len(self.reviewers) or len(
-            set(self.team_reviewers)
-        ) != len(self.team_reviewers):
+        if len(set(self.reviewers)) != len(self.reviewers) or len(set(self.team_reviewers)) != len(
+            self.team_reviewers
+        ):
             raise ContractValidationError(
                 ValidationCode.MALFORMED_ENVELOPE, "review requests must be unique"
             )

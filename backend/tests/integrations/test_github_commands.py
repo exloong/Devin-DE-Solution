@@ -22,7 +22,6 @@ from app.integrations import (
     TargetCommit,
     ValidationCode,
     assert_command_supported,
-    format_reproduction_outcome_comment,
     github_commands,
     quote_untrusted_text,
     safe_issue_comment_text,
@@ -76,9 +75,7 @@ def test_every_command_rejects_a_repository_other_than_superset() -> None:
 
 def test_comment_body_must_be_control_character_free_text() -> None:
     with pytest.raises(ContractValidationError):
-        PostIssueComment(
-            repository=SUPERSET_REPOSITORY, issue_number=1, body="bad\x00body"
-        )
+        PostIssueComment(repository=SUPERSET_REPOSITORY, issue_number=1, body="bad\x00body")
     with pytest.raises(ContractValidationError):
         PostIssueComment(repository=SUPERSET_REPOSITORY, issue_number=1, body="  ")
 
@@ -102,48 +99,6 @@ def test_reporter_facing_comments_reject_private_devin_links(url: str) -> None:
     assert error.value.code is ValidationCode.PROHIBITED_COMMAND
 
 
-def test_reproduction_outcome_comment_reports_confirmation_and_behavior() -> None:
-    body = format_reproduction_outcome_comment(
-        reproduced=True,
-        observed_behavior="Whitespace-padded truthy values returned False.",
-        verification="Unpadded equivalents returned True at the target commit.",
-    )
-
-    assert body == (
-        "Relay reproduced the reported behavior.\n\n"
-        "**Observed behavior**\n"
-        "Whitespace-padded truthy values returned False.\n\n"
-        "**Verification**\n"
-        "Unpadded equivalents returned True at the target commit."
-    )
-    assert "devin.ai" not in body
-
-
-def test_unverified_outcome_comment_reports_actual_observation_without_links() -> None:
-    body = format_reproduction_outcome_comment(
-        reproduced=False,
-        observed_behavior="The supplied example completed without the reported error.",
-        verification="The failure could not be verified on the target commit.",
-    )
-
-    assert body.startswith(
-        "Relay could not reproduce the reported behavior in the current environment."
-    )
-    assert "completed without the reported error" in body
-    assert "devin.ai" not in body
-
-
-def test_reproduction_outcome_rejects_a_private_link_in_evidence() -> None:
-    with pytest.raises(ContractValidationError) as error:
-        format_reproduction_outcome_comment(
-            reproduced=True,
-            observed_behavior="See https://app.devin.ai/sessions/private",
-            verification="Confirmed.",
-        )
-
-    assert error.value.code is ValidationCode.PROHIBITED_COMMAND
-
-
 def test_issue_number_must_be_a_positive_non_boolean_integer() -> None:
     with pytest.raises(ContractValidationError):
         PostIssueComment(
@@ -157,9 +112,7 @@ def test_issue_number_must_be_a_positive_non_boolean_integer() -> None:
 
 def test_labels_must_be_unique_and_bounded() -> None:
     with pytest.raises(ContractValidationError):
-        AddIssueLabels(
-            repository=SUPERSET_REPOSITORY, issue_number=1, labels=("a", "a")
-        )
+        AddIssueLabels(repository=SUPERSET_REPOSITORY, issue_number=1, labels=("a", "a"))
     with pytest.raises(ContractValidationError):
         AddIssueLabels(repository=SUPERSET_REPOSITORY, issue_number=1, labels=())
 
@@ -254,9 +207,7 @@ def test_fake_adapter_records_commands_without_network_writes() -> None:
     adapter = FakeGitHubAdapter()
 
     comment = adapter.execute(
-        PostIssueComment(
-            repository=SUPERSET_REPOSITORY, issue_number=40, body="Relay triage"
-        )
+        PostIssueComment(repository=SUPERSET_REPOSITORY, issue_number=40, body="Relay triage")
     )
     branch = adapter.execute(
         CreateBranch(
@@ -283,9 +234,7 @@ def test_fake_adapter_records_commands_without_network_writes() -> None:
     assert opened.html_url.startswith("https://github.com/exloong/superset/pull/")
     assert len(adapter.recorded) == 3
     assert adapter.commands_for(GitHubCapability.COMMENT) == (
-        PostIssueComment(
-            repository=SUPERSET_REPOSITORY, issue_number=40, body="Relay triage"
-        ),
+        PostIssueComment(repository=SUPERSET_REPOSITORY, issue_number=40, body="Relay triage"),
     )
 
 
@@ -293,9 +242,7 @@ def test_fake_adapter_is_deterministic_across_instances() -> None:
     def run() -> int:
         adapter = FakeGitHubAdapter()
         result = adapter.execute(
-            PostIssueComment(
-                repository=SUPERSET_REPOSITORY, issue_number=40, body="Relay triage"
-            )
+            PostIssueComment(repository=SUPERSET_REPOSITORY, issue_number=40, body="Relay triage")
         )
         assert isinstance(result, CommentPosted)
         return result.comment_id
@@ -320,9 +267,7 @@ def test_fake_adapter_rejects_a_pull_request_without_its_branch() -> None:
 
 
 def test_fake_adapter_enforces_its_capability_allowlist() -> None:
-    adapter = FakeGitHubAdapter(
-        allowed_capabilities=frozenset({GitHubCapability.COMMENT})
-    )
+    adapter = FakeGitHubAdapter(allowed_capabilities=frozenset({GitHubCapability.COMMENT}))
 
     with pytest.raises(ContractValidationError) as error:
         adapter.execute(

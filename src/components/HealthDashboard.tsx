@@ -33,8 +33,8 @@ const STAGES: Omit<StageCount, 'count'>[] = [
   { id: 'intake', label: 'Intake & triage', kind: 'automation', actor: 'relay' },
   { id: 'clarify', label: 'Reporter clarification', kind: 'human', actor: 'reporter' },
   { id: 'reproduce', label: 'Bounded reproduction', kind: 'ai', actor: 'devin' },
-  { id: 'confirm', label: 'Owner bug confirmation', kind: 'human', actor: 'owner' },
-  { id: 'fix', label: 'Authorized fix', kind: 'ai', actor: 'devin' },
+  { id: 'confirm', label: 'Not reproduced · owner review', kind: 'human', actor: 'owner' },
+  { id: 'fix', label: 'Automatic fix', kind: 'ai', actor: 'devin' },
   { id: 'review', label: 'Review & merge approval', kind: 'human', actor: 'owner' },
   { id: 'done', label: 'Terminal outcome', kind: 'terminal', actor: 'relay' },
 ];
@@ -284,8 +284,8 @@ function ThroughputChart({ buckets }: { buckets: DashboardSummary['throughput'][
 
 const sessionKindLabel: Record<SessionKind, string> = { reproduction: 'Reproduction sessions', fix: 'Fix sessions' };
 const sessionKindNote: Record<SessionKind, string> = {
-  reproduction: 'Auto-launched when triage finds a likely defect with context completeness ≥ 80%',
-  fix: 'Launched only after a human owner authorizes the fix',
+  reproduction: 'Started by Devin on every new Superset issue: classify, ask for context, or reproduce (≥ 80% context)',
+  fix: 'Started automatically once reproduction confirms the defect; opens a PR linked to the issue',
 };
 
 function SessionHealthCard({ health, onOpen }: { health: SessionHealth; onOpen: () => void }) {

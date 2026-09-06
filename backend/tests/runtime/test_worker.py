@@ -5,16 +5,23 @@ from pathlib import Path
 import pytest
 from app.domain import scenarios
 from app.domain.models import JobKind, JobStatus
-from app.domain.states import TARGET_REPOSITORY, EventType, IssueState, SessionKind, SessionState
+from app.domain.states import (
+    TARGET_REPOSITORY,
+    ActorRole,
+    EventType,
+    IssueState,
+    SessionKind,
+    SessionState,
+)
 from app.integrations import (
     FakeDevinReviewAdapter,
     FakeDevinSessionAdapter,
     FakeGitHubAdapter,
     GitHubCapability,
-    PostIssueComment,
     TargetCommit,
 )
 from app.integrations.devin_automations import (
+    GITHUB_ISSUE_COMMENT_EVENT_TYPE,
     GITHUB_ISSUES_EVENT_TYPE,
     AutomationHandle,
     FakeDevinAutomationClient,
@@ -24,7 +31,7 @@ from app.integrations.github_client import IssueSnapshot
 from app.integrations.json_values import JsonObject
 from app.integrations.tasks import TaskKind, TaskPolicy
 from app.persistence import automation_registry, runtime_status, tables
-from app.persistence.automation_registry import DatabaseAutomationSecretStore
+from app.persistence.automation_registry import DatabaseAutomationRegistry
 from app.runtime.live_worker import LiveWorkerRuntime, live_runtime_from_env
 from app.runtime.worker import Worker
 from sqlalchemy import select
@@ -110,7 +117,6 @@ def test_requested_changes_produce_a_new_exact_head() -> None:
     worker = Worker(harness.engine, harness.service, harness.uow, "test-worker")
     issue = harness.classify(harness.open_issue(), missing=[])
     issue = harness.reproduce(issue)
-    issue = harness.confirm(issue)
 
     with harness.uow() as uow:
         first_fix = [
@@ -136,12 +142,14 @@ def test_requested_changes_produce_a_new_exact_head() -> None:
     assert [session.progress_percent for session in sessions] == [None, 100, 100]
 
 
-def _issue_snapshot(number: int, *, labels: tuple[str, ...] = ("bug",)) -> IssueSnapshot:
+def _issue_snapshot(
+    number: int, *, labels: tuple[str, ...] = ("bug",), state: str = "open"
+) -> IssueSnapshot:
     return IssueSnapshot(
         number=number,
         title="Chart export fails",
         body="Steps: open a chart, export CSV.\nExpected: CSV.\nActual: 500.",
-        state="open",
+        state=state,
         labels=labels,
         reporter_login="reporter-1",
     )
@@ -163,104 +171,6 @@ def _native_output(number: int, *, reproduced: bool = True) -> JsonObject:
             "control_behavior": "Passes on the previous release.",
         },
     }
-
-
-def test_live_worker_binds_sessions_to_revision_and_commit() -> None:
-    harness = Harness()
-    opened = harness.apply(
-        harness.event(
-            EventType.ISSUE_OPENED,
-            repository=TARGET_REPOSITORY,
-            number=100,
-            title="Chart export fails",
-            body="Steps: open a chart, export CSV.",
-            reporter="reporter-1",
-            labels=[],
-            target_commit="a" * 40,
-        )
-    )
-    assert opened.issue is not None
-    issue = opened.issue
-    github = FakeGitHubAdapter(
-        branch_head=TargetCommit("a" * 40), issues={100: _issue_snapshot(100)}
-    )
-    sessions = FakeDevinSessionAdapter(policy=TaskPolicy(max_wall_seconds=5_400))
-    automations = FakeDevinAutomationClient(sessions)
-    runtime = LiveWorkerRuntime(
-        service=harness.service,
-        uow_factory=harness.uow,
-        github=github,
-        devin=sessions,
-        review=FakeDevinReviewAdapter(),
-        default_branch="master",
-        automations=automations,
-    )
-    worker = Worker(
-        harness.engine,
-        harness.service,
-        harness.uow,
-        "live-worker",
-        live_runtime=runtime,
-    )
-
-    worker.run_once()
-
-    created = sessions.list_sessions()
-    assert len(created) == 1
-    assert created[0].target_commit == TargetCommit("a" * 40)
-    with harness.uow() as uow:
-        stored_session = uow.list_sessions(issue_id=issue.id)[0]
-    assert stored_session.issue_revision == issue.revision
-    assert stored_session.target_commit == "a" * 40
-
-    sessions.run_to_completion(created[0].session_id)
-    worker.run_once()
-    worker.run_once()
-
-    # Relay cannot post to the native reproduction automation: the session it
-    # created waits until Devin's github:issues trigger starts one for #100.
-    with harness.uow() as uow:
-        repro = [
-            s for s in uow.list_sessions(issue_id=issue.id) if s.kind == SessionKind.REPRODUCTION
-        ][0]
-    assert repro.trigger == GITHUB_ISSUES_EVENT_TYPE
-    assert repro.automation_id == "auto-fake-reproduction"
-    assert repro.external_session_id is None
-    assert automations.dispatched(TaskKind.REPRODUCTION) == ()
-
-    native = automations.simulate_native_session(
-        make_task(TaskKind.REPRODUCTION, wall_seconds=3600),
-        session_id="devin-native-100",
-        structured_output=_native_output(100),
-        status=SessionStatus.COMPLETED,
-    )
-    worker.run_once()
-
-    linked = harness.session(repro.id)
-    assert linked.external_session_id == native.session_id
-    assert linked.state is SessionState.COMPLETED
-    assert harness.issue(issue.id).state == IssueState.NEEDS_OWNER_DECISION
-    comments = github.commands_for(GitHubCapability.COMMENT)
-    assert len(comments) == 1
-    comment = comments[0]
-    assert isinstance(comment, PostIssueComment)
-    assert "app.devin.ai" not in comment.body
-    assert "reproduced" in comment.body.lower()
-
-
-def test_waiting_native_reproduction_expires_after_its_budget() -> None:
-    harness = Harness()
-    issue = _open_with_context(harness)
-    runtime, worker, sessions, _automations = _automation_runtime(harness, auto_spawn=False)
-    worker.run_once()
-    sessions.run_to_completion(sessions.list_sessions()[0].session_id)
-    worker.run_once()
-    worker.run_once()
-    assert harness.issue(issue.id).state == IssueState.REPRODUCING
-
-    harness.service.clock.advance(seconds=3_601)  # type: ignore[attr-defined]
-    runtime.sync()
-    assert harness.issue(issue.id).state == IssueState.BLOCKED_ENVIRONMENT
 
 
 def test_live_runtime_fails_when_required_credentials_are_missing(
@@ -304,33 +214,55 @@ def test_live_runtime_loads_credentials_from_files(
     assert runtime.default_branch == "master"
 
 
+def _fix_output(number: int, *, pr: int | None = 42) -> JsonObject:
+    output: JsonObject = {
+        "issue_number": number,
+        "repository": TARGET_REPOSITORY,
+        "phase": "done",
+        "summary": "Guarded the export path; regression test added.",
+    }
+    if pr is None:
+        output["blocked_reason"] = "the failing test could not be isolated"
+    else:
+        output["pull_request"] = {
+            "number": pr,
+            "url": f"https://github.com/{TARGET_REPOSITORY}/pull/{pr}",
+            "head_branch": f"devin/{number}-chart-export",
+        }
+    return output
+
+
 def _automation_runtime(
-    harness: Harness, *, auto_spawn: bool
+    harness: Harness,
 ) -> tuple[LiveWorkerRuntime, Worker, FakeDevinSessionAdapter, FakeDevinAutomationClient]:
     sessions = FakeDevinSessionAdapter(policy=TaskPolicy(max_wall_seconds=5_400))
-    automations = FakeDevinAutomationClient(sessions, auto_spawn=auto_spawn)
+    automations = FakeDevinAutomationClient(sessions)
+    github = FakeGitHubAdapter(
+        branch_head=TargetCommit("a" * 40),
+        issues={n: _issue_snapshot(n) for n in (100, 200, 201)},
+        pull_request_heads={42: TargetCommit("b" * 40)},
+    )
     runtime = LiveWorkerRuntime(
         service=harness.service,
         uow_factory=harness.uow,
-        github=FakeGitHubAdapter(
-            branch_head=TargetCommit("a" * 40),
-            issues={200: _issue_snapshot(200), 201: _issue_snapshot(201)},
-        ),
+        github=github,
         devin=sessions,
         review=FakeDevinReviewAdapter(),
         default_branch="master",
         automations=automations,
+        automation_registry=DatabaseAutomationRegistry(harness.engine, clock=harness.service.clock),
     )
     worker = Worker(harness.engine, harness.service, harness.uow, "live", live_runtime=runtime)
+    runtime.automation_handles()
     return runtime, worker, sessions, automations
 
 
-def _open_with_context(harness: Harness):  # type: ignore[no-untyped-def]
+def _open_with_context(harness: Harness, number: int = 200):  # type: ignore[no-untyped-def]
     opened = harness.apply(
         harness.event(
             EventType.ISSUE_OPENED,
             repository=TARGET_REPOSITORY,
-            number=200,
+            number=number,
             title="Chart export fails",
             body="Steps: open a chart, export CSV.",
             reporter="reporter-1",
@@ -342,10 +274,78 @@ def _open_with_context(harness: Harness):  # type: ignore[no-untyped-def]
     return opened.issue
 
 
+def _native_triage(automations: FakeDevinAutomationClient, number: int, session_id: str):  # type: ignore[no-untyped-def]
+    return automations.simulate_native_session(
+        make_task(TaskKind.CLASSIFICATION, wall_seconds=5_400),
+        session_id=session_id,
+        structured_output={
+            "issue_number": number,
+            "repository": TARGET_REPOSITORY,
+            "phase": "triage",
+        },
+    )
+
+
+def test_relay_never_starts_sessions_or_comments_for_a_known_issue() -> None:
+    """An issue Relay already knows about still waits for Devin's own trigger."""
+    harness = Harness()
+    issue = _open_with_context(harness, 100)
+    runtime, worker, sessions, automations = _automation_runtime(harness)
+
+    worker.run_once()
+    worker.run_once()
+
+    assert sessions.list_sessions() == ()
+    assert harness.issue(issue.id).state == IssueState.TRIAGE
+    assert runtime.github.commands_for(GitHubCapability.COMMENT) == ()  # type: ignore[attr-defined]
+
+    running = _native_triage(automations, 100, "devin-native-100")
+    worker.run_once()
+    with harness.uow() as uow:
+        triage = [s for s in uow.list_sessions(issue_id=issue.id) if s.kind is SessionKind.TRIAGE]
+    assert [s.external_session_id for s in triage] == [running.session_id]
+    assert triage[0].issue_revision == issue.revision
+    assert triage[0].target_commit == "a" * 40
+    assert triage[0].trigger == GITHUB_ISSUES_EVENT_TYPE
+
+    sessions.set_structured_output(running.session_id, _native_output(100), complete=True)
+    worker.run_once()
+    worker.run_once()
+
+    assert harness.issue(issue.id).state == IssueState.FIXING
+    with harness.uow() as uow:
+        decisions = uow.list_decisions(issue_id=issue.id)
+        by_kind = {s.kind: s for s in uow.list_sessions(issue_id=issue.id)}
+    assert all(d.actor.role is not ActorRole.OWNER for d in decisions)
+    assert by_kind[SessionKind.REPRODUCTION].external_session_id == running.session_id
+    fix = by_kind[SessionKind.FIX]
+    assert fix.trigger == GITHUB_ISSUE_COMMENT_EVENT_TYPE
+    assert fix.automation_id == "auto-fake-fix"
+    assert fix.external_session_id is None
+    assert runtime.github.commands_for(GitHubCapability.COMMENT) == ()  # type: ignore[attr-defined]
+    assert [s.kind for s in sessions.list_sessions()] == [TaskKind.CLASSIFICATION]
+
+
+def test_waiting_native_fix_expires_after_its_budget() -> None:
+    harness = Harness()
+    issue = _open_with_context(harness)
+    runtime, worker, sessions, automations = _automation_runtime(harness)
+    running = _native_triage(automations, 200, "devin-native-200")
+    worker.run_once()
+    sessions.set_structured_output(running.session_id, _native_output(200), complete=True)
+    worker.run_once()
+    worker.run_once()
+    assert harness.issue(issue.id).state == IssueState.FIXING
+
+    harness.service.clock.advance(seconds=5_401)  # type: ignore[attr-defined]
+    runtime.sync()
+    assert harness.issue(issue.id).state == IssueState.AUTOMATION_ERROR
+
+
 def test_native_session_enrolls_unknown_issue_and_runs_triage_to_owner_decision() -> None:
     """Devin's github:issues trigger fired before Relay saw any webhook."""
     harness = Harness()
-    runtime, worker, sessions, automations = _automation_runtime(harness, auto_spawn=False)
+    runtime, worker, sessions, automations = _automation_runtime(harness)
     runtime.automation_handles()
 
     running = automations.simulate_native_session(
@@ -381,20 +381,19 @@ def test_native_session_enrolls_unknown_issue_and_runs_triage_to_owner_decision(
     sessions.set_structured_output(running.session_id, _native_output(201), complete=True)
     worker.run_once()
 
-    assert harness.issue(issue.id).state == IssueState.NEEDS_OWNER_DECISION
+    assert harness.issue(issue.id).state == IssueState.FIX_PENDING
     with harness.uow() as uow:
         by_kind = {s.kind: s for s in uow.list_sessions(issue_id=issue.id)}
     assert by_kind[SessionKind.TRIAGE].state is SessionState.COMPLETED
     repro = by_kind[SessionKind.REPRODUCTION]
     assert repro.external_session_id == running.session_id
     assert repro.state is SessionState.COMPLETED
-    assert automations.dispatched(TaskKind.REPRODUCTION) == ()
-    assert automations.dispatched(TaskKind.FIX) == ()
+    assert not hasattr(automations, "dispatch")
 
 
 def test_native_session_with_thin_context_asks_the_reporter_instead() -> None:
     harness = Harness()
-    runtime, worker, sessions, automations = _automation_runtime(harness, auto_spawn=False)
+    runtime, worker, sessions, automations = _automation_runtime(harness)
     runtime.automation_handles()
     automations.simulate_native_session(
         make_task(TaskKind.CLASSIFICATION, wall_seconds=5_400),
@@ -421,7 +420,7 @@ def test_native_session_with_thin_context_asks_the_reporter_instead() -> None:
 
 def test_native_sessions_without_provable_identity_are_never_adopted() -> None:
     harness = Harness()
-    runtime, worker, sessions, automations = _automation_runtime(harness, auto_spawn=False)
+    runtime, worker, sessions, automations = _automation_runtime(harness)
     runtime.automation_handles()
     task = make_task(TaskKind.CLASSIFICATION, wall_seconds=5_400)
     automations.simulate_native_session(task, session_id="devin-no-output")
@@ -438,7 +437,7 @@ def test_native_sessions_without_provable_identity_are_never_adopted() -> None:
     )
     runtime.github = FakeGitHubAdapter(
         branch_head=TargetCommit("a" * 40),
-        issues={202: _issue_snapshot(202, labels=("question",))},
+        issues={202: _issue_snapshot(202, labels=("question",), state="closed")},
     )
     worker.run_once()
     with harness.uow() as uow:
@@ -447,112 +446,89 @@ def test_native_sessions_without_provable_identity_are_never_adopted() -> None:
     assert runtime.native_intake.ignored_session_ids == {"devin-other-repo", "devin-unlabeled"}
 
 
-def test_relay_started_reproduction_is_bound_to_the_native_session_by_issue() -> None:
+def test_native_fix_session_is_adopted_by_issue_and_records_the_pull_request() -> None:
     harness = Harness()
     issue = _open_with_context(harness)
-    runtime, worker, sessions, automations = _automation_runtime(harness, auto_spawn=False)
-
-    worker.run_once()  # classification still goes through the direct sessions client
-    triage = sessions.list_sessions()[0]
-    assert triage.kind is TaskKind.CLASSIFICATION
-    sessions.run_to_completion(triage.session_id)
+    runtime, worker, sessions, automations = _automation_runtime(harness)
+    running = _native_triage(automations, 200, "devin-native-200")
+    worker.run_once()
+    sessions.set_structured_output(running.session_id, _native_output(200), complete=True)
     worker.run_once()
     worker.run_once()
+    assert harness.issue(issue.id).state == IssueState.FIXING
 
-    with harness.uow() as uow:
-        repro = [
-            s for s in uow.list_sessions(issue_id=issue.id) if s.kind == SessionKind.REPRODUCTION
-        ][0]
-    assert repro.automation_id == "auto-fake-reproduction"
-    assert repro.dispatched_at is not None
-    assert repro.external_session_id is None
-    assert repro.state is SessionState.RUNNING
-    assert automations.dispatched(TaskKind.REPRODUCTION) == ()
-
-    runtime.sync()  # nothing spawned yet: stays pending
-    assert harness.session(repro.id).external_session_id is None
-
-    # A native session for a *different* issue must not be taken by FIFO.
+    # A fix session for another issue is never taken by FIFO.
     automations.simulate_native_session(
-        make_task(TaskKind.REPRODUCTION, wall_seconds=3600),
-        session_id="devin-native-other",
-        structured_output={"issue_number": 201, "repository": TARGET_REPOSITORY, "phase": "triage"},
+        make_task(TaskKind.FIX, wall_seconds=3600),
+        session_id="devin-fix-other",
+        kind=TaskKind.FIX,
+        structured_output={"issue_number": 201, "repository": TARGET_REPOSITORY, "phase": "fixing"},
     )
     runtime.sync()
-    assert harness.session(repro.id).external_session_id is None
+    with harness.uow() as uow:
+        fix = [s for s in uow.list_sessions(issue_id=issue.id) if s.kind is SessionKind.FIX][0]
+    assert fix.external_session_id is None
 
     spawned = automations.simulate_native_session(
-        make_task(TaskKind.REPRODUCTION, wall_seconds=3600),
-        session_id="devin-native-200",
-        structured_output={
-            "issue_number": 200,
-            "repository": TARGET_REPOSITORY,
-            "phase": "reproducing",
-        },
+        make_task(TaskKind.FIX, wall_seconds=3600),
+        session_id="devin-fix-200",
+        kind=TaskKind.FIX,
+        structured_output={"issue_number": 200, "repository": TARGET_REPOSITORY, "phase": "fixing"},
     )
     runtime.sync()
-    linked = harness.session(repro.id)
+    linked = harness.session(fix.id)
     assert linked.external_session_id == spawned.session_id
-    assert linked.external_session_url == spawned.links.session_url
+    assert linked.trigger == GITHUB_ISSUE_COMMENT_EVENT_TYPE
     assert linked.progress_source == "devin-automation"
 
-    sessions.set_structured_output(spawned.session_id, _native_output(200), complete=True)
+    sessions.set_structured_output(spawned.session_id, _fix_output(200), complete=True)
     worker.run_once()
-    assert harness.issue(issue.id).state == IssueState.NEEDS_OWNER_DECISION
+
+    assert harness.session(fix.id).state is SessionState.COMPLETED
+    pr = harness.pr(issue.id)
+    assert pr.number == 42
+    assert pr.head_branch == "devin/200-chart-export"
+    assert runtime.github.commands_for(GitHubCapability.COMMENT) == ()  # type: ignore[attr-defined]
+    assert runtime.github.commands_for(GitHubCapability.PULL_REQUEST) == ()  # type: ignore[attr-defined]
+    assert harness.issue(issue.id).state == IssueState.PR_OPEN
+    with harness.engine.connect() as conn:
+        records = {r.kind: r.automation_id for r in automation_registry.read_public(conn)}
+    assert records == {"fix": "auto-fake-fix", "reproduction": "auto-fake-reproduction"}
 
 
-def test_owner_authorization_dispatches_the_fix_automation_only() -> None:
+def test_blocked_native_fix_surfaces_as_an_automation_error() -> None:
     harness = Harness()
     issue = _open_with_context(harness)
-    runtime, worker, sessions, automations = _automation_runtime(harness, auto_spawn=True)
-
+    runtime, worker, sessions, automations = _automation_runtime(harness)
+    running = _native_triage(automations, 200, "devin-native-200")
     worker.run_once()
-    sessions.run_to_completion(sessions.list_sessions()[0].session_id)
+    sessions.set_structured_output(running.session_id, _native_output(200), complete=True)
     worker.run_once()
     worker.run_once()
     automations.simulate_native_session(
-        make_task(TaskKind.REPRODUCTION, wall_seconds=3600),
-        session_id="devin-native-200",
-        structured_output=_native_output(200),
+        make_task(TaskKind.FIX, wall_seconds=3600),
+        session_id="devin-fix-200",
+        kind=TaskKind.FIX,
+        structured_output=_fix_output(200, pr=None),
         status=SessionStatus.COMPLETED,
     )
     worker.run_once()
-    assert harness.issue(issue.id).state == IssueState.NEEDS_OWNER_DECISION
-    assert automations.dispatched(TaskKind.REPRODUCTION) == ()
-    assert automations.dispatched(TaskKind.FIX) == ()
-
-    harness.confirm(harness.issue(issue.id))
-    worker.run_once()
-
-    with harness.uow() as uow:
-        fix = [s for s in uow.list_sessions(issue_id=issue.id) if s.kind == SessionKind.FIX][0]
-    assert automations.dispatched(TaskKind.FIX) == (str(fix.id),)
-    assert fix.automation_id == "auto-fake-fix"
-    runtime.sync()
-    assert harness.session(fix.id).external_session_id is not None
-    assert harness.session(fix.id).external_session_id in {
-        s.session_id for s in sessions.list_sessions() if s.kind is TaskKind.FIX
-    }
+    assert harness.issue(issue.id).state == IssueState.AUTOMATION_ERROR
 
 
-def test_database_secret_store_round_trips_handles_without_leaking_secrets() -> None:
+def test_database_registry_round_trips_automation_ids() -> None:
     harness = Harness()
-    store = DatabaseAutomationSecretStore(harness.engine, clock=harness.service.clock)
-    handle = AutomationHandle(
-        automation_id="auto-1",
-        kind=TaskKind.FIX,
-        inbox_url="https://api.devin.ai/v3/webhooks/inbox/x",
-        inbox_secret="s3cret",
-    )
+    store = DatabaseAutomationRegistry(harness.engine, clock=harness.service.clock)
+    handle = AutomationHandle(automation_id="auto-1", kind=TaskKind.FIX)
     assert store.load(TaskKind.FIX) is None
     store.save(handle)
     assert store.load(TaskKind.FIX) == handle
-    store.save(AutomationHandle("auto-2", TaskKind.FIX, handle.inbox_url, "other"))
-    assert store.load(TaskKind.FIX).automation_id == "auto-2"  # type: ignore[union-attr]
+    store.save(AutomationHandle("auto-2", TaskKind.FIX, enabled=False))
+    assert store.load(TaskKind.FIX) == AutomationHandle("auto-2", TaskKind.FIX, enabled=False)
     with harness.engine.connect() as conn:
         (record,) = automation_registry.read_public(conn)
     assert record.kind == "fix" and record.automation_id == "auto-2"
-    assert "s3cret" not in repr(record) and "other" not in repr(record)
+    assert "inbox" not in repr(record)
 
 
 def test_live_runtime_always_launches_through_automations(

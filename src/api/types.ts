@@ -18,7 +18,7 @@ export type LifecycleState =
   | 'reproducing'
   | 'blocked_environment'
   | 'needs_owner_decision'
-  | 'fix_authorized'
+  | 'fix_pending'
   | 'fixing'
   | 'pr_open'
   | 'awaiting_owner'

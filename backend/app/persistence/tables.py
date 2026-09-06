@@ -208,8 +208,6 @@ devin_automations = Table(
     metadata,
     Column("kind", String(40), primary_key=True),
     Column("automation_id", String(120), nullable=False),
-    Column("inbox_url", String(500), nullable=False),
-    Column("inbox_secret", String(500), nullable=True),
     Column("enabled", Boolean, nullable=False, default=True),
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )

@@ -34,13 +34,8 @@ def test_reproduction_is_auto_launched_and_fix_waits_for_owner(h: Harness) -> No
 
     h.clock.advance(minutes=10)
     issue = h.reproduce(issue)
-    assert issue.state == IssueState.NEEDS_OWNER_DECISION
-    with h.uow() as uow:
-        summary = dashboard.summary(uow, h.clock.now(), _rows(h))
-    assert _by_kind(summary, "fix")["total"] == 0
-
-    h.clock.advance(minutes=5)
-    issue = h.confirm(issue)
+    # A reproduced defect authorizes the fix session without an owner click.
+    assert issue.state == IssueState.FIX_PENDING
     with h.uow() as uow:
         summary = dashboard.summary(uow, h.clock.now(), _rows(h))
     fix = _by_kind(summary, "fix")
@@ -67,12 +62,14 @@ def test_success_rate_and_median_duration_are_derived_from_sessions(h: Harness) 
     assert repro["completed"] == 2 and repro["failed"] == 0
     assert repro["success_rate_pct"] == 100.0
     assert repro["median_duration_seconds"] == 1200.0
-    durations = sorted(s.duration_seconds for s in summary.recent_sessions)
-    assert durations == [600.0, 1800.0]
+    repro_rows = [s for s in summary.recent_sessions if s.kind == "reproduction"]
+    assert sorted(s.duration_seconds or 0 for s in repro_rows) == [600.0, 1800.0]
     with h.uow() as uow:
         sessions = uow.list_sessions()
-        assert all(s.kind == SessionKind.REPRODUCTION for s in sessions)
-        assert all(s.state == SessionState.COMPLETED for s in sessions)
+        repro_sessions = [s for s in sessions if s.kind == SessionKind.REPRODUCTION]
+        assert all(s.state == SessionState.COMPLETED for s in repro_sessions)
+        # Each reproduced defect auto-queued its fix session.
+        assert len([s for s in sessions if s.kind == SessionKind.FIX]) == 2
 
 
 def test_throughput_and_in_flight_counts_come_from_issue_records(h: Harness) -> None:

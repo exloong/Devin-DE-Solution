@@ -20,7 +20,7 @@ class IssueState(str, Enum):
     REPRODUCING = "reproducing"
     BLOCKED_ENVIRONMENT = "blocked_environment"
     NEEDS_OWNER_DECISION = "needs_owner_decision"
-    FIX_AUTHORIZED = "fix_authorized"
+    FIX_PENDING = "fix_pending"
     FIXING = "fixing"
     PR_OPEN = "pr_open"
     AWAITING_OWNER = "awaiting_owner"
@@ -139,8 +139,10 @@ class TransitionName(str, Enum):
     CLASSIFY_TERMINAL = "classify_terminal"
     REQUEST_INFORMATION = "request_information"
     RECORD_REPORTER_RESPONSE = "record_reporter_response"
+    REPORTER_FOLLOW_UP = "reporter_follow_up"
     START_REPRODUCTION = "start_reproduction"
     REPRODUCTION_COMPLETED = "reproduction_completed"
+    REPRODUCTION_CONFIRMED = "reproduction_confirmed"
     ENVIRONMENT_BLOCKED = "environment_blocked"
     CONFIRM_BUG = "confirm_bug"
     REQUEST_DISCRIMINATOR = "request_discriminator"
@@ -234,6 +236,17 @@ TRANSITIONS: dict[TransitionName, TransitionSpec] = {
             description="Store answers or unavailable markers without executing content.",
         ),
         TransitionSpec(
+            TransitionName.REPORTER_FOLLOW_UP,
+            _e(EventType.REPORTER_COMMENT),
+            _s(IssueState.AWAITING_REPORTER),
+            _s(IssueState.TRIAGE),
+            _a(ActorRole.SYSTEM, ActorRole.REPORTER),
+            description=(
+                "The reporter replied on GitHub; open questions are retired and the report "
+                "is triaged again with the new context."
+            ),
+        ),
+        TransitionSpec(
             TransitionName.START_REPRODUCTION,
             _e(
                 EventType.REPRODUCTION_STARTED,
@@ -259,8 +272,18 @@ TRANSITIONS: dict[TransitionName, TransitionSpec] = {
             _s(IssueState.REPRODUCING),
             _s(IssueState.NEEDS_OWNER_DECISION),
             _a(ActorRole.AGENT),
-            preconditions=("result revision matches current revision",),
+            preconditions=("result revision matches current revision", "not reproduced"),
             description="Release the workspace and hand an evidence packet to the owner.",
+        ),
+        TransitionSpec(
+            TransitionName.REPRODUCTION_CONFIRMED,
+            _e(EventType.REPRODUCTION_RESULT),
+            _s(IssueState.REPRODUCING),
+            _s(IssueState.FIX_PENDING),
+            _a(ActorRole.AGENT),
+            preconditions=("result revision matches current revision", "reproduced"),
+            public_side_effects=("issue_comment",),
+            description="A reproduced defect starts Devin's fix automation; no owner gate.",
         ),
         TransitionSpec(
             TransitionName.ENVIRONMENT_BLOCKED,
@@ -273,7 +296,7 @@ TRANSITIONS: dict[TransitionName, TransitionSpec] = {
             TransitionName.CONFIRM_BUG,
             _e(EventType.OWNER_DECISION),
             _s(IssueState.NEEDS_OWNER_DECISION),
-            _s(IssueState.FIX_AUTHORIZED),
+            _s(IssueState.FIX_PENDING),
             _a(ActorRole.OWNER),
             human_gate=True,
             preconditions=("decision is confirm_bug",),
@@ -309,10 +332,10 @@ TRANSITIONS: dict[TransitionName, TransitionSpec] = {
         TransitionSpec(
             TransitionName.START_FIX,
             _e(EventType.FIX_SESSION_STARTED),
-            _s(IssueState.FIX_AUTHORIZED),
+            _s(IssueState.FIX_PENDING),
             _s(IssueState.FIXING),
             _a(ActorRole.SYSTEM, ActorRole.OPERATOR),
-            preconditions=("unexpired confirm_bug authorization exists",),
+            preconditions=("reproduced defect or unexpired confirm_bug decision exists",),
         ),
         TransitionSpec(
             TransitionName.OPEN_PR,

@@ -1,9 +1,9 @@
 # Relay issue operations control plane
 
 Relay is a standalone control plane for a human-governed, Devin-powered issue
-workflow. It turns GitHub issue events into a durable process for triage,
-reporter follow-up, reproduction, fix authorization, implementation, review,
-and owner approval.
+workflow. Devin's own Automations drive the process — triage, clarification,
+reproduction, fix, pull request — from GitHub issue creation; Relay is the skin
+that shows health, throughput, the automations and the sessions under them.
 
 This repository contains the Relay product itself: the React operator
 dashboard, FastAPI API, durable worker, PostgreSQL persistence, GitHub and
@@ -46,11 +46,15 @@ target repository is currently `exloong/superset`.
 ## How it works
 
 ```text
-GitHub issue labeled `bug` ──▶ Devin github:issues automation ──▶ Devin session
-                                                                      │
-Relay worker ── polls the automation's sessions, adopts them by issue ◀┘
+GitHub issue opened ──▶ Devin "Relay reproduction" automation (github:issues)
+                          │  classify · ask for context · reproduce · comment
+                          ▼
+   issue comment `<!-- relay:reproduced -->` ──▶ Devin "Relay fix" automation
+                          │  (github:issue_comment) fix · PR "Fixes #N" · comment
+                          ▼
+Relay worker ── polls both automations' sessions, adopts them by issue (read-only)
       │
-Relay API ── (optional) signed webhook for comments, PRs, reviews
+Relay API ── (optional) signed webhook for PR pushes and reviews
       │
       ▼
 PostgreSQL ── stores lifecycle state, audit history, and durable jobs
@@ -59,7 +63,7 @@ PostgreSQL ── stores lifecycle state, audit history, and durable jobs
 Relay worker ── claims jobs and calls GitHub, Devin, and Devin Review
       │
       ▼
-Human gates ── authorize code work and approve the exact PR head
+Human gate ── approve the exact PR head; Relay and Devin never merge
       │
       ▼
 React dashboard ── reads the API and exposes actions to authenticated operators
@@ -69,7 +73,7 @@ The normal lifecycle is:
 
 ```text
 new → triage → awaiting_reporter → reproducing → needs_owner_decision
-    → fix_authorized → fixing → pr_open → awaiting_owner → completed
+    → fix_pending → fixing → pr_open → awaiting_owner → completed
 ```
 
 There are also explicit holding or terminal states for environment blockers,
@@ -77,11 +81,12 @@ requested changes, duplicates, non-bugs, unsupported reports, and inactivity.
 
 Each event is handled as follows:
 
-1. Devin's GitHub connection fires the reproduction automation; the worker
-   adopts the resulting session by the issue it reports and records the
-   `ISSUE_OPENED` event. Optional follow-up events (comments, PRs, reviews)
-   arrive signed at `/api/v1/webhooks/github`; `issues.opened`/`labeled`
-   deliveries there are acknowledged and ignored.
+1. Devin's GitHub connection fires the reproduction automation on every opened
+   `exloong/superset` issue (and on reporter replies). The worker adopts the
+   resulting session by the issue it reports and records the `ISSUE_OPENED`
+   event. Optional follow-up events (PRs, reviews) arrive signed at
+   `/api/v1/webhooks/github`; `issues.opened`/`labeled` deliveries there are
+   acknowledged and ignored.
 2. The API verifies the HMAC signature, delivery ID, event shape, and repository
    scope of webhook events, then records each transition atomically.
 3. The transition creates durable work for the worker; duplicate deliveries and
@@ -90,22 +95,28 @@ Each event is handled as follows:
    GitHub, Devin Sessions, Devin Review, and CODEOWNERS integrations.
 5. Structured results are accepted only for the issue revision and immutable
    commit that created the task.
-6. A human owner must confirm the bug before a fix session starts. Review and
-   approval are bound to the exact PR head SHA, so a new push invalidates
-   evidence for the previous head.
+6. A reproduced defect starts the fix automation on its own — no owner click.
+   Owners are asked only when reproduction fails (`needs_owner_decision`) and
+   before a PR merges. Review and approval are bound to the exact PR head SHA,
+   so a new push invalidates evidence for the previous head.
 
 ### The core flow and the two Devin trigger points
 
-The operator UI shows a single linear path. Only two of its steps launch a
-Devin session; everything else is deterministic policy or a human decision.
+The operator UI shows a single linear path. Two Devin Automations run it end
+to end; Relay observes and only asks a human when reproduction fails or a PR
+needs approval.
 
 | Step | Actor | What happens |
 | --- | --- | --- |
-| Intake & classify | Devin `github:issues` automation + workflow controller (deterministic) | Devin fires on `exloong/superset` · `labeled` · trusted label; the worker re-checks the gate against GitHub (repository, issue open, label, optional trusted actor) before adopting the session. **Classification is deterministic; Relay never enrolls issues from its own webhook.** |
-| Reproduce safely | Devin reproducer (`kind = reproduction`) | **Auto-launched** by the worker once triage marks the report a likely defect with context completeness ≥ 80%. Builds an isolated fixture, runs control/failure cases, drafts a regression test. |
-| Confirm the bug | Component owner (human gate) | Reviews the evidence pack and explicitly confirms or rejects the bug. |
-| Prepare the fix | Devin coding agent (`kind = fix`) | Launched **only** after the owner's `confirm_bug` decision (`POST /api/v1/issues/{id}/decisions`). Implements the smallest fix with a regression test and opens a PR. |
-| Review & approve | Owners / Devin Review | PR review; Relay never merges automatically. |
+| Intake & classify | Devin `Relay reproduction` automation (`github:issues`, `action = opened`) | Devin reads the new issue, decides whether it is a bug report, and rates context completeness. Not a bug → one short comment (`<!-- relay:not-a-bug -->`) and stop. |
+| Clarify | same session | Below 80% context → at most three concise questions on the issue (`<!-- relay:needs-information -->`). A reporter reply re-fires the automation (`github:issue_comment`) and triage runs again. |
+| Reproduce safely | same session | ≥ 80% → isolated environment at the target commit, control + failing case, drafted regression test, then a short result comment (`<!-- relay:reproduced -->` or `<!-- relay:not-reproduced -->`). Never pushes or opens a PR. |
+| Prepare the fix | Devin `Relay fix` automation (`github:issue_comment` containing `<!-- relay:reproduced -->`) | Starts automatically on Devin's own reproduced comment. Minimal fix + regression test, PR whose body starts with `Fixes #N`, concise issue and PR comments (`<!-- relay:fix-opened -->`). Never merges. |
+| Review & approve | Owners / Devin Review | PR review bound to the exact head; Relay never merges automatically. |
+
+No comment ever carries a Devin session URL; the dashboard shows sessions
+internally. Not-reproduced issues wait for an owner (`treat as defect` /
+reclassify) — that is the only pre-PR human decision left.
 
 `GET /api/v1/sessions?kind=reproduction|fix` lists sessions of either kind,
 each with status, linked issue, timestamps, and the external Devin URL when
@@ -123,42 +134,36 @@ not overwrite a name, prompt, or enabled flag that an operator changed.
 
 | Automation | Trigger | Action |
 | --- | --- | --- |
-| `Relay reproduction · exloong/superset` | `github:issues` (Devin's own GitHub connection) with conditions `repository.full_name = exloong/superset`, `action = labeled`, `label.name = <trusted label, default bug>` | `start_session` with the triage + reproducer instructions |
-| `Relay fix · exloong/superset` | `webhook:incoming` (Relay-only inbox) | `start_session` with the coding-agent instructions |
+| `Relay reproduction · exloong/superset` | `github:issues` (`repository.full_name = exloong/superset`, `action = opened`) and `github:issue_comment` (`action = created`, comment body not starting with the `<!-- relay:` marker) | `start_session` with the triage + clarification + reproducer instructions |
+| `Relay fix · exloong/superset` | `github:issue_comment` (`repository.full_name = exloong/superset`, `action = created`, `comment.body contains <!-- relay:reproduced -->`) | `start_session` with the coding-agent instructions |
 
-**Reproduction is Devin-native.** Labelling a `exloong/superset` issue with the
-trusted label makes Devin start a session directly; Relay does not need to
-receive a GitHub webhook for that. The automation's prompt carries the
-semantic gate: the session identifies the issue, classifies it
-deterministically, reports `context_completeness`, stops at
-`needs_information` below 80%, and only then reproduces (isolated environment
-at the target commit, control + failing case, drafted regression test). It
-never pushes, opens a PR, or edits GitHub state. The worker discovers those
-sessions with `GET …/sessions?automation_ids=<reproduction id>`, and adopts a
-session **only** when its structured output names a Superset issue number;
-Relay then reads that issue from the GitHub API, re-applies the controller
-gate (repository, open state, trusted label, trusted actors) and either binds
-the session to the Relay reproduction record already waiting for it or enrolls
-the issue and runs the same triage → reproduction lifecycle. Sessions that
-never identify an issue, name another repository, or fail the gate are
-ignored — there is no first-in-first-out guessing for native sessions.
+**Both automations are Devin-native and run without Relay.** Opening an
+`exloong/superset` issue makes Devin start the triage session directly; its
+prompt carries the semantic gate (bug or not, `context_completeness`, stop and
+ask below 80%, otherwise reproduce in an isolated environment at the target
+commit with control + failing case and a drafted regression test) and tells
+Devin to post the concise issue comments itself, each tagged with an HTML
+marker. The successful-reproduction marker is the fix automation's trigger, so
+the fix starts with no Relay dispatch and no owner click. Neither prompt lets
+Devin merge, close the issue, touch another repository, or paste a session URL.
 
-**Fix stays owner-authorized.** The fix automation has no GitHub trigger. Only
-the owner's `confirm_bug` decision (`POST /api/v1/issues/{id}/decisions`)
-makes the worker POST the task envelope (task id, issue key, immutable commit,
-budget, quoted reporter context) to the inbox with the `X-Webhook-Secret`
-header; the spawned session is linked back by the `task_id` it echoes. The fix
-session opens a draft PR and never merges.
+The worker is read-only towards Devin: it lists both automations' sessions with
+`GET …/sessions?automation_ids=…`, adopts a session **only** when its
+structured output names a Superset issue number, reads that issue from the
+GitHub API, and mirrors the outcome (classification, questions, reproduction
+evidence, pull request) into Relay's lifecycle for the dashboard. Sessions that
+never identify an issue or name another repository are ignored — there is no
+first-in-first-out guessing. Relay itself never posts workflow comments and
+never starts sessions.
 
-The fix inbox secret is returned by Devin once, at creation. Relay stores it
-only in the `devin_automations` table (never in the API, logs, or browser); if
-the row is lost, the worker retires the fix automation and creates a fresh one.
-A reproduction automation created before this native trigger existed is
-migrated in place to `github:issues`.
+Relay stores only the two automation ids (`devin_automations` table); if the
+row is lost the worker finds the automations again by metadata. Automations
+created by earlier Relay versions (label trigger, inbox-fed fix) are migrated
+in place to the native triggers and prompts.
 
 Relay's own GitHub webhook (`GITHUB_WEBHOOK_SECRET`) is optional and never a
-trigger: it only ingests reporter comments, PR pushes and reviews for issues
-Relay already tracks. `issues.opened`/`labeled` deliveries are acknowledged
+trigger: it only ingests PR pushes and reviews for issues Relay already tracks
+(reporter comments are Devin's trigger, not Relay's). `issues.opened`/`labeled` deliveries are acknowledged
 with `reason = intake_is_devin_automation`. The **Liveness** panel's GitHub
 row shows the last poll of the reproduction automation (`intake = native`,
 `stale`, or `none`); a missing webhook is never an outage.
@@ -172,22 +177,22 @@ enabled state, timestamps, last invocation, and the Devin sessions the
 automation has launched (Devin's list filtered by `automation_ids`, merged
 with Relay's own session records where Relay dispatched the task). Operators
 can create, edit, enable/disable, and delete automations; Relay-managed ones
-are labelled with their role (reproduction: auto after triage, fix: owner
-authorized only).
+are labelled with their role (triage + reproduction on every new issue, fix on
+Devin's own reproduced comment).
 
 The API is a thin authenticated proxy over the Automations API so the Devin
-token and inbox secrets stay on the server:
+token stays on the server:
 
 | Endpoint | Role | Devin call |
 | --- | --- | --- |
 | `GET /api/v1/automations` | reader | `GET /organizations/{org}/automations` (all pages) |
 | `GET /api/v1/automations/{id}` | reader | `GET …/automations/{id}` + `GET …/sessions?automation_ids={id}` |
 | `GET /api/v1/automations/{id}/sessions` | reader | `GET …/sessions?automation_ids={id}` |
-| `POST /api/v1/automations` | operator | `POST …/automations` (`webhook:incoming` → `start_session`) |
+| `POST /api/v1/automations` | operator | `POST …/automations` (`webhook:incoming` → `start_session`; Relay's own two use GitHub triggers) |
 | `PATCH /api/v1/automations/{id}` | operator | `PATCH …/automations/{id}` |
 | `DELETE /api/v1/automations/{id}` | operator | `DELETE …/automations/{id}` |
 
-Responses omit the inbox URL and secret. Devin `401/403/404` answers surface as
+Responses omit inbox URLs and secrets of ad-hoc automations. Devin `401/403/404` answers surface as
 `403/403/404`; other transport failures as `502`. The `relay_kind` and
 `relay_repo` metadata keys are reserved for the worker and rejected on create.
 
@@ -216,7 +221,7 @@ heartbeat marked *down*; it never pretends a provider is connected.
 | --- | --- |
 | `web` | Builds and serves the React dashboard; Nginx proxies `/api/v1` to the API on the same origin. |
 | `api` | Provides FastAPI query/command endpoints, authentication, database migrations, health/readiness, signed webhook ingress, and the authenticated proxy for managing Devin Automations. |
-| `worker` | Claims durable jobs, advances timers and transitions, provisions Relay's two Devin Automations, adopts the sessions Devin's `github:issues` trigger starts for reproduction, dispatches owner-authorized fixes to the fix inbox, and calls external providers through bounded HTTPS clients. |
+| `worker` | Claims durable jobs, advances timers and transitions, provisions Relay's two Devin Automations, adopts the triage/reproduction and fix sessions Devin's GitHub triggers start (read-only), and calls external providers through bounded HTTPS clients. |
 | `postgres` | Persists lifecycle state, idempotency records, jobs, evidence, sessions, PR bindings, reviews, approvals, and worker status. |
 
 The API and worker share the backend package but run as separate processes.
@@ -409,7 +414,7 @@ chmod 600 .env
 | `GITHUB_WEBHOOK_SECRET` | API | High-entropy HMAC secret shared only with the optional GitHub webhook (comments, PRs, reviews). Issue intake is Devin-native and never uses it. |
 | `GITHUB_TOKEN` | Worker | Dedicated GitHub App installation token or fine-grained token scoped only to `exloong/superset`. |
 | `GITHUB_DEFAULT_BRANCH` | Worker | Superset branch resolved to the immutable reproduction base; defaults to `master`. |
-| `RELAY_TRUSTED_LABEL` | Worker | Label in the reproduction automation's `label.name` condition and in the worker's adoption gate; defaults to `bug`. |
+| `RELAY_TRUSTED_LABEL` | API | Only gates the legacy webhook path; Devin's automation fires on every opened issue regardless of labels. |
 | `RELAY_TRUSTED_ACTORS` | Worker | Optional comma-separated GitHub logins; when set, only issues reported by these logins are adopted. |
 | `DEVIN_API_TOKEN` | API, Worker | Devin service-user API key. The worker dispatches to Devin Automations; the API proxies automation management. |
 | `DEVIN_ORG_ID` | API, Worker | Devin organization identifier used by the v3 API. |
@@ -464,9 +469,10 @@ protect the default branch with required human review and do not grant the App
 an administrative bypass.
 
 Issue intake needs no webhook: connect Devin's GitHub integration to
-`exloong/superset` (Devin Settings → Integrations) so its `github:issues`
-trigger fires. To additionally feed Relay comments, PR and review events,
-configure a GitHub webhook with:
+`exloong/superset` (Devin Settings → Integrations); the reproduction
+automation fires on every opened issue and the fix automation on Devin's own
+reproduced comment. To additionally feed Relay PR and review events, configure
+a GitHub webhook with:
 
 - payload URL: `https://<relay-host>/api/v1/webhooks/github`;
 - content type: `application/json`;
@@ -563,18 +569,18 @@ preserve the raw webhook request body.
   service needs `DEVIN_API_TOKEN`/`DEVIN_ORG_ID` too, and the service user
   needs `ViewOrgAutomations` (read), `ManageOrgAutomations` (create, edit,
   delete) and `ViewOrgSessions` (sessions under an automation).
-- **Labelling an issue `bug` starts nothing:** confirm Devin's GitHub
-  integration covers `exloong/superset`, the reproduction automation is enabled
-  and its conditions match the label, and no other automation in the org
-  claims the same trigger. The Liveness GitHub row shows the last automation
-  poll.
+- **Opening an issue starts nothing:** confirm Devin's GitHub integration
+  covers `exloong/superset`, the reproduction automation is enabled and its
+  `github:issues` condition is `action = opened`, and no other automation in
+  the org claims the same trigger. The Liveness GitHub row shows the last
+  automation poll.
 - **A Devin session runs but Relay never shows it:** the worker adopts a
   session only once its structured output names the issue number; check the
   session's output in Devin.
-- **An authorized fix never gets a session:** check the fix automation is
-  enabled in Devin and its last invocation status in the Automations view; a
-  `403` from the inbox means the stored secret no longer matches, so delete the
-  automation and restart the worker to re-create it.
+- **A reproduced issue never gets a fix session:** the fix automation fires on
+  an issue comment containing `<!-- relay:reproduced -->`; check that comment
+  exists, that the fix automation is enabled, and its last invocation status in
+  the Automations view.
 - **Review remains pending:** confirm Devin Review is enabled and its token can
   call the enterprise PR-review endpoint.
 - **Port 4173 is already in use:** set `APP_PORT` to another host port.

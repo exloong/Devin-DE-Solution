@@ -189,7 +189,7 @@ def test_reporter_answers_require_original_reporter_or_audited_override(h: Harne
 
 
 def test_fix_result_pr_url_must_match_scoped_repository(h: Harness) -> None:
-    issue = h.start_fix(h.confirm(h.reproduce(h.classify(h.open_issue()))))
+    issue = h.start_fix(h.reproduce(h.classify(h.open_issue())))
     with h.uow() as uow:
         session = next(s for s in uow.list_sessions(issue_id=issue.id) if s.kind == SessionKind.FIX)
     bad_urls = [
@@ -277,7 +277,7 @@ def _statuses(h: Harness, issue_id: uuid.UUID, kind: JobKind) -> list[str]:
 def test_security_routing_cancels_non_public_kinds_too(h: Harness) -> None:
     # needs_owner_decision schedules ESCALATE_OWNER (not in PUBLIC_JOB_KINDS);
     # awaiting_reporter schedules REMINDER/INACTIVITY timers. All must die.
-    issue = h.reproduce(h.classify(h.open_issue()))
+    issue = h.reproduce(h.classify(h.open_issue()), reproduced=False)
     assert len(h.jobs(issue.id, JobKind.ESCALATE_OWNER)) == 1
     waiting = h.classify(
         h.open_issue(number=101), missing=[{"field": "feature_flags", "prompt": "Which flags?"}]
@@ -361,7 +361,7 @@ def test_stale_revision_job_cannot_run(h: Harness) -> None:
 
 
 def test_claim_and_complete_happy_path_and_not_due(h: Harness) -> None:
-    issue = h.reproduce(h.classify(h.open_issue()))
+    issue = h.reproduce(h.classify(h.open_issue()), reproduced=False)
     with h.uow() as uow:
         escalate = next(j for j in uow.list_jobs(issue.id) if j.kind == JobKind.ESCALATE_OWNER)
         start = next(j for j in uow.list_jobs(issue.id) if j.kind == JobKind.START_REPRODUCTION)
@@ -408,8 +408,12 @@ def test_failed_side_effect_is_never_done_and_retries_with_backoff(h: Harness) -
         h.service.claim_job(uow, start.id, "w")
 
 
-def test_confirm_bug_creates_exactly_one_fix_session(h: Harness) -> None:
-    issue = h.confirm(h.reproduce(h.classify(h.open_issue())))
+def test_reproduced_defect_queues_exactly_one_fix_session_without_an_owner(h: Harness) -> None:
+    issue = h.reproduce(h.classify(h.open_issue()))
+    assert issue.state == IssueState.FIX_PENDING
+    with h.uow() as uow:
+        decisions = list(uow.list_decisions(issue.id))
+    assert decisions == []
     with h.uow() as uow:
         fixes = [s for s in uow.list_sessions(issue_id=issue.id) if s.kind == SessionKind.FIX]
         start_jobs = [j for j in uow.list_jobs(issue.id) if j.kind == JobKind.START_FIX]
@@ -430,7 +434,7 @@ def test_confirm_bug_creates_exactly_one_fix_session(h: Harness) -> None:
 
 
 def test_fix_session_start_requires_matching_queued_session(h: Harness) -> None:
-    issue = h.confirm(h.reproduce(h.classify(h.open_issue())))
+    issue = h.reproduce(h.classify(h.open_issue()))
     with h.uow() as uow:
         repro = next(
             s for s in uow.list_sessions(issue_id=issue.id) if s.kind == SessionKind.REPRODUCTION
@@ -443,18 +447,22 @@ def test_fix_session_start_requires_matching_queued_session(h: Harness) -> None:
                 EventType.FIX_SESSION_STARTED, issue_id=issue.id, session_id=str(uuid.UUID(int=9))
             )
         )
-    assert h.issue(issue.id).state == IssueState.FIX_AUTHORIZED
+    assert h.issue(issue.id).state == IssueState.FIX_PENDING
 
 
-def test_confirm_bug_required_before_fix(h: Harness) -> None:
-    issue = h.reproduce(h.classify(h.open_issue()))
+def test_unreproduced_defect_waits_for_the_owner(h: Harness) -> None:
+    issue = h.reproduce(h.classify(h.open_issue()), reproduced=False)
     assert issue.state == IssueState.NEEDS_OWNER_DECISION
+    with h.uow() as uow:
+        assert not [s for s in uow.list_sessions(issue_id=issue.id) if s.kind == SessionKind.FIX]
     with expect(ErrorCode.HUMAN_GATE_REQUIRED):
         h.apply(h.event(EventType.FIX_SESSION_STARTED, issue_id=issue.id))
+    confirmed = h.confirm(issue)
+    assert confirmed.state == IssueState.FIX_PENDING
 
 
 def test_agent_cannot_confirm_bug(h: Harness) -> None:
-    issue = h.reproduce(h.classify(h.open_issue()))
+    issue = h.reproduce(h.classify(h.open_issue()), reproduced=False)
     with expect(ErrorCode.HUMAN_GATE_REQUIRED):
         h.apply(
             h.event(
@@ -466,10 +474,16 @@ def test_agent_cannot_confirm_bug(h: Harness) -> None:
         )
 
 
-def test_confirm_bug_authorizes_and_expires(h: Harness) -> None:
-    issue = h.confirm(h.reproduce(h.classify(h.open_issue())))
-    assert issue.state == IssueState.FIX_AUTHORIZED
+def test_reproduced_defect_mandate_never_expires(h: Harness) -> None:
+    issue = h.reproduce(h.classify(h.open_issue()))
+    assert issue.state == IssueState.FIX_PENDING
     h.clock.advance(days=8)
+    assert h.start_fix(issue).state == IssueState.FIXING
+
+
+def test_fix_without_reproduction_or_owner_decision_is_gated(h: Harness) -> None:
+    issue = h.reproduce(h.classify(h.open_issue()), reproduced=False)
+    assert issue.state == IssueState.NEEDS_OWNER_DECISION
     with expect(ErrorCode.HUMAN_GATE_REQUIRED):
         h.start_fix(issue)
 
@@ -494,7 +508,7 @@ def test_waiting_states_never_report_live_workspace(h: Harness) -> None:
 
 
 def test_fix_pr_outside_scope_is_rejected(h: Harness) -> None:
-    issue = h.start_fix(h.confirm(h.reproduce(h.classify(h.open_issue()))))
+    issue = h.start_fix(h.reproduce(h.classify(h.open_issue())))
     with expect(ErrorCode.REPOSITORY_NOT_ALLOWED):
         h.open_pr(issue, repository="exloong/other-repo")
     assert h.issue(issue.id).state == IssueState.FIXING
@@ -560,7 +574,7 @@ def test_changes_requested_resumes_fix_without_new_confirmation(h: Harness) -> N
 
 
 def test_agent_fix_result_cannot_choose_reviewers(h: Harness) -> None:
-    issue = h.start_fix(h.confirm(h.reproduce(h.classify(h.open_issue()))))
+    issue = h.start_fix(h.reproduce(h.classify(h.open_issue())))
     with expect(ErrorCode.PROHIBITED_ACTION):
         h.open_pr(issue, reviewer_candidates=["attacker"])
     assert h.issue(issue.id).state == IssueState.FIXING
@@ -691,7 +705,7 @@ def test_synchronize_with_same_head_is_noop(h: Harness) -> None:
 
 
 def test_stale_session_result_cannot_advance_newer_revision(h: Harness) -> None:
-    issue = h.reproduce(h.classify(h.open_issue()))
+    issue = h.reproduce(h.classify(h.open_issue()), reproduced=False)
     old_session = h.latest_session_id(issue.id)
     h.apply(
         h.event(
@@ -888,7 +902,7 @@ def test_automation_error_retry_starts_new_reproduction_session(h: Harness) -> N
 
 
 def test_automation_error_during_fix_requeues_bounded_fix_not_fixing(h: Harness) -> None:
-    issue = h.start_fix(h.confirm(h.reproduce(h.classify(h.open_issue()))))
+    issue = h.start_fix(h.reproduce(h.classify(h.open_issue())))
     assert issue.state == IssueState.FIXING
     h.apply(h.event(EventType.AUTOMATION_FAILURE, issue_id=issue.id, reason="crash"))
     assert _live_sessions(h, issue.id) == []
@@ -896,7 +910,7 @@ def test_automation_error_during_fix_requeues_bounded_fix_not_fixing(h: Harness)
         h.event(EventType.RETRY_REQUESTED, issue_id=issue.id, role=ActorRole.OPERATOR)
     )
     assert retried.issue is not None
-    assert retried.issue.state == IssueState.FIX_AUTHORIZED
+    assert retried.issue.state == IssueState.FIX_PENDING
     assert retried.issue.state not in ACTIVE_AGENT_STATES
     assert _live_sessions(h, issue.id) == []
     with h.uow() as uow:
@@ -908,15 +922,15 @@ def test_automation_error_during_fix_requeues_bounded_fix_not_fixing(h: Harness)
     assert _live_sessions(h, issue.id) == [SessionState.RUNNING]
 
 
-def test_automation_error_with_expired_authorization_returns_to_owner_gate(h: Harness) -> None:
-    issue = h.start_fix(h.confirm(h.reproduce(h.classify(h.open_issue()))))
+def test_automation_error_retry_requeues_fix_under_the_reproduced_defect(h: Harness) -> None:
+    issue = h.start_fix(h.reproduce(h.classify(h.open_issue())))
     h.apply(h.event(EventType.AUTOMATION_FAILURE, issue_id=issue.id, reason="crash"))
     h.clock.advance(days=8)
     retried = h.apply(
         h.event(EventType.RETRY_REQUESTED, issue_id=issue.id, role=ActorRole.OPERATOR)
     )
     assert retried.issue is not None
-    assert retried.issue.state == IssueState.NEEDS_OWNER_DECISION
+    assert retried.issue.state == IssueState.FIX_PENDING
     assert _live_sessions(h, issue.id) == []
 
 
