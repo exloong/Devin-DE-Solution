@@ -3,6 +3,7 @@ import {
   type AnalyticsSummary,
   type CancelSessionCommand,
   type CommandAccepted,
+  type DashboardSummary,
   type Health,
   type IssueDetail,
   type IssueFilters,
@@ -250,7 +251,7 @@ export class ApiClient {
   async listSessions(filters: SessionFilters = {}): Promise<Page<SessionSummary> & { capacity?: SessionCapacity }> {
     const page = await this.request<Page<SessionSummary> & { capacity?: SessionCapacity }>(
       'GET',
-      `/sessions${toQuery({ status: filters.status, issue_id: filters.issue_id })}`,
+      `/sessions${toQuery({ status: filters.status, issue_id: filters.issue_id, kind: filters.kind })}`,
     );
     page.items.forEach(session => assertTargetRepository(session.repository.full_name, session.id));
     return page;
@@ -269,6 +270,10 @@ export class ApiClient {
 
   analyticsSummary(): Promise<AnalyticsSummary> {
     return this.request<AnalyticsSummary>('GET', '/analytics/summary');
+  }
+
+  dashboard(): Promise<DashboardSummary> {
+    return this.request<DashboardSummary>('GET', '/dashboard');
   }
 
   /*

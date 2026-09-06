@@ -112,18 +112,27 @@ export function fromDemoSession(session: DevinSession): SessionView {
 }
 
 const transitionLabels: Record<string, string> = {
-  intake: 'Normalize intake',
-  classify: 'Classify outcome',
-  triage: 'Classify outcome',
-  needs_info: 'Guide reporter',
-  guide_reporter: 'Guide reporter',
+  intake: 'Intake & classify',
+  classify: 'Intake & classify',
+  triage: 'Intake & classify',
+  needs_info: 'Intake & classify',
+  guide_reporter: 'Intake & classify',
   reproduce: 'Reproduce safely',
-  redirect: 'Resolve without code',
+  start_reproduction: 'Reproduce safely',
+  redirect: 'Intake & classify',
   evidence: 'Confirm the bug',
+  confirm_bug: 'Confirm the bug',
+  start_fix: 'Prepare the fix',
   validate: 'Confirm the bug',
   fix: 'Prepare the fix',
   review: 'Review & approve',
 };
+
+export function actorLabel(session: Pick<SessionSummary, 'kind' | 'actor'>): string {
+  if (session.kind === 'reproduction') return 'Devin reproducer';
+  if (session.kind === 'fix') return 'Devin coding agent';
+  return session.actor;
+}
 
 export function transitionLabel(transition: string): string {
   return transitionLabels[transition] ?? transition.replace(/_/g, ' ');
@@ -219,7 +228,7 @@ export function fromApiSummary(session: SessionSummary, now: number): SessionVie
     issueTitle: session.issue_title,
     title: session.title,
     flowStep: transitionLabel(session.transition),
-    actor: session.actor,
+    actor: actorLabel(session),
     status: mapApiStatus(session.status),
     apiStatus: session.status,
     started: startedAt === null ? 'Not started' : formatRelative(startedAt, now),

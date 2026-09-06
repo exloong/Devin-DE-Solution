@@ -594,6 +594,7 @@ def _session_summary(
         next_checkpoint=session.next_checkpoint,
         correlation_id=session.correlation_id,
         human_gate=_human_gate(issue, siblings),
+        devin_session_url=session.external_session_url,
     )
 
 
@@ -603,6 +604,7 @@ def list_sessions(
     issue_id: uuid.UUID | None,
     statuses: Sequence[SessionState],
     dry_run: bool,
+    kind: SessionKind | None = None,
 ) -> list[SessionSummary]:
     repo = repository_ref(uow, dry_run=dry_run)
     issues: dict[uuid.UUID, Issue] = {}
@@ -610,6 +612,8 @@ def list_sessions(
     out: list[SessionSummary] = []
     for session in uow.list_sessions(issue_id=issue_id):
         if statuses and session.state not in statuses:
+            continue
+        if kind is not None and session.kind != kind:
             continue
         if session.issue_id not in issues:
             issue = uow.get_issue(session.issue_id)

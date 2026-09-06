@@ -293,6 +293,7 @@ export interface SessionSummary {
   issue_key: string;
   issue_title: string;
   title: string;
+  kind: SessionKind;
   transition: string;
   actor: string;
   status: AgentSessionStatus;
@@ -314,6 +315,7 @@ export interface SessionSummary {
   next_checkpoint?: string | null;
   correlation_id: string;
   human_gate?: HumanGate;
+  devin_session_url?: string | null;
 }
 
 export interface SessionDetail extends SessionSummary {
@@ -359,6 +361,77 @@ export interface AnalyticsSummary {
   state_counts: Partial<Record<LifecycleState, number>>;
   outcome_mix: { label: string; value: number }[];
   owner_load: { owner: string; initials: string; active: number; waiting: number; sla: number }[];
+  generated_at: IsoTimestamp;
+}
+
+export type SessionKind = 'reproduction' | 'fix';
+export type ProbeStatus = 'ok' | 'stale' | 'unavailable';
+export type ProviderStatus = 'connected' | 'dry_run' | 'stale' | 'unconfigured';
+export type SystemStatus = 'healthy' | 'degraded' | 'down';
+
+export interface ThroughputBucket {
+  day: IsoTimestamp;
+  entered: number;
+  completed: number;
+}
+
+export interface StageCount {
+  id: string;
+  label: string;
+  kind: 'automation' | 'ai' | 'human' | 'terminal';
+  actor: string;
+  count: number;
+}
+
+export interface SessionHealth {
+  kind: SessionKind;
+  queued: number;
+  running: number;
+  completed: number;
+  failed: number;
+  needs_attention: number;
+  cancelled: number;
+  total: number;
+  success_rate_pct: number | null;
+  median_duration_seconds: number | null;
+  last_launched_at: IsoTimestamp | null;
+}
+
+export interface RecentSession {
+  id: UUID;
+  kind: SessionKind;
+  issue_id: UUID;
+  issue_key: string;
+  issue_title: string;
+  status: AgentSessionStatus;
+  dry_run: boolean;
+  created_at: IsoTimestamp;
+  started_at: IsoTimestamp | null;
+  ended_at: IsoTimestamp | null;
+  duration_seconds: number | null;
+  devin_session_url: string | null;
+}
+
+export interface Heartbeat {
+  database: ProbeStatus;
+  worker: ProbeStatus;
+  github: ProviderStatus;
+  devin: ProviderStatus;
+  last_worker_heartbeat_at: IsoTimestamp | null;
+  last_webhook_received_at: IsoTimestamp | null;
+  last_webhook_event: string | null;
+  last_session_launched_at: IsoTimestamp | null;
+  overall: SystemStatus;
+  reasons: string[];
+}
+
+export interface DashboardSummary {
+  period: { from: IsoTimestamp; to: IsoTimestamp };
+  throughput: { entered: number; completed: number; buckets: ThroughputBucket[] };
+  in_flight: StageCount[];
+  sessions: SessionHealth[];
+  recent_sessions: RecentSession[];
+  heartbeat: Heartbeat;
   generated_at: IsoTimestamp;
 }
 
@@ -425,4 +498,5 @@ export interface IssueFilters {
 export interface SessionFilters {
   status?: AgentSessionStatus[];
   issue_id?: UUID;
+  kind?: SessionKind;
 }

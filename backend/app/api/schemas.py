@@ -336,6 +336,7 @@ class SessionSummary(ApiModel):
     next_checkpoint: str | None = None
     correlation_id: str
     human_gate: HumanGate
+    devin_session_url: str | None = None
 
 
 class SessionDetail(SessionSummary):

@@ -21,7 +21,7 @@ from app.api.schemas import (
     WorkflowDefinition,
 )
 from app.domain.errors import DomainError, ErrorCode
-from app.domain.states import WORKFLOW_VERSION, IssueState, SessionState
+from app.domain.states import WORKFLOW_VERSION, IssueState, SessionKind, SessionState
 from app.persistence import runtime_status, tables
 
 router = APIRouter()
@@ -98,10 +98,15 @@ def list_sessions(
     _reader: Reader,
     issue_id: uuid.UUID | None = None,
     status: Annotated[list[SessionState] | None, Query()] = None,
+    kind: SessionKind | None = None,
 ) -> SessionPage:
     with ctx.uow_factory() as uow:
         items = queries.list_sessions(
-            uow, issue_id=issue_id, statuses=status or [], dry_run=ctx.scope.dry_run
+            uow,
+            issue_id=issue_id,
+            statuses=status or [],
+            dry_run=ctx.scope.dry_run,
+            kind=kind,
         )
     return SessionPage(items=items, total=len(items), generated_at=ctx.service.clock.now())
 
