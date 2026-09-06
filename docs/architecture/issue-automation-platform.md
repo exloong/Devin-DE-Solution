@@ -185,6 +185,15 @@ Humans retain authority for:
 - changing lifecycle policy or agent capabilities.
 
 Owner silence creates an escalation record. It never implies approval.
+Human identity and role come from an authenticated server-side principal, not
+from command JSON. A caller cannot claim to be an owner, security responder, or
+operator. Owner decisions are authorized against the persisted reviewer
+routing decision or an explicit, audited operator override.
+
+Pull-request approval is bound to the exact repository, pull-request number,
+and head commit SHA. A new head invalidates previous human approval and review
+evidence, then reruns deterministic routing and Devin Review. A merge webhook
+can complete a flow only when the merged head has a matching human approval.
 
 ## Lifecycle
 
@@ -301,12 +310,17 @@ All endpoints are under `/api/v1`.
 | `POST` | `/sessions/{id}/actions/cancel` | Bounded cancellation request |
 | `POST` | `/dry-runs` | Create a local synthetic flow run |
 
-Commands require an idempotency key. Mutation responses return the accepted
-event and current resource version; processing may continue asynchronously.
+Commands require an `Idempotency-Key` header. Mutations of an existing issue or
+session also require an `If-Match` resource-version precondition. Mutation
+responses return the accepted event and current resource version; processing
+may continue asynchronously. Command bodies never contain caller identity or
+role.
 
 The web app initially falls back to committed mock data when the API is
 unavailable, but it must display a clear `Demo data` indicator and never mix
-mock and live records in one view.
+mock and live records in one view. A reachable API that returns an
+authentication, authorization, validation, server, or schema error remains a
+live error; it must never silently switch the operator to demo records.
 
 ## GitHub ingress and egress
 
@@ -338,6 +352,8 @@ Live flow:
    prior ownership configuration, and explicit routing policy.
 8. Relay requests human review; it never treats silence or Devin Review as
    merge approval.
+9. A pull-request synchronize event invalidates stale approvals and review
+   findings before any new agent or owner result can advance the flow.
 
 No adapter may:
 
@@ -431,6 +447,10 @@ data.
 
 - Secrets are supplied through runtime secret management, never persisted in
   lifecycle payloads or logs.
+- Live command endpoints deny access unless an authentication provider is
+  configured. Dry-run mode uses an explicit demo principal and fake adapters.
+- Caller identity and authorization are derived server-side and recorded in
+  immutable decision and audit records.
 - Webhook signatures use constant-time comparison.
 - External text is data, never shell input or prompt-level authorization.
 - Artifact content types and sizes are allowlisted.
