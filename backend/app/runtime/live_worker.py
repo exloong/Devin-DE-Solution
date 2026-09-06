@@ -41,7 +41,14 @@ from app.domain.models import (
     SessionEvent,
 )
 from app.domain.ports import UnitOfWork, UnitOfWorkFactory
-from app.domain.states import ActorRole, EventType, IssueState, SessionKind, SessionState
+from app.domain.states import (
+    TERMINAL_STATES,
+    ActorRole,
+    EventType,
+    IssueState,
+    SessionKind,
+    SessionState,
+)
 from app.domain.transitions import TransitionService
 from app.integrations.codeowners import OwnerKind, ReviewerRouter, RoutingStatus
 from app.integrations.devin_automations import (
@@ -370,7 +377,10 @@ class LiveWorkerRuntime:
                 return None if not row.is_terminal else False
             waiting = self._waiting_native_session(uow, issue, SessionKind.FIX)
             if waiting is None:
-                if issue.state in (IssueState.FIX_PENDING, IssueState.FIXING):
+                # Devin's fix session often shows up before Relay has mirrored
+                # the reproduction that queues the fix record; keep looking
+                # while the issue can still get there.
+                if issue.state not in TERMINAL_STATES:
                     return None
                 LOGGER.info(
                     "issue #%s is %s; not adopting fix session %s",

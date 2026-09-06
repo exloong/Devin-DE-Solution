@@ -571,6 +571,31 @@ def test_native_fix_session_is_adopted_by_issue_and_records_the_pull_request() -
     assert records == {"fix": "auto-fake-fix", "reproduction": "auto-fake-reproduction"}
 
 
+def test_fix_session_seen_before_relay_mirrors_the_reproduction_is_adopted_later() -> None:
+    harness = Harness()
+    issue = _open_with_context(harness)
+    runtime, worker, sessions, automations = _automation_runtime(harness)
+    triage = _native_triage(automations, 200, "devin-native-200")
+    spawned = automations.simulate_native_session(
+        make_task(TaskKind.FIX, wall_seconds=3600),
+        session_id="devin-fix-200",
+        kind=TaskKind.FIX,
+        structured_output={"issue_number": 200, "repository": TARGET_REPOSITORY, "phase": "fixing"},
+    )
+    # Devin already chained the fix, but Relay has only seen the triage so far.
+    worker.run_once()
+    assert harness.issue(issue.id).state == IssueState.TRIAGE
+    assert spawned.session_id not in runtime.native_intake.ignored_session_ids
+
+    sessions.set_structured_output(triage.session_id, _native_output(200), complete=True)
+    worker.run_once()
+    worker.run_once()
+    assert harness.issue(issue.id).state == IssueState.FIXING
+    with harness.uow() as uow:
+        fix = [s for s in uow.list_sessions(issue_id=issue.id) if s.kind is SessionKind.FIX][0]
+    assert fix.external_session_id == spawned.session_id
+
+
 def test_blocked_native_fix_surfaces_as_an_automation_error() -> None:
     harness = Harness()
     issue = _open_with_context(harness)
