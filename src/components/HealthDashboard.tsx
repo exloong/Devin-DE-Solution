@@ -147,6 +147,7 @@ export function demoDashboard(now = Date.now()): DashboardSummary {
       last_webhook_received_at: null,
       last_webhook_event: null,
       last_session_launched_at: null,
+      automations: [],
       overall: 'down',
       reasons: ['Demo data: no Relay API, worker, GitHub webhook, or Devin connection is present.'],
     },

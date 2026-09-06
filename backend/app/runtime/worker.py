@@ -15,6 +15,7 @@ from app.domain.ports import UnitOfWork
 from app.domain.states import ActorRole, EventType
 from app.domain.transitions import TransitionService
 from app.persistence import runtime_status
+from app.persistence.automation_registry import DatabaseAutomationSecretStore
 from app.persistence.database import make_engine, upgrade
 from app.persistence.sqlalchemy_uow import SqlAlchemyUnitOfWorkFactory
 from app.runtime.live_worker import LiveWorkerRuntime, live_runtime_from_env
@@ -332,7 +333,15 @@ def main() -> None:
         raise RuntimeError("RELAY_MODE must be demo or live")
     service = TransitionService()
     uow_factory = SqlAlchemyUnitOfWorkFactory(engine)
-    live_runtime = live_runtime_from_env(service, uow_factory) if mode == "live" else None
+    live_runtime = None
+    if mode == "live":
+        live_runtime = live_runtime_from_env(
+            service,
+            uow_factory,
+            automation_secrets=DatabaseAutomationSecretStore(engine, clock=service.clock),
+        )
+        for kind, handle in live_runtime.automation_handles().items():
+            LOGGER.info("devin %s automation %s ready", kind.value, handle.automation_id)
     worker = Worker(
         engine=engine,
         service=service,

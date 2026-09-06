@@ -40,6 +40,14 @@ from app.domain.ports import UnitOfWork, UnitOfWorkFactory
 from app.domain.states import ActorRole, EventType, SessionKind, SessionState
 from app.domain.transitions import TransitionService
 from app.integrations.codeowners import OwnerKind, ReviewerRouter, RoutingStatus
+from app.integrations.devin_automations import (
+    AUTOMATION_KINDS,
+    AutomationHandle,
+    AutomationSecretStore,
+    DevinAutomationClient,
+    InMemoryAutomationSecretStore,
+    LiveDevinAutomationClient,
+)
 from app.integrations.devin_review import (
     DevinReviewClient,
     LiveDevinReviewClient,
@@ -119,6 +127,16 @@ class LiveWorkerRuntime:
     devin: DevinSessionClient
     review: DevinReviewClient
     default_branch: str = "master"
+    automations: DevinAutomationClient | None = None
+
+    def automation_handles(self) -> dict[TaskKind, AutomationHandle]:
+        """Find-or-create Relay's reproduction and fix automations."""
+        if self.automations is None:
+            return {}
+        now = self.service.clock.now()
+        return {
+            kind: self.automations.ensure_automation(kind, now=now) for kind in AUTOMATION_KINDS
+        }
 
     def execute(self, uow: UnitOfWork, job: Job) -> None:
         if job.issue_id is None:
@@ -206,6 +224,7 @@ class LiveWorkerRuntime:
         raise RuntimeError(f"unsupported live job kind: {job.kind.value}")
 
     def sync(self) -> None:
+        self._link_dispatched_sessions()
         with self.uow_factory() as uow:
             sessions = [
                 session
@@ -216,6 +235,109 @@ class LiveWorkerRuntime:
         for session in sessions:
             self._sync_session(session.id)
         self._sync_reviews()
+
+    def _link_dispatched_sessions(self) -> None:
+        """Bind automation-spawned Devin sessions to the Relay sessions that asked for them.
+
+        Devin creates the session asynchronously after the inbox post, so the
+        external id is unknown at dispatch time. Spawned sessions are matched
+        by ``structured_output.task_id`` when the agent has already echoed it,
+        otherwise oldest-unlinked to oldest-dispatched per automation.
+        """
+        if self.automations is None:
+            return
+        with self.uow_factory() as uow:
+            all_sessions = uow.list_sessions()
+        known = {s.external_session_id for s in all_sessions if s.external_session_id}
+        pending = sorted(
+            (
+                s
+                for s in all_sessions
+                if s.automation_id
+                and s.external_session_id is None
+                and s.dispatched_at is not None
+                and s.state is SessionState.RUNNING
+            ),
+            key=lambda s: (s.dispatched_at or s.created_at, s.created_at),
+        )
+        by_automation: dict[str, list[AgentSession]] = {}
+        for session in pending:
+            assert session.automation_id is not None
+            by_automation.setdefault(session.automation_id, []).append(session)
+        for automation_id, waiting in by_automation.items():
+            since = min(s.dispatched_at for s in waiting if s.dispatched_at is not None)
+            try:
+                spawned = [
+                    snap
+                    for snap in self.automations.list_spawned_sessions(automation_id, since=since)
+                    if snap.session_id not in known
+                ]
+            except Exception as error:
+                self._mark_dispatch_wait(waiting, f"{type(error).__name__}: {error}")
+                continue
+            by_task = {
+                str(snap.structured_output.get("task_id")): snap
+                for snap in spawned
+                if snap.structured_output is not None
+                and isinstance(snap.structured_output.get("task_id"), str)
+            }
+            unmatched = [snap for snap in spawned if snap not in by_task.values()]
+            for session in waiting:
+                snapshot = by_task.get(str(session.id))
+                if snapshot is None and unmatched:
+                    snapshot = unmatched.pop(0)
+                if snapshot is None:
+                    self._expire_dispatch(session)
+                    continue
+                known.add(snapshot.session_id)
+                self._bind_spawned(session.id, snapshot)
+
+    def _mark_dispatch_wait(self, waiting: list[AgentSession], detail: str) -> None:
+        with self.uow_factory() as uow:
+            for pending in waiting:
+                session = uow.get_session(pending.id)
+                if session is None:
+                    continue
+                session.current_action = f"Waiting for Devin automation ({detail})"
+                uow.save_session(session)
+
+    def _expire_dispatch(self, pending: AgentSession) -> None:
+        now = self.service.clock.now()
+        if pending.dispatched_at is None:
+            return
+        waited = (now - pending.dispatched_at).total_seconds()
+        if waited <= pending.budget.wall_clock_seconds:
+            return
+        with self.uow_factory() as uow:
+            session = uow.get_session(pending.id)
+            issue = uow.get_issue(pending.issue_id)
+            if session is None or issue is None:
+                return
+            self._fail_session(
+                uow,
+                issue,
+                session,
+                "Devin automation did not start a session within the budget",
+            )
+
+    def _bind_spawned(self, session_id: uuid.UUID, snapshot: SessionSnapshot) -> None:
+        with self.uow_factory() as uow:
+            session = uow.get_session(session_id)
+            if session is None or session.external_session_id is not None:
+                return
+            self._attach_snapshot(session, snapshot)
+            session.current_action = "Devin session accepted"
+            session.progress_source = "devin-automation"
+            session.progress_synced_at = self.service.clock.now()
+            uow.save_session(session)
+            uow.add_session_event(
+                SessionEvent(
+                    session_id=session.id,
+                    label="Devin session created",
+                    detail=f"Started by automation {session.automation_id}",
+                    created_at=self.service.clock.now(),
+                )
+            )
 
     def _start_classification(self, uow: UnitOfWork, issue: Issue, job: Job) -> None:
         existing = [
@@ -258,7 +380,7 @@ class LiveWorkerRuntime:
         self, uow: UnitOfWork, issue: Issue, job: Job, kind: TaskKind
     ) -> None:
         session = self._session(uow, job)
-        if session.external_session_id is not None:
+        if session.external_session_id is not None or session.automation_id is not None:
             return
         if session.target_commit is None:
             session.target_commit = self._target_commit(uow, issue).sha
@@ -273,6 +395,13 @@ class LiveWorkerRuntime:
         kind: TaskKind | None = None,
     ) -> None:
         task = self._task(uow, issue, session, kind=kind)
+        if task.kind in AUTOMATION_KINDS:
+            if self.automations is None:
+                raise RuntimeError(
+                    f"{task.kind.value} sessions are launched only through Devin Automations"
+                )
+            self._dispatch_to_automation(uow, issue, session, task)
+            return
         snapshot = self.devin.create_session(
             task,
             reporter_context=self._reporter_context(uow, issue),
@@ -291,6 +420,40 @@ class LiveWorkerRuntime:
             )
         )
 
+    def _dispatch_to_automation(
+        self, uow: UnitOfWork, issue: Issue, session: AgentSession, task: TaskEnvelope
+    ) -> None:
+        assert self.automations is not None
+        now = self.service.clock.now()
+        handle = self.automations.ensure_automation(task.kind, now=now)
+        receipt = self.automations.dispatch(
+            handle,
+            task,
+            reporter_context=self._reporter_context(uow, issue),
+            now=now,
+        )
+        session.automation_id = receipt.automation_id
+        session.dispatched_at = receipt.dispatched_at
+        session.state = SessionState.RUNNING
+        session.started_at = session.started_at or now
+        session.last_heartbeat_at = now
+        session.current_action = "Dispatched to Devin automation"
+        session.next_checkpoint = "Devin starts the session"
+        session.progress_source = "devin-automation"
+        session.progress_synced_at = now
+        uow.save_session(session)
+        uow.add_session_event(
+            SessionEvent(
+                session_id=session.id,
+                label="Dispatched to Devin automation",
+                detail=(
+                    f"{task.kind.value} automation {receipt.automation_id}, "
+                    f"bound to {task.target_commit.short_sha}"
+                ),
+                created_at=now,
+            )
+        )
+
     def _sync_session(self, session_id: uuid.UUID) -> None:
         with self.uow_factory() as uow:
             session = uow.get_session(session_id)
@@ -300,7 +463,10 @@ class LiveWorkerRuntime:
             if issue is None:
                 return
             try:
-                snapshot = self.devin.get_session(session.external_session_id)
+                snapshot = self.devin.get_session(
+                    session.external_session_id,
+                    task=self._task(uow, issue, session) if session.automation_id else None,
+                )
                 self._attach_snapshot(session, snapshot)
                 self._sync_conversation(uow, session)
                 if snapshot.status == SessionStatus.COMPLETED:
@@ -326,11 +492,20 @@ class LiveWorkerRuntime:
             except Exception as error:
                 self._fail_session(uow, issue, session, f"{type(error).__name__}: {error}")
 
-    def _complete_session(
-        self, uow: UnitOfWork, issue: Issue, session: AgentSession
-    ) -> None:
+    def _complete_session(self, uow: UnitOfWork, issue: Issue, session: AgentSession) -> None:
         task = self._task(uow, issue, session)
-        result = self.devin.collect_result(session.external_session_id or "", task)
+        external_id = session.external_session_id or ""
+        if session.automation_id is not None:
+            # Automation-spawned sessions carry no per-task tag, so the only
+            # identity proof is the task_id the agent echoes in its output.
+            echoed = (self.devin.get_session(external_id, task=task).structured_output or {}).get(
+                "task_id"
+            )
+            if echoed is not None and str(echoed) != str(task.task_id):
+                raise RuntimeError(
+                    f"Devin session {external_id} reported task {echoed}, expected {task.task_id}"
+                )
+        result = self.devin.collect_result(external_id, task)
         validate_result(
             task=task,
             result=result,
@@ -418,8 +593,7 @@ class LiveWorkerRuntime:
                     "pull_request": {
                         "repository": SUPERSET_REPOSITORY.full_name,
                         "number": pull_request.number,
-                        "head_branch": pull_request.head_branch
-                        or result.payload.branch_name,
+                        "head_branch": pull_request.head_branch or result.payload.branch_name,
                         "head_sha": head.sha,
                         "url": pull_request.html_url,
                     },
@@ -453,9 +627,7 @@ class LiveWorkerRuntime:
         ]
         if not questions:
             return
-        sections = [
-            "Relay needs a little more context before attempting isolated reproduction."
-        ]
+        sections = ["Relay needs a little more context before attempting isolated reproduction."]
         for index, question in enumerate(questions, start=1):
             sections.append(
                 f"{index}. **{question.field}** — {question.prompt}\n"
@@ -636,11 +808,14 @@ class LiveWorkerRuntime:
         *,
         kind: TaskKind | None = None,
     ) -> TaskEnvelope:
-        task_kind = kind or {
-            SessionKind.TRIAGE: TaskKind.CLASSIFICATION,
-            SessionKind.REPRODUCTION: TaskKind.REPRODUCTION,
-            SessionKind.FIX: TaskKind.FIX,
-        }[session.kind]
+        task_kind = (
+            kind
+            or {
+                SessionKind.TRIAGE: TaskKind.CLASSIFICATION,
+                SessionKind.REPRODUCTION: TaskKind.REPRODUCTION,
+                SessionKind.FIX: TaskKind.FIX,
+            }[session.kind]
+        )
         target = (
             TargetCommit(sha=session.target_commit)
             if session.target_commit
@@ -705,9 +880,7 @@ class LiveWorkerRuntime:
             return TargetCommit(sha=revision.target_commit)
         return self.github.get_branch_head(self.default_branch)
 
-    def _attach_snapshot(
-        self, session: AgentSession, snapshot: SessionSnapshot
-    ) -> None:
+    def _attach_snapshot(self, session: AgentSession, snapshot: SessionSnapshot) -> None:
         session.external_session_id = snapshot.session_id
         session.external_session_url = snapshot.links.session_url
         session.external_desktop_url = snapshot.links.desktop_url
@@ -790,9 +963,7 @@ class LiveWorkerRuntime:
         return issue
 
     @staticmethod
-    def _pull_request(
-        uow: UnitOfWork, issue_id: uuid.UUID, job: Job
-    ) -> PullRequestState:
+    def _pull_request(uow: UnitOfWork, issue_id: uuid.UUID, job: Job) -> PullRequestState:
         number = job.payload.get("pr_number")
         head_sha = job.payload.get("head_sha")
         for pr in uow.list_pull_requests(issue_id):
@@ -802,7 +973,10 @@ class LiveWorkerRuntime:
 
 
 def live_runtime_from_env(
-    service: TransitionService, uow_factory: UnitOfWorkFactory
+    service: TransitionService,
+    uow_factory: UnitOfWorkFactory,
+    *,
+    automation_secrets: AutomationSecretStore | None = None,
 ) -> LiveWorkerRuntime:
     github_token = _required_secret("GITHUB_TOKEN")
     devin_token = _required_secret("DEVIN_API_TOKEN")
@@ -814,6 +988,19 @@ def live_runtime_from_env(
     retries = int(os.environ.get("RELAY_HTTP_RETRIES", "2"))
     transport = HttpxTransport(timeout_seconds=timeout, retries=retries)
     task_policy = TaskPolicy(max_wall_seconds=5_400)
+    devin = LiveDevinSessionClient(
+        transport=transport,
+        token_provider=StaticTokenProvider(devin_token),
+        org_id=org_id,
+        policy=task_policy,
+    )
+    automations = LiveDevinAutomationClient(
+        transport=transport,
+        token_provider=StaticTokenProvider(devin_token),
+        org_id=org_id,
+        sessions=devin,
+        secret_store=automation_secrets or InMemoryAutomationSecretStore(),
+    )
     return LiveWorkerRuntime(
         service=service,
         uow_factory=uow_factory,
@@ -821,15 +1008,11 @@ def live_runtime_from_env(
             transport=transport,
             token_provider=StaticTokenProvider(github_token),
         ),
-        devin=LiveDevinSessionClient(
-            transport=transport,
-            token_provider=StaticTokenProvider(devin_token),
-            org_id=org_id,
-            policy=task_policy,
-        ),
+        devin=devin,
         review=LiveDevinReviewClient(
             transport=transport,
             token_provider=StaticTokenProvider(review_token),
         ),
         default_branch=os.environ.get("GITHUB_DEFAULT_BRANCH", "master"),
+        automations=automations,
     )

@@ -22,7 +22,7 @@ from app.api.schemas import (
 )
 from app.domain.errors import DomainError, ErrorCode
 from app.domain.states import WORKFLOW_VERSION, IssueState, SessionKind, SessionState
-from app.persistence import runtime_status, tables
+from app.persistence import automation_registry, runtime_status, tables
 
 router = APIRouter()
 APP_VERSION = "0.1.0"
@@ -133,5 +133,6 @@ def dashboard_summary(ctx: Ctx, _reader: Reader) -> DashboardSummary:
     now = ctx.service.clock.now()
     with ctx.engine.connect() as conn:
         rows = runtime_status.read_all(conn)
+        automations = automation_registry.read_public(conn)
     with ctx.uow_factory() as uow:
-        return dashboard.summary(uow, now, rows)
+        return dashboard.summary(uow, now, rows, automations=automations)

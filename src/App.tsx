@@ -69,6 +69,7 @@ import {
   type SessionView,
 } from './hooks';
 import {
+  AutomationsView,
   DataSourceBadge,
   LiveIssueWorkbench,
   RepositorySafetyNotice,
@@ -86,6 +87,7 @@ const navItems: { key: ViewKey; label: string; icon: typeof LayoutDashboard }[] 
   { key: 'overview', label: 'Health dashboard', icon: LayoutDashboard },
   { key: 'workflow', label: 'Core workflow', icon: Network },
   { key: 'sessions', label: 'Devin sessions', icon: Activity },
+  { key: 'automations', label: 'Devin Automations', icon: Zap },
   { key: 'issues', label: 'Issue workbench', icon: Inbox },
   { key: 'settings', label: 'Connections', icon: Settings2 },
 ];
@@ -296,6 +298,7 @@ function App() {
           )}
           {view === 'workflow' && <Workflow notify={notify} />}
           {!gated && view === 'sessions' && <DevinSessions goToIssue={goToIssue} notify={notify} live={live} sessions={liveSessions} onRunDryTest={runDryTest} />}
+          {!gated && view === 'automations' && <AutomationsView live={live} goToIssue={goToIssue} notify={notify} />}
           {view === 'issues' && demo && (
             <IssueWorkbench
               selected={selectedIssue}
@@ -1295,8 +1298,10 @@ function connectionCards(heartbeat: Heartbeat | null, live: boolean, now: number
       icon: <Zap size={22} />,
       badge: devinBadge,
       tone: devinTone,
-      copy: 'Reproduction sessions launch automatically; fix sessions launch only on owner authorization.',
-      detail: heartbeat ? `Last session launched ${formatAgo(heartbeat.last_session_launched_at, now)}` : 'No session has been launched.',
+      copy: 'Two Relay-managed Devin Automations (webhook inbox → start_session): reproduction dispatched by the controller gate, fix dispatched only on owner authorization.',
+      detail: heartbeat
+        ? `Last session launched ${formatAgo(heartbeat.last_session_launched_at, now)}${heartbeat.automations.length ? ` · ${heartbeat.automations.map((a) => `${a.kind} ${a.automation_id}${a.enabled ? '' : ' (disabled)'}`).join(', ')}` : ' · automations not provisioned'}`
+        : 'No session has been launched.',
     },
     {
       name: 'Owner routing',

@@ -60,9 +60,7 @@ class HttpRequest:
             "url": redact_text(self.url),
             "headers": redact_mapping(dict(self.headers)),
             "query": redact_mapping(dict(self.query)),
-            "json_body": (
-                None if self.json_body is None else redact_mapping(self.json_body)
-            ),
+            "json_body": (None if self.json_body is None else redact_mapping(self.json_body)),
             "correlation_id": self.correlation_id,
         }
 
@@ -189,6 +187,7 @@ def require_success(response: HttpResponse, *, action: str) -> HttpResponse:
         raise ContractValidationError(
             ValidationCode.TRANSPORT_FAILURE,
             f"{action} failed with status {response.status_code}",
+            upstream_status=response.status_code,
         )
     return response
 
@@ -379,9 +378,7 @@ def parse_timestamp(
     if value is None:
         if default is not None:
             return default
-        raise ContractValidationError(
-            ValidationCode.MALFORMED_RESPONSE, f"{field_name} is missing"
-        )
+        raise ContractValidationError(ValidationCode.MALFORMED_RESPONSE, f"{field_name} is missing")
     if isinstance(value, (bool, float)):
         raise ContractValidationError(
             ValidationCode.MALFORMED_RESPONSE,

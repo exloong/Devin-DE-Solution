@@ -106,6 +106,66 @@ Devin session; everything else is deterministic policy or a human decision.
 each with status, linked issue, timestamps, and the external Devin URL when
 one exists.
 
+### How Devin sessions are launched: Devin Automations
+
+Relay never calls the Sessions API to start reproduction or fix work; Devin
+Automations are the only launcher. At startup the worker uses the
+[Devin Automations API](https://docs.devin.ai/api-reference/v3/automations/post-organizations-automations)
+to find, or create once, exactly two organization-scoped automations,
+identified by their metadata (`relay_kind=reproduction|fix`,
+`relay_repo=exloong/superset`). The definitions live in Devin: the worker does
+not overwrite a name, prompt, or enabled flag that an operator changed.
+
+| Automation | Trigger | Action |
+| --- | --- | --- |
+| `Relay reproduction · exloong/superset` | `webhook:incoming` | `start_session` with the reproducer instructions |
+| `Relay fix · exloong/superset` | `webhook:incoming` | `start_session` with the coding-agent instructions |
+
+Relay's deterministic controller stays authoritative: the GitHub webhook is
+still HMAC-verified and gated in Relay, and the fix automation is only reached
+after the owner's `confirm_bug` decision. When a gate opens, the worker POSTs
+the task envelope (task id, issue key, immutable commit, budget, quoted
+reporter context) to the automation's inbox with the `X-Webhook-Secret`
+header; Devin's automation starts the session. The worker then lists sessions
+with `?automation_ids=<id>`, links each new session to its dispatch by the
+echoed `task_id` (or, failing that, oldest dispatch → oldest session) and polls
+it exactly as before, so the dashboard, session panels, and URLs are unchanged.
+
+The inbox secret is returned by Devin once, at creation. Relay stores it only
+in the `devin_automations` table (never in the API, logs, or browser); if the
+row is lost, the worker retires the automation and creates a fresh one. Relay
+does not use the native `github:issues` trigger because the
+context-completeness gate and the owner authorization cannot be expressed as
+trigger conditions and it would bypass Relay's signature and repository checks.
+
+### Managing Devin Automations from the UI
+
+The **Devin Automations** view lists every automation in the Devin
+organization, not only the two Relay uses. For each one it shows the workflow
+(trigger event types → `start_session` action with its prompt), metadata,
+enabled state, timestamps, last invocation, and the Devin sessions the
+automation has launched (Devin's list filtered by `automation_ids`, merged
+with Relay's own session records where Relay dispatched the task). Operators
+can create, edit, enable/disable, and delete automations; Relay-managed ones
+are labelled with their role (reproduction: auto after triage, fix: owner
+authorized only).
+
+The API is a thin authenticated proxy over the Automations API so the Devin
+token and inbox secrets stay on the server:
+
+| Endpoint | Role | Devin call |
+| --- | --- | --- |
+| `GET /api/v1/automations` | reader | `GET /organizations/{org}/automations` (all pages) |
+| `GET /api/v1/automations/{id}` | reader | `GET …/automations/{id}` + `GET …/sessions?automation_ids={id}` |
+| `GET /api/v1/automations/{id}/sessions` | reader | `GET …/sessions?automation_ids={id}` |
+| `POST /api/v1/automations` | operator | `POST …/automations` (`webhook:incoming` → `start_session`) |
+| `PATCH /api/v1/automations/{id}` | operator | `PATCH …/automations/{id}` |
+| `DELETE /api/v1/automations/{id}` | operator | `DELETE …/automations/{id}` |
+
+Responses omit the inbox URL and secret. Devin `401/403/404` answers surface as
+`403/403/404`; other transport failures as `502`. The `relay_kind` and
+`relay_repo` metadata keys are reserved for the worker and rejected on create.
+
 ### Health & throughput dashboard
 
 The **Health dashboard** view (`GET /api/v1/dashboard`) exists to prove whether
@@ -130,8 +190,8 @@ heartbeat marked *down*; it never pretends a provider is connected.
 | Service | Responsibility |
 | --- | --- |
 | `web` | Builds and serves the React dashboard; Nginx proxies `/api/v1` to the API on the same origin. |
-| `api` | Provides FastAPI query/command endpoints, authentication, database migrations, health/readiness, and signed webhook ingress. |
-| `worker` | Claims durable jobs, advances timers and transitions, and calls external providers through bounded HTTPS clients. |
+| `api` | Provides FastAPI query/command endpoints, authentication, database migrations, health/readiness, signed webhook ingress, and the authenticated proxy for managing Devin Automations. |
+| `worker` | Claims durable jobs, advances timers and transitions, provisions Relay's two Devin Automations, dispatches gated tasks to their inboxes, and calls external providers through bounded HTTPS clients. |
 | `postgres` | Persists lifecycle state, idempotency records, jobs, evidence, sessions, PR bindings, reviews, approvals, and worker status. |
 
 The API and worker share the backend package but run as separate processes.
@@ -192,7 +252,8 @@ curl --fail http://127.0.0.1:4173/api/v1/ready
 ```
 
 Open `http://127.0.0.1:4173`. Demo mode authenticates commands with a local demo
-principal, so no operator or provider token is required.
+principal, so no operator or provider token is required. (Live mode does: see
+[Operator token](#operator-token-required-to-sign-in).)
 
 To use another host port:
 
@@ -325,8 +386,8 @@ chmod 600 .env
 | `GITHUB_DEFAULT_BRANCH` | Worker | Superset branch resolved to the immutable reproduction base; defaults to `master`. |
 | `RELAY_TRUSTED_LABEL` | API | Optional controller-gate label. When set, `issues.opened`/`issues.labeled` events enroll an issue only if it carries (or is being given) this label. |
 | `RELAY_TRUSTED_ACTORS` | API | Optional comma-separated GitHub logins; when set, only these senders can trigger enrollment. |
-| `DEVIN_API_TOKEN` | Worker | Devin service-user API key or personal access token. |
-| `DEVIN_ORG_ID` | Worker | Devin organization identifier used by the v3 session API. |
+| `DEVIN_API_TOKEN` | API, Worker | Devin service-user API key. The worker dispatches to Devin Automations; the API proxies automation management. |
+| `DEVIN_ORG_ID` | API, Worker | Devin organization identifier used by the v3 API. |
 | `DEVIN_REVIEW_TOKEN` | Worker | Optional separate Devin Review token; defaults to `DEVIN_API_TOKEN`. |
 | `APP_PORT` | Web | Loopback-only HTTP port; defaults to `4173`. |
 
@@ -343,9 +404,25 @@ curl --fail http://127.0.0.1:4173/api/v1/health
 curl --fail http://127.0.0.1:4173/api/v1/ready
 ```
 
-Open `http://127.0.0.1:4173`, go to **Connections**, and enter
-the Relay operator token. The browser keeps it in `sessionStorage`; provider
-credentials remain server-side.
+### Operator token (required to sign in)
+
+In live mode every dashboard view (health, sessions, Devin Automations) is
+behind a Relay-issued operator token. There is nothing to obtain from GitHub or
+Devin: you generate the token yourself and register it with the API.
+
+```bash
+# 1. Generate a random token.
+TOKEN=$(openssl rand -hex 16)
+
+# 2. Register it in .env as token:login:role (the role must be `operator`).
+echo "RELAY_AUTH_TOKENS=${TOKEN}:relay-operator:operator" >> .env
+```
+
+Open `http://127.0.0.1:4173`, go to **Connections → Dashboard operator
+access**, paste the token, and click **Connect**. Until then the dashboard
+shows "commands require an authenticated principal". The browser keeps the
+token in `sessionStorage` for that tab only (every operator and every new tab
+enters it again); provider credentials remain server-side.
 
 ### GitHub requirements
 
@@ -377,8 +454,10 @@ verification without creating lifecycle work.
 ### Devin and Devin Review requirements
 
 Create a service user under **Devin Settings → Service users**, assign the
-minimum role that can create, read, message, and cancel organization sessions,
-then generate its API key. Set the key as `DEVIN_API_TOKEN` and set
+minimum role that can create, read, message, and cancel organization sessions
+and manage and view organization automations and sessions
+(`ManageOrgAutomations`, `ViewOrgAutomations`, `ViewOrgSessions`), then
+generate its API key. Set the key as `DEVIN_API_TOKEN` and set
 `DEVIN_ORG_ID` to the corresponding `org-...` identifier. See Devin's
 [authentication documentation](https://docs.devin.ai/api-reference/authentication).
 
@@ -452,6 +531,14 @@ preserve the raw webhook request body.
 - **A webhook returns 409:** the delivery ID was already processed.
 - **A Devin request fails:** confirm the service user can use organization
   sessions and that `DEVIN_ORG_ID` has the `org-...` form.
+- **The Devin Automations view shows 403 or "not configured":** the `api`
+  service needs `DEVIN_API_TOKEN`/`DEVIN_ORG_ID` too, and the service user
+  needs `ViewOrgAutomations` (read), `ManageOrgAutomations` (create, edit,
+  delete) and `ViewOrgSessions` (sessions under an automation).
+- **A dispatched task never gets a session:** check the automation is enabled
+  in Devin and its last invocation status in the Automations view; a `403`
+  from the inbox means the stored secret no longer matches, so delete the
+  automation and restart the worker to re-create it.
 - **Review remains pending:** confirm Devin Review is enabled and its token can
   call the enterprise PR-review endpoint.
 - **Port 4173 is already in use:** set `APP_PORT` to another host port.

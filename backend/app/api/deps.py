@@ -22,6 +22,7 @@ from app.domain.models import Actor, RepositoryScope
 from app.domain.ports import UnitOfWorkFactory
 from app.domain.states import ActorRole
 from app.domain.transitions import TransitionService
+from app.integrations.devin_automations import DevinAutomationClient
 
 COMMAND_SOURCE = "api"
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
@@ -125,6 +126,7 @@ class AppContext:
     scope: RepositoryScope
     database_url: str
     auth: AuthConfig = field(default_factory=AuthConfig)
+    automations: DevinAutomationClient | None = None
 
 
 def get_context(request: Request) -> AppContext:
@@ -173,6 +175,23 @@ def get_reader(caller: Caller) -> Principal:
 
 
 Reader = Annotated[Principal, Depends(get_reader)]
+
+MANAGER_ROLES: frozenset[ActorRole] = frozenset({ActorRole.OPERATOR, ActorRole.SYSTEM})
+
+
+def get_manager(caller: Caller) -> Principal:
+    """Creating, editing or deleting Devin automations changes what Devin will
+    run on the organization's behalf, so it is limited to operators."""
+    if caller.role not in MANAGER_ROLES:
+        raise DomainError(
+            ErrorCode.UNAUTHORIZED_ACTOR,
+            "managing Devin automations requires an operator principal",
+            {"role": caller.role.value},
+        )
+    return caller
+
+
+Manager = Annotated[Principal, Depends(get_manager)]
 
 
 @dataclass(frozen=True)

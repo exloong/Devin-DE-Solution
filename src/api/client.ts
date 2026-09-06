@@ -1,6 +1,11 @@
 import {
   TARGET_REPOSITORY,
   type AnalyticsSummary,
+  type Automation,
+  type AutomationCreate,
+  type AutomationDetail,
+  type AutomationPage,
+  type AutomationUpdate,
   type CancelSessionCommand,
   type CommandAccepted,
   type DashboardSummary,
@@ -165,7 +170,7 @@ export class ApiClient {
     this.accessToken = options.accessToken ?? readAccessToken;
   }
 
-  private async request<T>(method: 'GET' | 'POST', path: string, body?: unknown, options: RequestOptions = {}): Promise<T> {
+  private async request<T>(method: 'GET' | 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown, options: RequestOptions = {}): Promise<T> {
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), this.timeoutMs);
     let response: Response;
@@ -214,6 +219,8 @@ export class ApiClient {
       }
       throw new ApiError(code, message, response.status, correlationId, details);
     }
+
+    if (response.status === 204) return undefined as T;
 
     if (!isJson) {
       // Vite/nginx returning index.html for an unknown route means no API is mounted.
@@ -270,6 +277,26 @@ export class ApiClient {
 
   analyticsSummary(): Promise<AnalyticsSummary> {
     return this.request<AnalyticsSummary>('GET', '/analytics/summary');
+  }
+
+  listAutomations(): Promise<AutomationPage> {
+    return this.request<AutomationPage>('GET', '/automations');
+  }
+
+  getAutomation(id: string): Promise<AutomationDetail> {
+    return this.request<AutomationDetail>('GET', `/automations/${encodeURIComponent(id)}`);
+  }
+
+  createAutomation(body: AutomationCreate): Promise<Automation> {
+    return this.request<Automation>('POST', '/automations', body);
+  }
+
+  updateAutomation(id: string, body: AutomationUpdate): Promise<Automation> {
+    return this.request<Automation>('PATCH', `/automations/${encodeURIComponent(id)}`, body);
+  }
+
+  deleteAutomation(id: string): Promise<void> {
+    return this.request<void>('DELETE', `/automations/${encodeURIComponent(id)}`);
   }
 
   dashboard(): Promise<DashboardSummary> {

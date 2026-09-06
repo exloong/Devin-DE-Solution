@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from app.api import create_app
 from app.api.deps import AuthConfig, Principal, StaticTokenAuthenticator
-from app.domain.models import Actor, Event, Issue, JobKind, PullRequestState
+from app.domain.models import Actor, AgentSession, Event, Issue, JobKind, PullRequestState
 from app.domain.states import TARGET_REPOSITORY, ActorRole, EventType
 from app.domain.transitions import TransitionResult, TransitionService
 from app.persistence.database import make_engine, upgrade
@@ -70,6 +70,12 @@ class Harness:
     def issue(self, issue_id: uuid.UUID) -> Issue:
         with self.uow() as uow:
             found = uow.get_issue(issue_id)
+        assert found is not None
+        return found
+
+    def session(self, session_id: uuid.UUID) -> AgentSession:
+        with self.uow() as uow:
+            found = uow.get_session(session_id)
         assert found is not None
         return found
 

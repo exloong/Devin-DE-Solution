@@ -3,6 +3,10 @@ import {
   ApiError,
   apiClient,
   type AnalyticsSummary,
+  type AutomationCreate,
+  type AutomationDetail,
+  type AutomationPage,
+  type AutomationUpdate,
   type CancelSessionCommand,
   type DashboardSummary,
   type Health,
@@ -160,6 +164,58 @@ export function useAnalytics(enabled = true): Resource<AnalyticsSummary> {
 
 export function useDashboard(enabled = true): Resource<DashboardSummary> {
   return useResource(() => apiClient.dashboard(), [], { pollMs: DETAIL_POLL_MS * 2, staleAfterMs: STALE_AFTER_MS, enabled });
+}
+
+export function useAutomations(enabled = true): Resource<AutomationPage> {
+  return useResource(() => apiClient.listAutomations(), [], {
+    pollMs: LIST_POLL_MS * 2,
+    staleAfterMs: STALE_AFTER_MS,
+    isEmpty: page => page.items.length === 0,
+    enabled,
+  });
+}
+
+export function useAutomation(id: string | null, enabled = true): Resource<AutomationDetail> {
+  return useResource(() => apiClient.getAutomation(id ?? ''), [id], {
+    pollMs: DETAIL_POLL_MS * 2,
+    staleAfterMs: STALE_AFTER_MS,
+    enabled: enabled && id !== null,
+  });
+}
+
+export type AutomationMutationState =
+  | { kind: 'idle' }
+  | { kind: 'pending' }
+  | { kind: 'done' }
+  | { kind: 'error'; error: ApiError };
+
+/** Create/update/delete against Devin's Automation API through the Relay proxy. */
+export function useAutomationMutations(onChanged?: () => void) {
+  const [state, setState] = useState<AutomationMutationState>({ kind: 'idle' });
+  const wrap = useCallback(
+    async <T,>(work: () => Promise<T>): Promise<T | null> => {
+      setState({ kind: 'pending' });
+      try {
+        const result = await work();
+        setState({ kind: 'done' });
+        onChanged?.();
+        return result;
+      } catch (raw) {
+        const error = raw instanceof ApiError ? raw : new ApiError('server_error', raw instanceof Error ? raw.message : 'Request failed');
+        setState({ kind: 'error', error });
+        return null;
+      }
+    },
+    [onChanged],
+  );
+  return {
+    state,
+    pending: state.kind === 'pending',
+    reset: useCallback(() => setState({ kind: 'idle' }), []),
+    create: useCallback((body: AutomationCreate) => wrap(() => apiClient.createAutomation(body)), [wrap]),
+    update: useCallback((id: string, body: AutomationUpdate) => wrap(() => apiClient.updateAutomation(id, body)), [wrap]),
+    remove: useCallback((id: string) => wrap(() => apiClient.deleteAutomation(id)), [wrap]),
+  };
 }
 
 export function useReporterResponse(target: MutationTarget | null, onAccepted?: () => void) {

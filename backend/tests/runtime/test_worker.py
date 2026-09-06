@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from app.domain import scenarios
 from app.domain.models import JobKind, JobStatus
-from app.domain.states import TARGET_REPOSITORY, EventType, IssueState
+from app.domain.states import TARGET_REPOSITORY, EventType, IssueState, SessionKind, SessionState
 from app.integrations import (
     FakeDevinReviewAdapter,
     FakeDevinSessionAdapter,
@@ -14,7 +14,10 @@ from app.integrations import (
     PostIssueComment,
     TargetCommit,
 )
-from app.persistence import runtime_status, tables
+from app.integrations.devin_automations import AutomationHandle, FakeDevinAutomationClient
+from app.integrations.tasks import TaskKind, TaskPolicy
+from app.persistence import automation_registry, runtime_status, tables
+from app.persistence.automation_registry import DatabaseAutomationSecretStore
 from app.runtime.live_worker import LiveWorkerRuntime, live_runtime_from_env
 from app.runtime.worker import Worker
 from sqlalchemy import select
@@ -142,7 +145,7 @@ def test_live_worker_binds_sessions_to_revision_and_commit() -> None:
     assert opened.issue is not None
     issue = opened.issue
     github = FakeGitHubAdapter(branch_head=TargetCommit("a" * 40))
-    sessions = FakeDevinSessionAdapter()
+    sessions = FakeDevinSessionAdapter(policy=TaskPolicy(max_wall_seconds=5_400))
     runtime = LiveWorkerRuntime(
         service=harness.service,
         uow_factory=harness.uow,
@@ -150,6 +153,7 @@ def test_live_worker_binds_sessions_to_revision_and_commit() -> None:
         devin=sessions,
         review=FakeDevinReviewAdapter(),
         default_branch="master",
+        automations=FakeDevinAutomationClient(sessions),
     )
     worker = Worker(
         harness.engine,
@@ -224,3 +228,134 @@ def test_live_runtime_loads_credentials_from_files(
     runtime = live_runtime_from_env(harness.service, harness.uow)
 
     assert runtime.default_branch == "master"
+
+
+def _automation_runtime(
+    harness: Harness, *, auto_spawn: bool
+) -> tuple[LiveWorkerRuntime, Worker, FakeDevinSessionAdapter, FakeDevinAutomationClient]:
+    sessions = FakeDevinSessionAdapter(policy=TaskPolicy(max_wall_seconds=5_400))
+    automations = FakeDevinAutomationClient(sessions, auto_spawn=auto_spawn)
+    runtime = LiveWorkerRuntime(
+        service=harness.service,
+        uow_factory=harness.uow,
+        github=FakeGitHubAdapter(branch_head=TargetCommit("a" * 40)),
+        devin=sessions,
+        review=FakeDevinReviewAdapter(),
+        default_branch="master",
+        automations=automations,
+    )
+    worker = Worker(harness.engine, harness.service, harness.uow, "live", live_runtime=runtime)
+    return runtime, worker, sessions, automations
+
+
+def _open_with_context(harness: Harness):  # type: ignore[no-untyped-def]
+    opened = harness.apply(
+        harness.event(
+            EventType.ISSUE_OPENED,
+            repository=TARGET_REPOSITORY,
+            number=200,
+            title="Chart export fails",
+            body="Steps: open a chart, export CSV.",
+            reporter="reporter-1",
+            labels=[],
+            target_commit="a" * 40,
+        )
+    )
+    assert opened.issue is not None
+    return opened.issue
+
+
+def test_reproduction_is_dispatched_to_the_automation_and_linked_on_spawn() -> None:
+    harness = Harness()
+    issue = _open_with_context(harness)
+    runtime, worker, sessions, automations = _automation_runtime(harness, auto_spawn=False)
+
+    worker.run_once()  # classification still goes through the direct sessions client
+    triage = sessions.list_sessions()[0]
+    assert triage.kind is TaskKind.CLASSIFICATION
+    sessions.run_to_completion(triage.session_id)
+    worker.run_once()
+    worker.run_once()
+
+    assert automations.dispatched(TaskKind.REPRODUCTION) != ()
+    with harness.uow() as uow:
+        repro = [
+            s for s in uow.list_sessions(issue_id=issue.id) if s.kind == SessionKind.REPRODUCTION
+        ][0]
+    assert repro.automation_id == "auto-fake-reproduction"
+    assert repro.dispatched_at is not None
+    assert repro.external_session_id is None
+    assert repro.state is SessionState.RUNNING
+    assert automations.dispatched(TaskKind.REPRODUCTION) == (str(repro.id),)
+
+    runtime.sync()  # nothing spawned yet: stays pending
+    assert harness.session(repro.id).external_session_id is None
+
+    (spawned,) = automations.spawn_pending(TaskKind.REPRODUCTION)
+    runtime.sync()
+    linked = harness.session(repro.id)
+    assert linked.external_session_id == spawned.session_id
+    assert linked.external_session_url == spawned.links.session_url
+    assert linked.progress_source == "devin-automation"
+
+    sessions.run_to_completion(spawned.session_id)
+    worker.run_once()
+    assert harness.issue(issue.id).state == IssueState.NEEDS_OWNER_DECISION
+
+
+def test_owner_authorization_dispatches_the_fix_automation_only() -> None:
+    harness = Harness()
+    issue = _open_with_context(harness)
+    runtime, worker, sessions, automations = _automation_runtime(harness, auto_spawn=True)
+
+    for _ in range(4):
+        worker.run_once()
+        for snapshot in sessions.list_sessions():
+            if not snapshot.status.is_terminal:
+                sessions.run_to_completion(snapshot.session_id)
+        runtime.sync()
+    assert harness.issue(issue.id).state == IssueState.NEEDS_OWNER_DECISION
+    assert automations.dispatched(TaskKind.FIX) == ()
+
+    harness.confirm(harness.issue(issue.id))
+    worker.run_once()
+
+    with harness.uow() as uow:
+        fix = [s for s in uow.list_sessions(issue_id=issue.id) if s.kind == SessionKind.FIX][0]
+    assert automations.dispatched(TaskKind.FIX) == (str(fix.id),)
+    assert fix.automation_id == "auto-fake-fix"
+    runtime.sync()
+    assert harness.session(fix.id).external_session_id is not None
+    assert harness.session(fix.id).external_session_id in {
+        s.session_id for s in sessions.list_sessions() if s.kind is TaskKind.FIX
+    }
+
+
+def test_database_secret_store_round_trips_handles_without_leaking_secrets() -> None:
+    harness = Harness()
+    store = DatabaseAutomationSecretStore(harness.engine, clock=harness.service.clock)
+    handle = AutomationHandle(
+        automation_id="auto-1",
+        kind=TaskKind.FIX,
+        inbox_url="https://api.devin.ai/v3/webhooks/inbox/x",
+        inbox_secret="s3cret",
+    )
+    assert store.load(TaskKind.FIX) is None
+    store.save(handle)
+    assert store.load(TaskKind.FIX) == handle
+    store.save(AutomationHandle("auto-2", TaskKind.FIX, handle.inbox_url, "other"))
+    assert store.load(TaskKind.FIX).automation_id == "auto-2"  # type: ignore[union-attr]
+    with harness.engine.connect() as conn:
+        (record,) = automation_registry.read_public(conn)
+    assert record.kind == "fix" and record.automation_id == "auto-2"
+    assert "s3cret" not in repr(record) and "other" not in repr(record)
+
+
+def test_live_runtime_always_launches_through_automations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = Harness()
+    monkeypatch.setenv("GITHUB_TOKEN", "gh")
+    monkeypatch.setenv("DEVIN_API_TOKEN", "dv")
+    monkeypatch.setenv("DEVIN_ORG_ID", "org-1234567890abcdef")
+    assert live_runtime_from_env(harness.service, harness.uow).automations is not None

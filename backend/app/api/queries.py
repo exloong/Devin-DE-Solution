@@ -605,6 +605,7 @@ def list_sessions(
     statuses: Sequence[SessionState],
     dry_run: bool,
     kind: SessionKind | None = None,
+    automation_id: str | None = None,
 ) -> list[SessionSummary]:
     repo = repository_ref(uow, dry_run=dry_run)
     issues: dict[uuid.UUID, Issue] = {}
@@ -614,6 +615,8 @@ def list_sessions(
         if statuses and session.state not in statuses:
             continue
         if kind is not None and session.kind != kind:
+            continue
+        if automation_id is not None and session.automation_id != automation_id:
             continue
         if session.issue_id not in issues:
             issue = uow.get_issue(session.issue_id)

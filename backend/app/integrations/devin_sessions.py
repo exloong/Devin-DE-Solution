@@ -265,13 +265,15 @@ class SessionSnapshot:
         return max(int((self.updated_at - self.created_at).total_seconds()), 0)
 
 
-def build_session_prompt(task: TaskEnvelope, *, reporter_context: str = "") -> str:
+def build_session_prompt(
+    task: TaskEnvelope, *, reporter_context: str = "", policy: TaskPolicy | None = None
+) -> str:
     """Build a prompt naming the repository, commit, and allowed outcome.
 
     Reporter-provided context is quoted as inert data; it is never treated as
     an instruction and is never passed to a shell.
     """
-    validate_task(task)
+    validate_task(task, policy)
     outcomes = {
         TaskKind.CLASSIFICATION: (
             "Return a classification with evidence. Do not modify the repository."
@@ -323,8 +325,14 @@ class DevinSessionClient(Protocol):
     ) -> SessionSnapshot:
         """Create a bounded session for ``task``."""
 
-    def get_session(self, session_id: str) -> SessionSnapshot:
-        """Inspect one session and synchronize its status and outputs."""
+    def get_session(
+        self, session_id: str, *, task: TaskEnvelope | None = None
+    ) -> SessionSnapshot:
+        """Inspect one session and synchronize its status and outputs.
+
+        ``task`` supplies the kind and commit for sessions Devin created on
+        Relay's behalf (automation-spawned) that carry no per-task tags.
+        """
 
     def list_sessions(self, *, limit: int = 20) -> tuple[SessionSnapshot, ...]:
         """List recent sessions created by Relay."""
@@ -477,11 +485,15 @@ class FakeDevinSessionAdapter:
         self._order: list[str] = []
         self._lock = Lock()
 
+    @property
+    def policy(self) -> TaskPolicy | None:
+        return self._policy
+
     def create_session(
         self, task: TaskEnvelope, *, reporter_context: str = ""
     ) -> SessionSnapshot:
         validate_task(task, self._policy)
-        build_session_prompt(task, reporter_context=reporter_context)
+        build_session_prompt(task, reporter_context=reporter_context, policy=self._policy)
         session_id = (
             f"devin-fake-{uuid5(task.task_id, f'session:{task.kind.value}').hex[:16]}"
         )
@@ -522,7 +534,9 @@ class FakeDevinSessionAdapter:
             snapshot = self.advance(session_id)
         return snapshot
 
-    def get_session(self, session_id: str) -> SessionSnapshot:
+    def get_session(
+        self, session_id: str, *, task: TaskEnvelope | None = None
+    ) -> SessionSnapshot:
         with self._lock:
             session = self._require(session_id)
         return self._snapshot(session)
@@ -692,7 +706,9 @@ class LiveDevinSessionClient:
         self, task: TaskEnvelope, *, reporter_context: str = ""
     ) -> SessionSnapshot:
         validate_task(task, self.policy)
-        prompt = build_session_prompt(task, reporter_context=reporter_context)
+        prompt = build_session_prompt(
+            task, reporter_context=reporter_context, policy=self.policy
+        )
         payload = require_json_object(
             self._send(
                 "POST",
@@ -737,13 +753,21 @@ class LiveDevinSessionClient:
             body["max_acu_limit"] = task.budget.max_acu
         return body
 
-    def get_session(self, session_id: str) -> SessionSnapshot:
+    def get_session(
+        self, session_id: str, *, task: TaskEnvelope | None = None
+    ) -> SessionSnapshot:
         normalized = normalize_session_id(session_id)
         payload = require_json_object(
             self._send("GET", f"{self.sessions_path}/{normalized}"),
             action="get session",
         )
-        return self._snapshot_from_payload(payload)
+        return self._snapshot_from_payload(payload, task=task)
+
+    def snapshot_from_payload(
+        self, payload: JsonObject, *, task: TaskEnvelope | None = None
+    ) -> SessionSnapshot:
+        """Parse one v3 session document (used by the automations client)."""
+        return self._snapshot_from_payload(payload, task=task)
 
     def list_sessions(self, *, limit: int = 20) -> tuple[SessionSnapshot, ...]:
         """List sessions, following the documented ``first``/``after`` cursor."""
@@ -847,7 +871,7 @@ class LiveDevinSessionClient:
         )
 
     def collect_result(self, session_id: str, task: TaskEnvelope) -> ResultEnvelope:
-        snapshot = self.get_session(session_id)
+        snapshot = self.get_session(session_id, task=task)
         if snapshot.status is not SessionStatus.COMPLETED:
             raise ContractValidationError(
                 ValidationCode.MALFORMED_RESPONSE,
