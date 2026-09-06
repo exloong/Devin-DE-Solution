@@ -280,6 +280,11 @@ def test_unknown_platform_status_needs_attention_instead_of_advancing() -> None:
     assert map_session_status("exit", "some_new_detail") is (
         SessionStatus.NEEDS_ATTENTION
     )
+    # A contradictory pair must not complete a session that reported an error.
+    assert map_session_status("error", "finished") is SessionStatus.FAILED
+    assert map_session_status("suspended", "finished") is (
+        SessionStatus.NEEDS_ATTENTION
+    )
     with pytest.raises(ContractValidationError):
         map_session_status(None)
 
@@ -797,6 +802,28 @@ def test_a_running_session_reported_as_finished_is_completed_and_released() -> N
 
     assert snapshot.status is SessionStatus.COMPLETED
     assert snapshot.workspace_status is WorkspaceStatus.RELEASED
+
+
+def test_an_errored_session_reported_as_finished_does_not_complete() -> None:
+    transport = RecordedTransport(
+        [HttpResponse(200, session_payload(status="error", status_detail="finished"))]
+    )
+
+    snapshot = live_client(transport).get_session("devin-abc123")
+
+    assert snapshot.status is SessionStatus.FAILED
+    assert snapshot.workspace_status is WorkspaceStatus.RELEASED
+
+
+def test_an_errored_session_reported_as_finished_yields_no_result() -> None:
+    transport = RecordedTransport(
+        [HttpResponse(200, session_payload(status="error", status_detail="finished"))]
+    )
+
+    with pytest.raises(ContractValidationError) as error:
+        live_client(transport).collect_result("devin-abc123", make_task())
+    assert error.value.code is ValidationCode.MALFORMED_RESPONSE
+    assert "failed" in str(error.value)
 
 
 def test_a_desktop_url_in_the_response_is_not_parsed() -> None:

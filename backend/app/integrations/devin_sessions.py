@@ -144,7 +144,9 @@ def map_session_status(value: object, status_detail: object = None) -> SessionSt
     ``exit`` only says the session stopped, so the detail decides whether that
     was completion, an operator cancellation, or an error. An unrecognized
     status or detail becomes ``needs_attention`` so an operator reviews it
-    rather than the lifecycle advancing on an assumption.
+    rather than the lifecycle advancing on an assumption. ``finished`` means
+    completion only under ``running`` or ``exit``; paired with any other
+    status it is contradictory and the status decides.
     """
     if not isinstance(value, str) or not value.strip():
         raise ContractValidationError(
@@ -156,9 +158,8 @@ def map_session_status(value: object, status_detail: object = None) -> SessionSt
         )
     status = value.strip().lower()
     detail = None if status_detail is None else status_detail.strip().lower()
-    if detail == "finished":
-        # A finished session has released its work whether or not the platform
-        # has moved it out of ``running`` yet.
+    if status == "running" and detail == "finished":
+        # The platform reports a finished session as running until it exits.
         return SessionStatus.COMPLETED
     if status == "exit":
         if detail is None:
