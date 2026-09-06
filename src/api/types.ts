@@ -118,7 +118,9 @@ export type DecisionKind =
   | 'confirm_bug'
   | 'request_discriminator'
   | 'reclassify'
-  | 'route_security_private';
+  | 'route_security_private'
+  | 'approve_pr'
+  | 'request_changes';
 
 export interface HumanDecision {
   id: UUID;
@@ -395,6 +397,8 @@ export interface OwnerDecisionCommand {
   kind: DecisionKind;
   rationale?: string;
   reclassify_as?: 'duplicate' | 'not_a_bug' | 'unsupported' | 'support';
+  pr_number?: number;
+  head_sha?: string;
 }
 
 export interface RetryCommand {

@@ -710,7 +710,9 @@ function LiveHandoff({
 }) {
   const [rationale, setRationale] = useState('');
   const pending = state.kind === 'pending';
-  const decisionOpen = issue.state === 'needs_owner_decision';
+  const bugDecisionOpen = issue.state === 'needs_owner_decision';
+  const prDecisionOpen = issue.state === 'awaiting_owner';
+  const pullRequest = issue.pull_requests.at(-1);
   const latest = issue.decisions.filter(decision => !decision.superseded_by).at(-1);
   const run = (command: Omit<OwnerDecisionCommand, 'issue_revision' | 'rationale'>) =>
     onDecide({ ...command, issue_revision: issue.revision, rationale: rationale.trim() || undefined });
@@ -722,8 +724,14 @@ function LiveHandoff({
           <FileCheck2 size={24} />
         </div>
         <div>
-          <p className="eyebrow">{decisionOpen ? 'Decision requested' : 'Owner routing'}</p>
-          <h3>{decisionOpen ? 'Does this evidence establish a supported product defect?' : `No decision is open (${lifecycleLabel[issue.state]})`}</h3>
+          <p className="eyebrow">{bugDecisionOpen || prDecisionOpen ? 'Decision requested' : 'Owner routing'}</p>
+          <h3>
+            {bugDecisionOpen
+              ? 'Does this evidence establish a supported product defect?'
+              : prDecisionOpen
+                ? `Review pull request #${pullRequest?.number ?? '—'} at its exact head`
+                : `No decision is open (${lifecycleLabel[issue.state]})`}
+          </h3>
           <p>Owner review starts only after a portable reproduction exists. Devin Review output is evidence for the owner, never a substitute for this decision.</p>
         </div>
       </div>
@@ -741,7 +749,7 @@ function LiveHandoff({
         </div>
       )}
 
-      {decisionOpen && (
+      {(bugDecisionOpen || prDecisionOpen) && (
         <>
           <textarea
             className="decision-rationale"
@@ -753,34 +761,77 @@ function LiveHandoff({
             onChange={event => setRationale(event.target.value)}
           />
           <div className="decision-actions">
-            <button className="decision-button confirm" disabled={pending} onClick={() => run({ kind: 'confirm_bug' })}>
-              {pending ? <Loader2 size={18} className="spin" /> : <Check size={18} />}
-              <span>
-                <strong>Confirm bug & authorize fix</strong>
-                <small>Starts a bounded coding session on {issue.repository.full_name}</small>
-              </span>
-            </button>
-            <button className="decision-button" disabled={pending} onClick={() => run({ kind: 'request_discriminator' })}>
-              <HelpCircle size={18} />
-              <span>
-                <strong>Need more evidence</strong>
-                <small>Ask one targeted follow-up</small>
-              </span>
-            </button>
-            <button className="decision-button" disabled={pending} onClick={() => run({ kind: 'reclassify', reclassify_as: 'not_a_bug' })}>
-              <ArrowDownRight size={18} />
-              <span>
-                <strong>Reclassify as not a bug</strong>
-                <small>Expected behavior; no fix session</small>
-              </span>
-            </button>
-            <button className="decision-button danger" disabled={pending} onClick={() => run({ kind: 'route_security_private' })}>
-              <ShieldCheck size={18} />
-              <span>
-                <strong>Security-sensitive</strong>
-                <small>Stop public investigation</small>
-              </span>
-            </button>
+            {bugDecisionOpen ? (
+              <>
+                <button className="decision-button confirm" disabled={pending} onClick={() => run({ kind: 'confirm_bug' })}>
+                  {pending ? <Loader2 size={18} className="spin" /> : <Check size={18} />}
+                  <span>
+                    <strong>Confirm bug & authorize fix</strong>
+                    <small>Starts a bounded coding session on {issue.repository.full_name}</small>
+                  </span>
+                </button>
+                <button className="decision-button" disabled={pending} onClick={() => run({ kind: 'request_discriminator' })}>
+                  <HelpCircle size={18} />
+                  <span>
+                    <strong>Need more evidence</strong>
+                    <small>Ask one targeted follow-up</small>
+                  </span>
+                </button>
+                <button className="decision-button" disabled={pending} onClick={() => run({ kind: 'reclassify', reclassify_as: 'not_a_bug' })}>
+                  <ArrowDownRight size={18} />
+                  <span>
+                    <strong>Reclassify as not a bug</strong>
+                    <small>Expected behavior; no fix session</small>
+                  </span>
+                </button>
+                <button className="decision-button danger" disabled={pending} onClick={() => run({ kind: 'route_security_private' })}>
+                  <ShieldCheck size={18} />
+                  <span>
+                    <strong>Security-sensitive</strong>
+                    <small>Stop public investigation</small>
+                  </span>
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  className="decision-button confirm"
+                  disabled={pending || !pullRequest}
+                  onClick={() =>
+                    pullRequest &&
+                    run({
+                      kind: 'approve_pr',
+                      pr_number: pullRequest.number,
+                      head_sha: pullRequest.head_sha,
+                    })
+                  }
+                >
+                  {pending ? <Loader2 size={18} className="spin" /> : <Check size={18} />}
+                  <span>
+                    <strong>Approve exact PR head</strong>
+                    <small>{pullRequest ? `#${pullRequest.number} · ${pullRequest.head_sha.slice(0, 12)}` : 'PR binding unavailable'}</small>
+                  </span>
+                </button>
+                <button
+                  className="decision-button"
+                  disabled={pending || !pullRequest}
+                  onClick={() =>
+                    pullRequest &&
+                    run({
+                      kind: 'request_changes',
+                      pr_number: pullRequest.number,
+                      head_sha: pullRequest.head_sha,
+                    })
+                  }
+                >
+                  <HelpCircle size={18} />
+                  <span>
+                    <strong>Request changes</strong>
+                    <small>Return the exact head to a bounded fix session</small>
+                  </span>
+                </button>
+              </>
+            )}
           </div>
         </>
       )}

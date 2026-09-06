@@ -417,6 +417,67 @@ function Overview({
   const period = summary
     ? `${new Date(summary.period.from).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} – ${new Date(summary.period.to).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`
     : 'September 1–7, 2026';
+  const funnelValues = summary
+    ? [
+        ['Entered', summary.issues_processed, '#6558e8'],
+        [
+          'Actionable context',
+          summary.issues_processed -
+            (summary.state_counts.awaiting_reporter ?? 0) -
+            (summary.state_counts.closed_inactive ?? 0),
+          '#766ce9',
+        ],
+        [
+          'Reproduction attempted',
+          (summary.state_counts.reproducing ?? 0) +
+            (summary.state_counts.needs_owner_decision ?? 0) +
+            (summary.state_counts.fix_authorized ?? 0) +
+            (summary.state_counts.fixing ?? 0) +
+            (summary.state_counts.pr_open ?? 0) +
+            (summary.state_counts.awaiting_owner ?? 0) +
+            (summary.state_counts.changes_requested ?? 0) +
+            (summary.state_counts.completed ?? 0),
+          '#3c8fd5',
+        ],
+        [
+          'Reproduced',
+          (summary.state_counts.needs_owner_decision ?? 0) +
+            (summary.state_counts.fix_authorized ?? 0) +
+            (summary.state_counts.fixing ?? 0) +
+            (summary.state_counts.pr_open ?? 0) +
+            (summary.state_counts.awaiting_owner ?? 0) +
+            (summary.state_counts.changes_requested ?? 0) +
+            (summary.state_counts.completed ?? 0),
+          '#24a781',
+        ],
+        [
+          'Fix authorized',
+          (summary.state_counts.fix_authorized ?? 0) +
+            (summary.state_counts.fixing ?? 0) +
+            (summary.state_counts.pr_open ?? 0) +
+            (summary.state_counts.awaiting_owner ?? 0) +
+            (summary.state_counts.changes_requested ?? 0) +
+            (summary.state_counts.completed ?? 0),
+          '#e19a49',
+        ],
+        [
+          'PR opened',
+          (summary.state_counts.pr_open ?? 0) +
+            (summary.state_counts.awaiting_owner ?? 0) +
+            (summary.state_counts.changes_requested ?? 0) +
+            (summary.state_counts.completed ?? 0),
+          '#df775c',
+        ],
+      ]
+    : [
+        ['Entered', 148, '#6558e8'],
+        ['Actionable context', 112, '#766ce9'],
+        ['Reproduction attempted', 83, '#3c8fd5'],
+        ['Reproduced', 57, '#24a781'],
+        ['Fix authorized', 36, '#e19a49'],
+        ['PR opened', 29, '#df775c'],
+      ];
+  const funnelTotal = Math.max(Number(funnelValues[0][1]), 1);
   return (
     <>
       <PageHeader
@@ -518,20 +579,13 @@ function Overview({
         </div>
 
         <div className="card funnel-card">
-          <CardHeader title="Conversion funnel" subtitle="Where issue reports lose momentum" />
+          <CardHeader title="Conversion funnel" subtitle={summary ? 'Live lifecycle state totals' : 'Demo research baseline'} />
           <div className="funnel">
-            {[
-              ['Entered', 148, 100, '#6558e8'],
-              ['Actionable context', 112, 76, '#766ce9'],
-              ['Reproduction attempted', 83, 56, '#3c8fd5'],
-              ['Reproduced', 57, 39, '#24a781'],
-              ['Fix authorized', 36, 24, '#e19a49'],
-              ['PR opened', 29, 20, '#df775c'],
-            ].map(([label, value, width, color]) => (
+            {funnelValues.map(([label, value, color]) => (
               <div className="funnel-row" key={String(label)}>
                 <span>{label}</span>
                 <div className="funnel-track">
-                  <i style={{ width: `${width}%`, background: String(color) }} />
+                  <i style={{ width: `${Math.round((Number(value) / funnelTotal) * 100)}%`, background: String(color) }} />
                 </div>
                 <strong>{value}</strong>
               </div>
@@ -540,8 +594,12 @@ function Overview({
           <div className="insight">
             <Sparkles size={17} />
             <div>
-              <strong>Largest opportunity</strong>
-              <span>29 reports are waiting for portable reproduction data.</span>
+              <strong>{summary ? 'Live pipeline' : 'Largest opportunity'}</strong>
+              <span>
+                {summary
+                  ? `${summary.state_counts.awaiting_reporter ?? 0} reports are waiting for reporter context.`
+                  : '29 reports are waiting for portable reproduction data.'}
+              </span>
             </div>
           </div>
         </div>
