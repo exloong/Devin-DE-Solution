@@ -194,3 +194,11 @@ audit_entries = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("data", JSON, nullable=False),
 )
+
+runtime_status = Table(
+    "runtime_status",
+    metadata,
+    Column("component", String(60), primary_key=True),
+    Column("instance_id", String(200), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)

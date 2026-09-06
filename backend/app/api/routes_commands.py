@@ -230,6 +230,13 @@ def reporter_response(
     payload: dict[str, object] = {"answers": answers}
     if body.override_rationale is not None:
         payload["override_rationale"] = body.override_rationale
+    demo_actor: Actor | None = None
+    if caller.source == "demo":
+        with ctx.uow_factory() as uow:
+            issue = uow.get_issue(issue_id)
+        if issue is None:
+            raise DomainError(ErrorCode.NOT_FOUND, "issue not found")
+        demo_actor = Actor(role=ActorRole.REPORTER, login=issue.reporter_login)
     return _apply(
         ctx,
         issue_id=issue_id,
@@ -238,6 +245,7 @@ def reporter_response(
         headers=headers,
         payload=payload,
         issue_revision=body.issue_revision,
+        actor=demo_actor,
     )
 
 
@@ -270,6 +278,11 @@ def owner_decision(
         headers=headers,
         payload=payload,
         issue_revision=body.issue_revision,
+        actor=(
+            Actor(role=ActorRole.OWNER, login="owner-demo")
+            if caller.source == "demo"
+            else None
+        ),
     )
 
 

@@ -1,7 +1,73 @@
 services:
-  app:
+  web:
     build:
       context: .
     ports:
       - "${APP_PORT:-4173}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
     restart: unless-stopped
+
+  api:
+    build:
+      context: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg2://relay:relay@postgres:5432/relay
+      RELAY_MODE: demo
+      RELAY_SEED: "1"
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-relay-local-webhook-secret}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/ready', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 10
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+    command: ["python", "-m", "app.runtime.worker"]
+    environment:
+      DATABASE_URL: postgresql+psycopg2://relay:relay@postgres:5432/relay
+      RELAY_MODE: demo
+      WORKER_POLL_SECONDS: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17.6-alpine3.22
+    environment:
+      POSTGRES_DB: relay
+      POSTGRES_USER: relay
+      POSTGRES_PASSWORD: relay
+    volumes:
+      - relay_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U relay -d relay"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  relay_postgres:

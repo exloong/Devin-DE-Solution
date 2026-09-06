@@ -8,6 +8,7 @@ dependencies = [
     "pydantic==2.13.5",
     "sqlalchemy==2.0.52",
     "alembic==1.19.1",
+    "psycopg2-binary==2.9.10",
     "uvicorn==0.52.4",
 ]
 
@@ -25,6 +26,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
+
+[tool.uv]
+exclude-newer = "2026-08-30T00:00:00Z"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

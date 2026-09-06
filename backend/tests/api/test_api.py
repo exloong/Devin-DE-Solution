@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import uuid
 
+import pytest
 from app.domain.scenarios import SCENARIO_NAMES
 from app.domain.states import TARGET_REPOSITORY, ActorRole
+from app.persistence import tables
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from httpx import Response
 
-from tests.conftest import bearer
+from tests.conftest import FakeClock, bearer
 
 API = "/api/v1"
 OPERATOR = bearer(ActorRole.OPERATOR)
@@ -16,6 +22,7 @@ UNROUTED_OWNER = bearer(ActorRole.OWNER, "unrouted-owner")
 REPORTER = bearer(ActorRole.REPORTER)
 ORIGINAL_REPORTER = bearer(ActorRole.REPORTER, "mina-k")
 AGENT = bearer(ActorRole.AGENT)
+WEBHOOK_SECRET = "test-webhook-secret"
 
 
 def _cmd(key: str, version: object = None, **auth: str) -> dict[str, str]:
@@ -56,6 +63,29 @@ def _question_id(client: TestClient, issue_id: object, field: str) -> str:
     return str(next(q["id"] for q in questions if q["field"] == field))
 
 
+def _webhook(
+    client: TestClient,
+    payload: dict[str, object],
+    delivery: str,
+    *,
+    valid_signature: bool = True,
+) -> Response:
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    signature = hmac.new(WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
+    if not valid_signature:
+        signature = "0" * 64
+    return client.post(
+        f"{API}/webhooks/github",
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "X-GitHub-Delivery": delivery,
+            "X-GitHub-Event": "issues",
+            "X-Hub-Signature-256": f"sha256={signature}",
+        },
+    )
+
+
 # ------------------------------------------------------------------- queries
 
 
@@ -69,9 +99,59 @@ def test_health_and_ready(client: TestClient) -> None:
         "database": "ok",
         "worker": "unavailable",
         "last_worker_heartbeat_at": None,
-        "migrations": "0002",
+        "migrations": "0003",
         "dry_run": True,
     }
+
+
+def test_ready_reports_fresh_and_stale_worker(
+    app: FastAPI, client: TestClient, clock: FakeClock
+) -> None:
+    with app.state.context.engine.begin() as conn:
+        conn.execute(
+            tables.runtime_status.insert().values(
+                component="worker",
+                instance_id="test-worker",
+                updated_at=clock.now(),
+            )
+        )
+    assert client.get(f"{API}/ready").json()["worker"] == "ok"
+    clock.advance(seconds=31)
+    assert client.get(f"{API}/ready").json()["worker"] == "stale"
+
+
+def test_github_webhook_is_signed_scoped_and_idempotent(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    payload: dict[str, object] = {
+        "action": "opened",
+        "repository": {"full_name": TARGET_REPOSITORY},
+        "issue": {
+            "number": 999001,
+            "title": "Webhook test",
+            "body": "A reproducible failure.",
+            "user": {"login": "reporter-1"},
+            "labels": [],
+        },
+        "sender": {"login": "reporter-1"},
+    }
+    accepted = _webhook(client, payload, "webhook-accepted-1")
+    duplicate = _webhook(client, payload, "webhook-accepted-1")
+    assert accepted.status_code == 202
+    assert duplicate.status_code == 202
+    assert duplicate.json() == accepted.json()
+
+    wrong_repository = {**payload, "repository": {"full_name": "apache/superset"}}
+    rejected = _webhook(client, wrong_repository, "webhook-wrong-repository")
+    assert rejected.status_code == 403
+    assert rejected.json()["error"]["code"] == "unauthorized_repository"
+
+    unsigned = _webhook(
+        client, payload, "webhook-invalid-signature", valid_signature=False
+    )
+    assert unsigned.status_code == 401
+    assert unsigned.json()["error"]["code"] == "invalid_signature"
 
 
 def test_seeded_issues_match_scenarios(client: TestClient) -> None:

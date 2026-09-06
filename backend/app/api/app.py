@@ -15,11 +15,13 @@ from app.api.deps import (
 )
 from app.api.routes_commands import router as commands_router
 from app.api.routes_queries import router as queries_router
+from app.api.routes_webhooks import router as webhooks_router
 from app.domain import scenarios
 from app.domain.errors import DomainError, ErrorCode
 from app.domain.models import RepositoryScope
 from app.domain.ports import Clock
 from app.domain.transitions import TransitionService
+from app.integrations.errors import ContractValidationError, ValidationCode
 from app.persistence.database import make_engine, upgrade
 from app.persistence.sqlalchemy_uow import SqlAlchemyUnitOfWorkFactory
 
@@ -52,6 +54,18 @@ def _error_response(err: DomainError) -> JSONResponse:
     )
 
 
+def _contract_error_response(err: ContractValidationError) -> JSONResponse:
+    statuses = {
+        ValidationCode.INVALID_SIGNATURE: 401,
+        ValidationCode.UNAUTHORIZED_REPOSITORY: 403,
+        ValidationCode.DUPLICATE_DELIVERY: 409,
+    }
+    return JSONResponse(
+        status_code=statuses.get(err.code, 400),
+        content={"error": {"code": err.code.value, "message": str(err)}},
+    )
+
+
 def create_app(
     *,
     database_url: str | None = None,
@@ -60,7 +74,12 @@ def create_app(
     scope: RepositoryScope | None = None,
     auth: AuthConfig | None = None,
 ) -> FastAPI:
-    url = database_url or os.environ.get("RELAY_DATABASE_URL", DEFAULT_DATABASE_URL)
+    url = (
+        database_url
+        or os.environ.get("DATABASE_URL")
+        or os.environ.get("RELAY_DATABASE_URL")
+        or DEFAULT_DATABASE_URL
+    )
     engine = make_engine(url)
     upgrade(engine)
     repo_scope = scope or RepositoryScope()
@@ -81,10 +100,15 @@ def create_app(
     app.state.context = context
     app.include_router(queries_router, prefix=API_PREFIX)
     app.include_router(commands_router, prefix=API_PREFIX)
+    app.include_router(webhooks_router, prefix=API_PREFIX)
 
     @app.exception_handler(DomainError)
     async def _domain_error(_: Request, err: DomainError) -> JSONResponse:
         return _error_response(err)
+
+    @app.exception_handler(ContractValidationError)
+    async def _contract_error(_: Request, err: ContractValidationError) -> JSONResponse:
+        return _contract_error_response(err)
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(_: Request, err: RequestValidationError) -> JSONResponse:

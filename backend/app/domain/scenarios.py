@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from app.domain.errors import DomainError, ErrorCode
-from app.domain.models import Actor, Event, Issue, JobKind
+from app.domain.models import Actor, Event, Issue, JobKind, JobStatus
 from app.domain.ports import Clock, UnitOfWorkFactory
 from app.domain.states import TARGET_REPOSITORY, ActorRole, EventType
 from app.domain.transitions import TransitionService
@@ -340,9 +340,15 @@ SCENARIO_NAMES: tuple[str, ...] = tuple(s.name for s in SCENARIOS)
 
 
 def seed(
-    uow_factory: UnitOfWorkFactory, service: TransitionService, *, only: str | None = None
+    uow_factory: UnitOfWorkFactory,
+    service: TransitionService,
+    *,
+    only: str | None = None,
+    settle_jobs: bool = True,
 ) -> SeedResult:
     result = SeedResult()
+    with uow_factory() as uow:
+        existing_job_ids = {job.id for job in uow.list_jobs()}
     selected = [s for s in SCENARIOS if only is None or s.name == only]
     if only is not None and not selected:
         raise DomainError(
@@ -388,6 +394,19 @@ def seed(
         if issue is not None:
             result.issues[scenario.name] = issue.id
     service.clock = base_clock
+    if settle_jobs:
+        with uow_factory() as uow:
+            for job in uow.list_jobs():
+                if job.id not in existing_job_ids and job.status in {
+                    JobStatus.PENDING,
+                    JobStatus.CLAIMED,
+                }:
+                    job.status = JobStatus.CANCELLED
+                    job.finished_at = base_clock.now()
+                    job.claimed_by = None
+                    job.claimed_at = None
+                    uow.save_job(job)
+            uow.commit()
     return result
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Query
@@ -20,6 +21,7 @@ from app.api.schemas import (
 )
 from app.domain.errors import DomainError, ErrorCode
 from app.domain.states import WORKFLOW_VERSION, IssueState, SessionState
+from app.persistence import tables
 
 router = APIRouter()
 APP_VERSION = "0.1.0"
@@ -38,19 +40,31 @@ def health(ctx: Ctx) -> HealthResponse:
 @router.get("/ready", response_model=ReadyResponse)
 def ready(ctx: Ctx) -> ReadyResponse:
     try:
+        now = ctx.service.clock.now()
         with ctx.engine.connect() as conn:
             conn.execute(text("SELECT 1"))
             version = conn.execute(select(text("version_num")).select_from(text("alembic_version")))
             revision = version.scalar_one_or_none()
+            heartbeat = conn.execute(
+                select(tables.runtime_status.c.updated_at).where(
+                    tables.runtime_status.c.component == "worker"
+                )
+            ).scalar_one_or_none()
     except Exception as exc:  # readiness must never leak driver details
         raise DomainError(
             ErrorCode.INTERNAL, "database is not ready", {"reason": type(exc).__name__}
         ) from exc
     if not isinstance(revision, str):
         raise DomainError(ErrorCode.INTERNAL, "migrations have not been applied")
+    worker = "unavailable"
+    if heartbeat is not None:
+        if heartbeat.tzinfo is None:
+            heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+        worker = "ok" if now - heartbeat <= timedelta(seconds=30) else "stale"
     return ReadyResponse(
         database="ok",
-        worker="unavailable",
+        worker=worker,
+        last_worker_heartbeat_at=heartbeat,
         migrations=revision,
         dry_run=ctx.scope.dry_run,
     )
