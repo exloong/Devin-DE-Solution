@@ -27,6 +27,7 @@ from app.integrations.devin_automations import (
     GITHUB_ISSUES_EVENT_TYPE,
     AutomationHandle,
     FakeDevinAutomationClient,
+    trigger_issue_number,
 )
 from app.integrations.devin_sessions import ConversationMessage, SessionStatus
 from app.integrations.github_client import IssueSnapshot
@@ -175,11 +176,16 @@ def _native_output(number: int, *, reproduced: bool = True) -> JsonObject:
     }
 
 
-def _trigger_prompt(number: int, *, repository: str = TARGET_REPOSITORY) -> ConversationMessage:
+def _trigger_prompt(
+    number: int, *, repository: str = TARGET_REPOSITORY, pull_request: bool = False
+) -> ConversationMessage:
     """The automation prompt as Devin stores it: instructions + the GitHub event."""
+    issue: JsonObject = {"number": number, "title": "Chart export fails"}
+    if pull_request:
+        issue["pull_request"] = {"url": f"https://api.github.com/repos/{repository}/pulls/{number}"}
     event = {
         "action": "opened",
-        "issue": {"number": number, "title": "Chart export fails"},
+        "issue": issue,
         "repository": {"full_name": repository},
     }
     text = (
@@ -191,6 +197,11 @@ def _trigger_prompt(number: int, *, repository: str = TARGET_REPOSITORY) -> Conv
     return ConversationMessage(
         author="user", created_at=datetime(2026, 1, 1, tzinfo=timezone.utc), text=text
     )
+
+
+def test_trigger_on_a_pull_request_comment_names_no_issue() -> None:
+    assert trigger_issue_number([_trigger_prompt(13)]) == 13
+    assert trigger_issue_number([_trigger_prompt(13, pull_request=True)]) is None
 
 
 def test_live_runtime_fails_when_required_credentials_are_missing(

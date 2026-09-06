@@ -353,6 +353,9 @@ def trigger_issue_number(messages: Sequence[ConversationMessage]) -> int | None:
                 continue
             if repository.get("full_name") != SUPERSET_FULL_NAME:
                 return None
+            if "pull_request" in issue:
+                # ``issue_comment`` also fires for pull requests; Relay tracks issues only.
+                return None
             number = issue.get("number")
             if isinstance(number, bool) or not isinstance(number, int) or number < 1:
                 return None
