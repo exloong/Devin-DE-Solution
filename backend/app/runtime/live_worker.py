@@ -55,8 +55,10 @@ from app.integrations.devin_automations import (
     LiveDevinAutomationClient,
     NativeTriageOutput,
     native_issue_number,
+    native_output_from_conversation,
     parse_native_fix_output,
     parse_native_triage_output,
+    trigger_issue_number,
 )
 from app.integrations.devin_review import (
     DevinReviewClient,
@@ -101,6 +103,7 @@ class NativeIntakeState:
     last_polled_at: datetime | None = None
     last_error: str | None = None
     ignored_session_ids: set[str] = field(default_factory=set)
+    trigger_issue_numbers: dict[str, int | None] = field(default_factory=dict)
 
 
 def _required_secret(name: str) -> str:
@@ -289,6 +292,8 @@ class LiveWorkerRuntime:
                 continue
             number = native_issue_number(row.structured_output)
             if number is None:
+                number = self._trigger_issue_number(state, row)
+            if number is None:
                 if row.is_terminal:
                     state.ignored_session_ids.add(row.session_id)
                     LOGGER.info(
@@ -309,6 +314,45 @@ class LiveWorkerRuntime:
             elif adopted is False:
                 state.ignored_session_ids.add(row.session_id)
         self._expire_waiting_native_sessions()
+
+    def _trigger_issue_number(
+        self, state: NativeIntakeState, row: AutomationSessionRow
+    ) -> int | None:
+        """Issue named by the GitHub event Devin appended to the automation prompt."""
+        if row.session_id not in state.trigger_issue_numbers:
+            try:
+                _, messages = self.devin.fetch_conversation(row.session_id)
+            except Exception as error:
+                LOGGER.warning(
+                    "reading the trigger of automation session %s failed: %s",
+                    row.session_id,
+                    error,
+                )
+                return None
+            state.trigger_issue_numbers[row.session_id] = trigger_issue_number(messages)
+        return state.trigger_issue_numbers[row.session_id]
+
+    def _native_output(self, issue: Issue, snapshot: SessionSnapshot) -> JsonObject | None:
+        """Devin's structured output, or the same JSON it posted as a message instead."""
+        if native_issue_number(snapshot.structured_output) is not None:
+            return snapshot.structured_output
+        _, messages = self.devin.fetch_conversation(snapshot.session_id)
+        fallback = native_output_from_conversation(messages, issue_number=issue.external_number)
+        return fallback or snapshot.structured_output
+
+    def _native_phase_done(
+        self, issue: Issue, session: AgentSession, snapshot: SessionSnapshot
+    ) -> bool:
+        """A native session that reported ``phase: done`` and then went to sleep
+        waiting for a user is finished, not stuck."""
+        if not self._is_native(session):
+            return False
+        try:
+            output = self._native_output(issue, snapshot)
+        except Exception as error:
+            LOGGER.warning("reading output of session %s failed: %s", snapshot.session_id, error)
+            return False
+        return output is not None and output.get("phase") == "done"
 
     def _adopt_native_fix_session(
         self,
@@ -630,7 +674,10 @@ class LiveWorkerRuntime:
                 )
                 self._attach_snapshot(session, snapshot)
                 self._sync_conversation(uow, session)
-                if snapshot.status == SessionStatus.COMPLETED:
+                if snapshot.status == SessionStatus.COMPLETED or (
+                    snapshot.status == SessionStatus.NEEDS_ATTENTION
+                    and self._native_phase_done(issue, session, snapshot)
+                ):
                     self._complete_session(uow, issue, session)
                 elif snapshot.status in {
                     SessionStatus.FAILED,
@@ -669,10 +716,11 @@ class LiveWorkerRuntime:
         """
         external_id = session.external_session_id or ""
         snapshot = self.devin.get_session(external_id, task=task)
+        structured_output = self._native_output(issue, snapshot)
         if session.kind is SessionKind.FIX:
-            self._apply_native_fix(uow, issue, session, snapshot.structured_output)
+            self._apply_native_fix(uow, issue, session, structured_output)
             return
-        output = parse_native_triage_output(snapshot.structured_output)
+        output = parse_native_triage_output(structured_output)
         if output.issue_number != issue.external_number:
             raise RuntimeError(
                 f"Devin session {external_id} reported issue #{output.issue_number},"

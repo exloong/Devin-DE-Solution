@@ -16,12 +16,15 @@ Automations, keeps them in sync, and reads their sessions for the dashboard.
 Every comment Devin writes carries a ``<!-- relay:... -->`` marker so the
 follow-up trigger ignores Devin's own comments and the fix trigger fires on
 exactly one of them. Relay never comments, never dispatches, and never merges;
-Devin's structured output is the only thing it reads back.
+it reads back Devin's structured output, falling back to the session's own
+conversation (the triggering GitHub event Devin appends to the prompt, and the
+JSON Devin writes as a message when it skips the structured-output field).
 """
 
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -31,6 +34,7 @@ from typing import Protocol
 from .devin_sessions import (
     DEVIN_API_ROOT,
     RELAY_TAG,
+    ConversationMessage,
     FakeDevinSessionAdapter,
     LiveDevinSessionClient,
     SessionSnapshot,
@@ -316,6 +320,64 @@ def native_issue_number(structured_output: JsonObject | None) -> int | None:
     if repository is not None and repository != SUPERSET_FULL_NAME:
         return None
     return value
+
+
+_FENCED_JSON = re.compile(r"```(?:json)?\s*\n(\{.*?\})\s*```", re.DOTALL)
+
+
+def _fenced_json_objects(text: str) -> list[JsonObject]:
+    found: list[JsonObject] = []
+    for match in _FENCED_JSON.finditer(text):
+        try:
+            value = json.loads(match.group(1))
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            found.append(value)
+    return found
+
+
+def trigger_issue_number(messages: Sequence[ConversationMessage]) -> int | None:
+    """The issue of the GitHub event Devin appended to the automation prompt.
+
+    Only the first ``user`` message (the automation's own prompt) is consulted,
+    so nothing a person or Devin says later can re-point the session.
+    """
+    for message in messages:
+        if message.author != "user":
+            continue
+        for block in _fenced_json_objects(message.text):
+            issue = block.get("issue")
+            repository = block.get("repository")
+            if not isinstance(issue, dict) or not isinstance(repository, dict):
+                continue
+            if repository.get("full_name") != SUPERSET_FULL_NAME:
+                return None
+            number = issue.get("number")
+            if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+                return None
+            return number
+        return None
+    return None
+
+
+def native_output_from_conversation(
+    messages: Sequence[ConversationMessage], *, issue_number: int | None = None
+) -> JsonObject | None:
+    """The last structured-output-shaped JSON Devin posted as a message.
+
+    Used when the session's ``structured_output`` field is empty; a block only
+    counts when it names ``issue_number`` (and, if known, the expected one).
+    """
+    for message in reversed(messages):
+        if message.author != "devin":
+            continue
+        for block in reversed(_fenced_json_objects(message.text)):
+            number = native_issue_number(block)
+            if number is None or (issue_number is not None and number != issue_number):
+                continue
+            return block
+    return None
 
 
 def parse_native_triage_output(structured_output: JsonObject | None) -> NativeTriageOutput:
@@ -892,6 +954,7 @@ class FakeDevinAutomationClient:
         structured_output: JsonObject | None = None,
         status: SessionStatus = SessionStatus.RUNNING,
         kind: TaskKind = TaskKind.REPRODUCTION,
+        messages: Sequence[ConversationMessage] = (),
     ) -> SessionSnapshot:
         """Pretend Devin's GitHub connection fired the automation's native trigger."""
         _require_automation_kind(kind)
@@ -903,7 +966,11 @@ class FakeDevinAutomationClient:
                     f"the {kind.value} automation has not been provisioned",
                 )
             snapshot = self.sessions.create_native_session(
-                task, session_id=session_id, status=status, structured_output=structured_output
+                task,
+                session_id=session_id,
+                status=status,
+                structured_output=structured_output,
+                messages=messages,
             )
             automation.spawned.append(snapshot.session_id)
             automation.summary = replace(

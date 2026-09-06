@@ -7,6 +7,7 @@ import {
   ExternalLink,
   Inbox,
   RefreshCw,
+  Search,
   ShieldAlert,
   TestTube2,
   Webhook,
@@ -339,6 +340,12 @@ const statusLabel: Record<AgentSessionStatus, string> = {
   cancelled: 'Cancelled',
 };
 
+const kindLabel: Record<RecentSession['kind'], string> = {
+  triage: 'Triage',
+  reproduction: 'Reproduction',
+  fix: 'Fix',
+};
+
 function RecentSessions({ sessions, now, goToIssue }: { sessions: RecentSession[]; now: number; goToIssue: (id: string) => void }) {
   return (
     <div className="card recent-sessions-card">
@@ -359,8 +366,8 @@ function RecentSessions({ sessions, now, goToIssue }: { sessions: RecentSession[
         {sessions.map(session => (
           <div className="recent-sessions-row" key={session.id}>
             <span className={`kind-chip ${session.kind}`}>
-              {session.kind === 'reproduction' ? <TestTube2 size={13} /> : <Bot size={13} />}
-              {session.kind === 'reproduction' ? 'Reproduction' : 'Fix'}
+              {session.kind === 'triage' ? <Search size={13} /> : session.kind === 'reproduction' ? <TestTube2 size={13} /> : <Bot size={13} />}
+              {kindLabel[session.kind]}
             </span>
             <button className="link-button" onClick={() => goToIssue(session.issue_id)}>
               {session.issue_key}

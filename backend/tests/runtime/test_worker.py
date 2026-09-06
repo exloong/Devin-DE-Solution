@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -26,7 +28,7 @@ from app.integrations.devin_automations import (
     AutomationHandle,
     FakeDevinAutomationClient,
 )
-from app.integrations.devin_sessions import SessionStatus
+from app.integrations.devin_sessions import ConversationMessage, SessionStatus
 from app.integrations.github_client import IssueSnapshot
 from app.integrations.json_values import JsonObject
 from app.integrations.tasks import TaskKind, TaskPolicy
@@ -171,6 +173,24 @@ def _native_output(number: int, *, reproduced: bool = True) -> JsonObject:
             "control_behavior": "Passes on the previous release.",
         },
     }
+
+
+def _trigger_prompt(number: int, *, repository: str = TARGET_REPOSITORY) -> ConversationMessage:
+    """The automation prompt as Devin stores it: instructions + the GitHub event."""
+    event = {
+        "action": "opened",
+        "issue": {"number": number, "title": "Chart export fails"},
+        "repository": {"full_name": repository},
+    }
+    text = (
+        "Relay reproduction instructions...\n\n---\n## Triggering Event\n"
+        "**Source:** github\n**Event type:** github:issues\n\n```json\n"
+        + json.dumps(event, indent=2)
+        + "\n```\n"
+    )
+    return ConversationMessage(
+        author="user", created_at=datetime(2026, 1, 1, tzinfo=timezone.utc), text=text
+    )
 
 
 def test_live_runtime_fails_when_required_credentials_are_missing(
@@ -416,6 +436,61 @@ def test_native_session_with_thin_context_asks_the_reporter_instead() -> None:
         issue = uow.get_issue_by_number(repo.id, 201)
     assert issue is not None
     assert issue.state == IssueState.AWAITING_REPORTER
+
+
+def test_native_session_is_adopted_from_its_trigger_when_output_is_still_empty() -> None:
+    """Devin often leaves ``structured_output`` empty while running; the GitHub
+    event embedded in the automation prompt identifies the issue instead."""
+    harness = Harness()
+    runtime, worker, sessions, automations = _automation_runtime(harness)
+    runtime.automation_handles()
+    running = automations.simulate_native_session(
+        make_task(TaskKind.CLASSIFICATION, wall_seconds=5_400),
+        session_id="devin-native-trigger-only",
+        messages=[_trigger_prompt(201)],
+    )
+    worker.run_once()
+
+    with harness.uow() as uow:
+        repo = uow.get_repository()
+        assert repo is not None
+        issue = uow.get_issue_by_number(repo.id, 201)
+        assert issue is not None
+        triage = [s for s in uow.list_sessions(issue_id=issue.id) if s.kind is SessionKind.TRIAGE]
+    assert [s.external_session_id for s in triage] == [running.session_id]
+    assert triage[0].state is SessionState.RUNNING
+    assert runtime.native_intake.trigger_issue_numbers == {running.session_id: 201}
+
+    # Devin then writes its final JSON as a chat message and sleeps waiting for
+    # the user instead of filling the structured_output field.
+    sessions.post_devin_message(
+        running.session_id,
+        "Reproduced.\n\n```json\n" + json.dumps(_native_output(201)) + "\n```",
+    )
+    sessions.set_status(running.session_id, SessionStatus.NEEDS_ATTENTION)
+    worker.run_once()
+
+    assert harness.issue(issue.id).state == IssueState.FIX_PENDING
+    with harness.uow() as uow:
+        by_kind = {s.kind: s for s in uow.list_sessions(issue_id=issue.id)}
+    assert by_kind[SessionKind.TRIAGE].state is SessionState.COMPLETED
+    assert by_kind[SessionKind.REPRODUCTION].state is SessionState.COMPLETED
+
+
+def test_trigger_for_another_repository_never_adopts() -> None:
+    harness = Harness()
+    runtime, worker, _sessions, automations = _automation_runtime(harness)
+    runtime.automation_handles()
+    automations.simulate_native_session(
+        make_task(TaskKind.CLASSIFICATION, wall_seconds=5_400),
+        session_id="devin-foreign-trigger",
+        status=SessionStatus.COMPLETED,
+        messages=[_trigger_prompt(201, repository="other/repo")],
+    )
+    worker.run_once()
+    with harness.uow() as uow:
+        assert uow.list_issues() == []
+    assert runtime.native_intake.ignored_session_ids == {"devin-foreign-trigger"}
 
 
 def test_native_sessions_without_provable_identity_are_never_adopted() -> None:

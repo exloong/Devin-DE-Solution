@@ -399,7 +399,7 @@ export interface SessionHealth {
 
 export interface RecentSession {
   id: UUID;
-  kind: SessionKind;
+  kind: 'triage' | SessionKind;
   issue_id: UUID;
   issue_key: string;
   issue_title: string;
