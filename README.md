@@ -11,6 +11,11 @@ and fix workflow. The interface includes:
 All content and actions are simulated. The mockup does not connect to GitHub or
 start Devin sessions.
 
+## Implementation design
+
+- [Issue automation platform architecture](docs/architecture/issue-automation-platform.md)
+- [Parallel implementation and approval plan](docs/plans/parallel-implementation-plan.md)
+
 ## Research
 
 - [Apache Superset issue intake and bug resolution report](public/reports/apache-superset/issue-intake-2025-09-05-to-2026-09-04.html)
