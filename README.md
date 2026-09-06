@@ -244,6 +244,9 @@ Vite serves the frontend at `http://127.0.0.1:4173`. The production frontend
 expects `/api/v1` on the same origin; the Docker `web` service provides that
 proxy. A standalone Vite process without a proxying API will show the
 fail-closed API-unavailable state rather than silently loading demo data.
+To point the dev server at a local API instead, set
+`RELAY_API_PROXY=http://127.0.0.1:8000` (in the environment or `.env.local`)
+before `npm run dev`.
 
 Install backend dependencies:
 
