@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -180,9 +181,12 @@ def _trigger_prompt(
     number: int, *, repository: str = TARGET_REPOSITORY, pull_request: bool = False
 ) -> ConversationMessage:
     """The automation prompt as Devin stores it: instructions + the GitHub event."""
-    issue: JsonObject = {"number": number, "title": "Chart export fails"}
-    if pull_request:
-        issue["pull_request"] = {"url": f"https://api.github.com/repos/{repository}/pulls/{number}"}
+    kind = "pull" if pull_request else "issues"
+    issue: JsonObject = {
+        "number": number,
+        "title": "Chart export fails",
+        "html_url": f"https://github.com/{repository}/{kind}/{number}",
+    }
     event = {
         "action": "opened",
         "issue": issue,
@@ -202,6 +206,11 @@ def _trigger_prompt(
 def test_trigger_on_a_pull_request_comment_names_no_issue() -> None:
     assert trigger_issue_number([_trigger_prompt(13)]) == 13
     assert trigger_issue_number([_trigger_prompt(13, pull_request=True)]) is None
+    prompt = _trigger_prompt(13)
+    flagged = replace(
+        prompt, text=prompt.text.replace('"number": 13,', '"number": 13, "pull_request": {},')
+    )
+    assert trigger_issue_number([flagged]) is None
 
 
 def test_live_runtime_fails_when_required_credentials_are_missing(

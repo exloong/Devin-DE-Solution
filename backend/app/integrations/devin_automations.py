@@ -337,6 +337,14 @@ def _fenced_json_objects(text: str) -> list[JsonObject]:
     return found
 
 
+def _is_pull_request(issue: JsonObject) -> bool:
+    html_url = issue.get("html_url")
+    return "pull_request" in issue or (
+        isinstance(html_url, str)
+        and html_url.startswith(f"https://github.com/{SUPERSET_FULL_NAME}/pull/")
+    )
+
+
 def trigger_issue_number(messages: Sequence[ConversationMessage]) -> int | None:
     """The issue of the GitHub event Devin appended to the automation prompt.
 
@@ -353,7 +361,7 @@ def trigger_issue_number(messages: Sequence[ConversationMessage]) -> int | None:
                 continue
             if repository.get("full_name") != SUPERSET_FULL_NAME:
                 return None
-            if "pull_request" in issue:
+            if _is_pull_request(issue):
                 # ``issue_comment`` also fires for pull requests; Relay tracks issues only.
                 return None
             number = issue.get("number")
