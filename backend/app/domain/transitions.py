@@ -831,6 +831,24 @@ class TransitionService:
         category = payload.get("category")
         if isinstance(category, str):
             ctx.issue.category = category
+        if category == "not_a_bug":
+            return _Outcome(
+                TransitionName.CLASSIFY_TERMINAL,
+                IssueState.NOT_A_BUG,
+                "agent classified the report as not a bug",
+            )
+        if category == "unsupported":
+            return _Outcome(
+                TransitionName.CLASSIFY_TERMINAL,
+                IssueState.UNSUPPORTED,
+                "agent classified the report as unsupported",
+            )
+        if category == "duplicate":
+            return _Outcome(
+                TransitionName.MARK_DUPLICATE,
+                IssueState.DUPLICATE,
+                "agent classified the report as a duplicate",
+            )
         owner_team = payload.get("owner_team")
         if isinstance(owner_team, str):
             ctx.issue.owner_team = owner_team

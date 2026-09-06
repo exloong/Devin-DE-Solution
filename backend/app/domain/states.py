@@ -136,6 +136,7 @@ class DecisionKind(str, Enum):
 
 class TransitionName(str, Enum):
     INTAKE = "intake"
+    CLASSIFY_TERMINAL = "classify_terminal"
     REQUEST_INFORMATION = "request_information"
     RECORD_REPORTER_RESPONSE = "record_reporter_response"
     START_REPRODUCTION = "start_reproduction"
@@ -206,6 +207,14 @@ TRANSITIONS: dict[TransitionName, TransitionSpec] = {
             _a(ActorRole.SYSTEM),
             description="Normalize a new exloong/superset issue and classify safety.",
             preconditions=("repository is exloong/superset", "no security signal"),
+        ),
+        TransitionSpec(
+            TransitionName.CLASSIFY_TERMINAL,
+            _e(EventType.CLASSIFICATION_RESULT),
+            _s(IssueState.TRIAGE),
+            _s(IssueState.NOT_A_BUG, IssueState.UNSUPPORTED),
+            _a(ActorRole.AGENT),
+            description="Record a terminal non-bug classification without starting reproduction.",
         ),
         TransitionSpec(
             TransitionName.REQUEST_INFORMATION,

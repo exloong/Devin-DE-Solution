@@ -738,6 +738,32 @@ def test_version_conflict_is_explicit(h: Harness) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("category", "expected_state"),
+    [
+        ("not_a_bug", IssueState.NOT_A_BUG),
+        ("unsupported", IssueState.UNSUPPORTED),
+        ("duplicate", IssueState.DUPLICATE),
+    ],
+)
+def test_terminal_agent_classification_does_not_start_reproduction(
+    h: Harness, category: str, expected_state: IssueState
+) -> None:
+    issue = h.open_issue()
+
+    result = h.apply(
+        h.event(
+            EventType.CLASSIFICATION_RESULT,
+            issue_id=issue.id,
+            role=ActorRole.AGENT,
+            category=category,
+        )
+    )
+
+    assert result.issue is not None and result.issue.state == expected_state
+    assert h.jobs(issue.id, JobKind.START_REPRODUCTION) == []
+
+
 def test_rejected_event_is_recorded_and_redelivery_is_duplicate(h: Harness) -> None:
     issue = h.open_issue()
     event = h.event(EventType.FIX_SESSION_STARTED, issue_id=issue.id, delivery_id="late-1")
