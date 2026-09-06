@@ -3,15 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Apache Superset issue intake and bug-resolution analytics for a trailing 365-day cohort.">
-  <title>Apache Superset · Issue intake & bug resolution</title>
+  <meta name="description" content="Apache Superset issue volume, solve rate, latency, and modeled engineering savings.">
+  <title>Apache Superset · Issue operations snapshot</title>
   <style>
     :root {
       color-scheme: light;
       --ink: #15222d;
       --muted: #60717f;
       --paper: #f5f1ea;
-      --card: rgba(255, 255, 255, .91);
+      --card: rgba(255, 255, 255, .92);
       --line: #dfe2dc;
       --navy: #17394a;
       --teal: #118a81;
@@ -47,10 +47,19 @@
       border: 1px solid rgba(23, 57, 74, .13); background: rgba(255,255,255,.64);
       padding: 8px 13px; border-radius: 999px; color: var(--muted); font-size: 13px;
     }
-    .hero { padding: 55px 0 46px; display: grid; grid-template-columns: 1.5fr .8fr; gap: 50px; align-items: end; }
-    .eyebrow { font-size: 12px; text-transform: uppercase; letter-spacing: .16em; font-weight: 800; color: var(--teal); }
-    h1 { margin: 13px 0 18px; max-width: 820px; font-size: clamp(43px, 6.5vw, 78px); line-height: .98; letter-spacing: -.055em; }
-    .dek { max-width: 740px; font-size: 20px; color: var(--muted); }
+    .hero {
+      padding: 55px 0 46px; display: grid; grid-template-columns: 1.5fr .8fr;
+      gap: 50px; align-items: end;
+    }
+    .eyebrow {
+      font-size: 12px; text-transform: uppercase; letter-spacing: .16em;
+      font-weight: 800; color: var(--teal);
+    }
+    h1 {
+      margin: 13px 0 18px; max-width: 900px; font-size: clamp(43px, 6.5vw, 78px);
+      line-height: .98; letter-spacing: -.055em;
+    }
+    .dek { max-width: 760px; font-size: 20px; color: var(--muted); }
     .hero-aside { border-left: 2px solid var(--teal); padding: 4px 0 4px 23px; color: var(--muted); }
     .hero-aside strong { color: var(--ink); display: block; margin-bottom: 7px; font-size: 17px; }
     .nav {
@@ -58,15 +67,22 @@
       margin-bottom: 34px; overflow-x: auto; border-radius: 16px; background: rgba(21,34,45,.92);
       box-shadow: 0 12px 30px rgba(21,34,45,.18); backdrop-filter: blur(12px);
     }
-    .nav a { padding: 10px 14px; border-radius: 11px; color: #dce7e8; text-decoration: none; font-size: 13px; white-space: nowrap; }
+    .nav a {
+      padding: 10px 14px; border-radius: 11px; color: #dce7e8;
+      text-decoration: none; font-size: 13px; white-space: nowrap;
+    }
     .nav a:hover { color: white; background: rgba(255,255,255,.1); }
     section { margin: 32px 0 70px; scroll-margin-top: 84px; }
-    .section-head { display: flex; justify-content: space-between; gap: 30px; align-items: end; margin-bottom: 22px; }
+    .section-head {
+      display: flex; justify-content: space-between; gap: 30px;
+      align-items: end; margin-bottom: 22px;
+    }
     h2 { margin: 0; font-size: clamp(28px, 4vw, 43px); letter-spacing: -.04em; }
     .section-note { max-width: 510px; color: var(--muted); font-size: 14px; }
-    .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+    .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
     .metric {
-      min-height: 170px; padding: 22px; border: 1px solid rgba(23,57,74,.1); border-radius: 22px;
+      min-width: 0; min-height: 170px; padding: 22px;
+      border: 1px solid rgba(23,57,74,.1); border-radius: 22px;
       background: var(--card); box-shadow: var(--shadow); overflow: hidden; position: relative;
     }
     .metric::after {
@@ -74,122 +90,100 @@
       border-radius: 50%; background: var(--accent, var(--mint)); opacity: .24;
     }
     .metric-label { min-height: 42px; color: var(--muted); font-size: 13px; font-weight: 700; }
-    .metric-value { margin: 10px 0 4px; font-size: 42px; line-height: 1; font-weight: 850; letter-spacing: -.04em; }
+    .metric-value {
+      margin: 10px 0 4px; font-size: 42px; line-height: 1;
+      font-weight: 850; letter-spacing: -.04em;
+    }
     .metric-foot { color: var(--muted); font-size: 12px; }
-    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
-    .grid-3 { display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: 18px; }
     .card {
-      padding: 24px; border-radius: 24px; border: 1px solid rgba(23,57,74,.1);
-      min-width: 0; background: var(--card); box-shadow: var(--shadow);
+      min-width: 0; padding: 24px; border-radius: 24px;
+      border: 1px solid rgba(23,57,74,.1); background: var(--card); box-shadow: var(--shadow);
     }
     .card h3 { margin: 0 0 5px; font-size: 20px; letter-spacing: -.025em; }
     .card-sub { margin: 0 0 22px; color: var(--muted); font-size: 13px; }
-    .chart { min-height: 280px; position: relative; }
-    .legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 4px 0 18px; font-size: 12px; color: var(--muted); }
+    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+    .chart { min-height: 280px; position: relative; overflow-x: auto; }
+    .legend {
+      display: flex; flex-wrap: wrap; gap: 14px; margin: 4px 0 18px;
+      font-size: 12px; color: var(--muted);
+    }
     .legend span { display: inline-flex; align-items: center; gap: 6px; }
     .legend i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
     svg { display: block; width: 100%; overflow: visible; }
     .axis { stroke: #d9dedb; stroke-width: 1; }
     .axis-label { fill: #71808b; font-size: 10px; }
     .chart-tooltip {
-      position: fixed; opacity: 0; pointer-events: none; z-index: 30; padding: 8px 10px; border-radius: 10px;
-      color: white; background: #15222d; font-size: 12px; transform: translate(-50%, -115%);
-      transition: opacity .12s ease; box-shadow: 0 8px 24px rgba(0,0,0,.18);
+      position: fixed; opacity: 0; pointer-events: none; z-index: 30;
+      padding: 8px 10px; border-radius: 10px; color: white; background: #15222d;
+      font-size: 12px; transform: translate(-50%, -115%); transition: opacity .12s ease;
+      box-shadow: 0 8px 24px rgba(0,0,0,.18);
     }
-    .donut-wrap { min-height: 280px; display: grid; grid-template-columns: 230px 1fr; align-items: center; gap: 18px; }
-    .donut { width: 220px; aspect-ratio: 1; border-radius: 50%; position: relative; margin: auto; }
-    .donut::after {
-      content: ""; position: absolute; inset: 30px; background: white; border-radius: 50%;
-      box-shadow: inset 0 0 0 1px rgba(23,57,74,.05);
+    .data-table { width: 100%; border-collapse: collapse; }
+    .data-table th, .data-table td {
+      padding: 14px 12px; border-bottom: 1px solid var(--line);
+      text-align: right; font-size: 13px; vertical-align: top;
     }
-    .donut-center { position: absolute; inset: 0; z-index: 1; display: grid; place-content: center; text-align: center; pointer-events: none; }
-    .donut-center strong { font-size: 35px; line-height: 1; }
-    .donut-center span { color: var(--muted); font-size: 11px; }
-    .legend-list { display: grid; gap: 11px; }
-    .legend-row { display: grid; grid-template-columns: 10px 1fr auto; gap: 8px; align-items: center; font-size: 13px; }
-    .legend-row i { width: 9px; height: 9px; border-radius: 3px; }
-    .legend-row b { font-variant-numeric: tabular-nums; }
-    .bar-list { display: grid; gap: 15px; }
-    .bar-top { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; }
-    .bar-top span:first-child { font-weight: 700; }
-    .bar-track { height: 10px; margin-top: 7px; border-radius: 99px; background: #edf0ec; overflow: hidden; }
-    .bar-fill { height: 100%; width: 0; border-radius: inherit; background: var(--bar, var(--teal)); transition: width 1s cubic-bezier(.2,.8,.2,1); }
-    .insights { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
-    .insight { padding: 23px; border-radius: 22px; color: #eaf2f1; background: var(--navy); }
-    .insight:nth-child(2) { background: #17665f; }
-    .insight:nth-child(3) { color: var(--ink); background: #f3c970; }
-    .insight-kicker { font-size: 11px; text-transform: uppercase; letter-spacing: .13em; opacity: .72; font-weight: 800; }
-    .insight strong { display: block; margin: 13px 0 8px; font-size: 29px; line-height: 1.08; letter-spacing: -.035em; }
-    .insight p { margin: 0; font-size: 13px; opacity: .82; }
-    .timing-table { width: 100%; border-collapse: collapse; }
-    .timing-table th, .timing-table td { padding: 13px 10px; border-bottom: 1px solid var(--line); text-align: right; font-size: 13px; }
-    .timing-table th:first-child, .timing-table td:first-child { text-align: left; }
-    .timing-table th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
-    .timing-table td:first-child { font-weight: 700; }
-    .pill { display: inline-flex; padding: 4px 8px; border-radius: 999px; background: #e5f4f1; color: #15756d; font-size: 11px; font-weight: 800; }
-    .opportunities { display: grid; gap: 10px; }
-    .opportunity {
-      display: grid; grid-template-columns: 42px 1.2fr 2fr auto; gap: 14px; align-items: center;
-      padding: 16px; border: 1px solid var(--line); border-radius: 16px; background: rgba(255,255,255,.65);
+    .data-table th:first-child, .data-table td:first-child { text-align: left; }
+    .data-table th {
+      color: var(--muted); font-size: 11px; text-transform: uppercase;
+      letter-spacing: .08em;
     }
-    .rank { width: 36px; height: 36px; border-radius: 12px; display: grid; place-items: center; background: var(--navy); color: white; font-weight: 850; }
-    .opportunity b { font-size: 14px; }
-    .opportunity p { margin: 0; color: var(--muted); font-size: 12px; }
-    .impact { padding: 5px 9px; border-radius: 999px; color: #835a11; background: #f9e6b8; font-size: 11px; font-weight: 850; }
-    .estimate-metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
+    .data-table td:first-child { font-weight: 700; }
+    .data-table .base { color: #0e6e66; background: rgba(139,211,199,.12); font-weight: 800; }
+    .estimate-metrics {
+      display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px; margin-bottom: 18px;
+    }
     .estimate-metric {
-      min-width: 0; padding: 21px; border-radius: 20px; color: white; background: var(--navy);
-      box-shadow: var(--shadow);
+      min-width: 0; padding: 21px; border-radius: 20px; color: white;
+      background: var(--navy); box-shadow: var(--shadow);
     }
     .estimate-metric:nth-child(2) { background: #17665f; }
     .estimate-metric:nth-child(3) { color: var(--ink); background: #f3c970; }
     .estimate-metric:nth-child(4) { background: var(--purple); }
-    .estimate-metric span { display: block; min-height: 36px; font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; opacity: .75; }
-    .estimate-metric strong { display: block; margin: 9px 0 5px; font-size: 31px; line-height: 1; letter-spacing: -.035em; }
+    .estimate-metric span {
+      display: block; min-height: 36px; font-size: 11px; font-weight: 800;
+      letter-spacing: .08em; text-transform: uppercase; opacity: .75;
+    }
+    .estimate-metric strong {
+      display: block; margin: 9px 0 5px; font-size: 31px;
+      line-height: 1; letter-spacing: -.035em;
+    }
     .estimate-metric small { display: block; font-size: 11px; opacity: .76; }
-    .comparison-table { width: 100%; border-collapse: collapse; min-width: 730px; }
-    .comparison-table th, .comparison-table td { padding: 13px 12px; border-bottom: 1px solid var(--line); text-align: right; font-size: 13px; vertical-align: top; }
-    .comparison-table th:first-child, .comparison-table td:first-child { text-align: left; }
-    .comparison-table th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
-    .comparison-table td:first-child { font-weight: 700; }
-    .comparison-table .base { color: #0e6e66; background: rgba(139,211,199,.12); font-weight: 800; }
-    .table-scroll { width: 100%; max-width: 100%; overflow-x: auto; }
-    .formula { margin: 0; padding: 15px 17px; border-radius: 14px; color: #dce7e8; background: var(--navy); font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    .source-list { margin: 0; padding-left: 18px; color: var(--muted); font-size: 12px; }
-    .source-list li + li { margin-top: 8px; }
-    .method { columns: 2; column-gap: 42px; color: var(--muted); font-size: 13px; }
-    .method h3 { break-after: avoid; color: var(--ink); }
-    .method p, .method ul { break-inside: avoid; }
-    .method code { color: var(--ink); background: #edf0ec; padding: 2px 5px; border-radius: 5px; }
-    .warning { padding: 16px 18px; margin: 20px 0; border-left: 4px solid var(--amber); background: #fff8e7; color: #5c4a27; font-size: 13px; }
-    footer { margin-top: 80px; padding: 35px 0 55px; border-top: 1px solid rgba(23,57,74,.13); color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; gap: 20px; }
-    .print { border: 0; border-radius: 11px; padding: 9px 13px; color: white; background: var(--navy); cursor: pointer; font-weight: 700; }
+    .warning {
+      padding: 16px 18px; margin: 20px 0; border-left: 4px solid var(--amber);
+      background: #fff8e7; color: #5c4a27; font-size: 13px;
+    }
+    .method { color: var(--muted); font-size: 13px; }
+    .method h3 { margin: 22px 0 4px; color: var(--ink); }
+    .method h3:first-child { margin-top: 0; }
+    .method p { margin: 0; }
+    .print {
+      border: 0; border-radius: 11px; padding: 9px 13px;
+      color: white; background: var(--navy); cursor: pointer; font-weight: 700;
+    }
+    footer {
+      margin-top: 80px; padding: 35px 0 55px;
+      border-top: 1px solid rgba(23,57,74,.13); color: var(--muted);
+      font-size: 12px; display: flex; justify-content: space-between; gap: 20px;
+    }
     @media (max-width: 920px) {
-      .hero, .grid-2, .grid-3 { grid-template-columns: 1fr; }
-      .metrics { grid-template-columns: repeat(2, 1fr); }
-      .estimate-metrics { grid-template-columns: repeat(2, 1fr); }
-      .insights { grid-template-columns: 1fr; }
+      .hero, .grid-2 { grid-template-columns: 1fr; }
+      .metrics, .estimate-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .hero-aside { max-width: 620px; }
-      .donut-wrap { grid-template-columns: 1fr; }
-      .opportunity { grid-template-columns: 42px 1fr auto; }
-      .opportunity p { grid-column: 2 / -1; }
     }
     @media (max-width: 590px) {
       .shell { width: min(100% - 22px, 1180px); }
-      .topline { align-items: flex-start; flex-direction: column; }
+      .topline, .section-head { align-items: flex-start; flex-direction: column; }
       .hero { padding-top: 38px; }
-      .metrics { grid-template-columns: 1fr; }
-      .estimate-metrics { grid-template-columns: 1fr; }
-      .method { columns: 1; }
-      .section-head { align-items: flex-start; flex-direction: column; }
+      .metrics, .estimate-metrics { grid-template-columns: 1fr; }
       .card { padding: 18px; }
-      .timing-table { display: block; overflow-x: auto; }
+      footer { flex-direction: column; }
     }
     @media print {
       body { background: white; }
       .nav, .print { display: none; }
-      .card, .metric { break-inside: avoid; box-shadow: none; }
-      section { break-before: auto; }
+      .card, .metric, .estimate-metric { break-inside: avoid; box-shadow: none; }
     }
   </style>
 </head>
@@ -202,287 +196,184 @@
     </div>
     <div class="hero">
       <div>
-        <div class="eyebrow">Public GitHub cohort analysis</div>
-        <h1>Bug intake is fast to acknowledge—slow to resolve.</h1>
-        <p class="dek">A lifecycle view of 1,030 public issues, focused on the human effort spent identifying bugs, gathering context, reaching reproducibility, and closing the loop.</p>
+        <div class="eyebrow">Issue operations snapshot</div>
+        <h1>High issue volume, a 52% solve rate, and a long latency tail.</h1>
+        <p class="dek">Annual demand, demonstrated resolution, time to close, and the engineering capacity a Devin-run workflow could return.</p>
       </div>
       <aside class="hero-aside">
-        <strong>Decision-ready, not precision theater.</strong>
-        Reproduction and “fixed” milestones are not first-class GitHub fields. This report separates observed events from conservative text-and-timeline proxies.
+        <strong>Four decision metrics.</strong>
+        Volume is observed directly. Solve rate uses a conservative fix/PR signal. Savings are a scenario model, not measured contributor labor.
       </aside>
     </div>
   </header>
 
   <main class="shell">
     <nav class="nav">
-      <a href="#scorecard">Scorecard</a>
+      <a href="#overview">Overview</a>
       <a href="#volume">Volume</a>
-      <a href="#triage">Triage</a>
-      <a href="#resolution">Resolution</a>
-      <a href="#backlog">Backlog</a>
-      <a href="#automation">Automation</a>
-      <a href="#devin-case">Devin case</a>
+      <a href="#solve-rate">Solve rate</a>
+      <a href="#latency">Latency</a>
+      <a href="#savings">Savings</a>
       <a href="#method">Method</a>
     </nav>
 
-    <section id="scorecard">
+    <section id="overview">
       <div class="section-head">
-        <div><div class="eyebrow">Executive scorecard</div><h2>The year in six numbers</h2></div>
-        <p class="section-note">Bug figures use a reproducible cohort definition: a #bug-family label or retained fields from Superset’s official bug-report form.</p>
+        <div><div class="eyebrow">Executive overview</div><h2>The operating picture in four numbers</h2></div>
+        <p class="section-note">Public issues opened during the 365 complete days ending 4 September 2026.</p>
       </div>
       <div class="metrics">
-        <article class="metric" style="--accent:var(--mint)"><div class="metric-label">Public issues opened</div><div class="metric-value">1,030</div><div class="metric-foot">85.8 per month</div></article>
-        <article class="metric" style="--accent:var(--blue)"><div class="metric-label">Identifiable bug reports</div><div class="metric-value">825</div><div class="metric-foot">80.1% of intake · 68.8/month</div></article>
-        <article class="metric" style="--accent:var(--coral)"><div class="metric-label">Needed human clarification</div><div class="metric-value">38.2%</div><div class="metric-foot">315 bug reports</div></article>
-        <article class="metric" style="--accent:var(--amber)"><div class="metric-label">Maintainer response coverage</div><div class="metric-value">64.1%</div><div class="metric-foot">296 had no maintainer comment</div></article>
-        <article class="metric" style="--accent:var(--purple)"><div class="metric-label">Bug cohort closed</div><div class="metric-value">88.0%</div><div class="metric-foot">726 closed · 99 open</div></article>
-        <article class="metric" style="--accent:var(--teal)"><div class="metric-label">Closed with fix/PR signal</div><div class="metric-value">52.0%</div><div class="metric-foot">Conservative proxy · 429 bugs</div></article>
-        <article class="metric" style="--accent:var(--coral)"><div class="metric-label">Median close time</div><div class="metric-value">16.4d</div><div class="metric-foot">Mean 64.0d · p90 216d</div></article>
-        <article class="metric" style="--accent:var(--amber)"><div class="metric-label">Median age of open bugs</div><div class="metric-value">146d</div><div class="metric-foot">62 of 99 are 90+ days old</div></article>
-      </div>
-    </section>
-
-    <section>
-      <div class="insights">
-        <article class="insight"><div class="insight-kicker">Largest intake gap</div><strong>296 bugs saw no maintainer comment.</strong><p>Automation acknowledges many reports, but owner routing and accountable next actions remain incomplete.</p></article>
-        <article class="insight"><div class="insight-kicker">Reporter drop-off</div><strong>211 clarification requests received no reporter reply.</strong><p>Only 33.0% of human clarification requests had an observable follow-up from the original reporter.</p></article>
-        <article class="insight"><div class="insight-kicker">Long-tail reality</div><strong>p90 closure takes 216 days.</strong><p>The median looks healthy, but one in ten closed bugs stayed open for roughly seven months or more.</p></article>
+        <article class="metric" style="--accent:var(--blue)"><div class="metric-label">Annual issue volume</div><div class="metric-value">1,030</div><div class="metric-foot">825 identifiable bugs · 85.8 issues/month</div></article>
+        <article class="metric" style="--accent:var(--teal)"><div class="metric-label">Demonstrated solve rate</div><div class="metric-value">52.0%</div><div class="metric-foot">429 bugs closed with a fix/PR signal</div></article>
+        <article class="metric" style="--accent:var(--coral)"><div class="metric-label">Median solve latency</div><div class="metric-value">16.4d</div><div class="metric-foot">Bug creation to closure · p90 216d</div></article>
+        <article class="metric" style="--accent:var(--amber)"><div class="metric-label">Modeled engineering savings</div><div class="metric-value">4,723h</div><div class="metric-foot">2.4 FTE/year · ≈ $4.1k Devin usage</div></article>
       </div>
     </section>
 
     <section id="volume">
       <div class="section-head">
-        <div><div class="eyebrow">Demand</div><h2>Intake remained consistently high</h2></div>
-        <p class="section-note">Monthly creation counts are exact for the cohort. Closure bars show when issues from this same cohort were closed—not every repository closure in that month.</p>
+        <div><div class="eyebrow">Volume</div><h2>1,030 issues entered the queue</h2></div>
+        <p class="section-note">825 were identifiable bugs, or 80.1% of annual intake.</p>
       </div>
       <div class="card">
-        <h3>Issue intake and cohort closure by month</h3>
-        <p class="card-sub">September 2025 and September 2026 are partial calendar months because the cohort uses an exact 365-day window.</p>
-        <div class="legend"><span><i style="background:var(--navy)"></i>All issues opened</span><span><i style="background:var(--teal)"></i>Bug reports opened</span><span><i style="background:var(--amber)"></i>Bug cohort closures</span></div>
+        <h3>Monthly issue volume</h3>
+        <p class="card-sub">Creation counts are exact for the cohort; closure bars show when bugs from this cohort closed.</p>
+        <div class="legend">
+          <span><i style="background:var(--navy)"></i>All issues opened</span>
+          <span><i style="background:var(--teal)"></i>Bug reports opened</span>
+          <span><i style="background:var(--amber)"></i>Bug cohort closures</span>
+        </div>
         <div class="chart" id="monthly-chart"></div>
       </div>
     </section>
 
-    <section id="triage">
+    <section id="solve-rate">
       <div class="section-head">
-        <div><div class="eyebrow">Triage burden</div><h2>Automation touches most reports; humans still carry ambiguity</h2></div>
-        <p class="section-note">Clarification detection looks for explicit requests for versions, logs, reproduction steps, screenshots, configuration, sample data, or more information.</p>
+        <div><div class="eyebrow">Solve rate</div><h2>52% show public evidence of a fix</h2></div>
+        <p class="section-note">Closure alone is not counted as a demonstrated solve.</p>
       </div>
-      <div class="grid-2">
-        <article class="card">
-          <h3>Observable intake signals</h3>
-          <p class="card-sub">Rates are independent and may overlap; this is not a sequential funnel.</p>
-          <div class="bar-list" id="touch-bars"></div>
-        </article>
-        <article class="card">
-          <h3>Who wrote the bug-thread comments?</h3>
-          <p class="card-sub">3,200 comments across 825 bug reports; median 3 comments per bug.</p>
-          <div class="donut-wrap"><div class="donut" id="comments-donut"><div class="donut-center"><strong>3,200</strong><span>comments</span></div></div><div class="legend-list" id="comments-legend"></div></div>
-        </article>
-      </div>
-      <div class="warning"><strong>Back-and-forth to reproduction:</strong> only 8 issues exposed the complete public sequence “human asks → reporter replies → later reproduction signal.” In that small observable subset, the median was 26.7 days and the mean was 56.6 days. Treat this as directional, not a repository-wide reproduction SLA.</div>
       <div class="card">
-        <h3>Latency has a heavy tail</h3>
-        <p class="card-sub">Days from issue creation or transition; p90 exposes work hidden by averages.</p>
-        <div style="overflow-x:auto">
-          <table class="timing-table">
-            <thead><tr><th>Lifecycle milestone</th><th>Observed n</th><th>Median</th><th>Mean</th><th>p75</th><th>p90</th></tr></thead>
-            <tbody>
-              <tr><td>First maintainer response</td><td>529</td><td>4.1d</td><td>24.4d</td><td>17.8d</td><td>101.1d</td></tr>
-              <tr><td>First human clarification</td><td>315</td><td>3.1d</td><td>31.7d</td><td>22.3d</td><td>124.3d</td></tr>
-              <tr><td>Reporter reply after human clarification</td><td>104</td><td>0.5d</td><td>7.9d</td><td>2.1d</td><td>10.6d</td></tr>
-              <tr><td>Creation to linked PR</td><td>475</td><td>3.5d</td><td>32.2d</td><td>24.3d</td><td>122.8d</td></tr>
-              <tr><td>Bug creation to closure</td><td>726</td><td>16.4d</td><td>64.0d</td><td>109.6d</td><td>216.2d</td></tr>
-            </tbody>
-          </table>
-        </div>
+        <h3>Resolution funnel</h3>
+        <p class="card-sub">The strict solve signal requires a closed bug plus a linked PR, explicit fix/merge statement, or closes-issue label.</p>
+        <table class="data-table">
+          <thead><tr><th>Outcome</th><th>Issues</th><th>Rate</th></tr></thead>
+          <tbody>
+            <tr><td>Identifiable bug reports</td><td>825</td><td>100%</td></tr>
+            <tr><td>Closed for any reason</td><td>726</td><td>88.0%</td></tr>
+            <tr class="base"><td>Closed with fix/PR signal</td><td>429</td><td>52.0%</td></tr>
+          </tbody>
+        </table>
+        <div class="warning" style="margin-bottom:0"><strong>Headline:</strong> 52.0% is the conservative solve rate. The 88.0% closure rate also includes duplicate, not-planned, and closed-without-public-fix-evidence outcomes.</div>
       </div>
     </section>
 
-    <section id="resolution">
+    <section id="latency">
       <div class="section-head">
-        <div><div class="eyebrow">Outcomes</div><h2>Closure is high; demonstrated fix evidence is lower</h2></div>
-        <p class="section-note">GitHub state reasons are authoritative closure metadata. “Fix/PR signal” is a stricter proxy requiring a closed issue plus a PR cross-reference, fix statement, or closes-issue label.</p>
+        <div><div class="eyebrow">Latency</div><h2>The median is 16 days; the tail is 216</h2></div>
+        <p class="section-note">Median and p90 are paired so the long tail is visible.</p>
       </div>
-      <div class="grid-2">
-        <article class="card">
-          <h3>Bug cohort state and close reason</h3>
-          <p class="card-sub">657 marked completed, 49 not planned, 20 duplicate, and 99 still open.</p>
-          <div class="donut-wrap"><div class="donut" id="outcome-donut"><div class="donut-center"><strong>88.0%</strong><span>closed</span></div></div><div class="legend-list" id="outcome-legend"></div></div>
-        </article>
-        <article class="card">
-          <h3>Resolution evidence ladder</h3>
-          <p class="card-sub">Different definitions answer different operational questions.</p>
-          <div class="bar-list" id="resolution-bars"></div>
-          <div class="warning" style="margin-bottom:0"><strong>Interpretation:</strong> 88.0% closure does not mean 88.0% code-fixed. The stricter public fix/PR proxy reaches 52.0% of the bug cohort.</div>
-        </article>
+      <div class="metrics">
+        <article class="metric" style="--accent:var(--blue)"><div class="metric-label">First maintainer response</div><div class="metric-value">4.1d</div><div class="metric-foot">Median · p90 101.1d</div></article>
+        <article class="metric" style="--accent:var(--mint)"><div class="metric-label">Creation to linked PR</div><div class="metric-value">3.5d</div><div class="metric-foot">Median · p90 122.8d</div></article>
+        <article class="metric" style="--accent:var(--teal)"><div class="metric-label">Bug creation to closure</div><div class="metric-value">16.4d</div><div class="metric-foot">Median across 726 closed bugs</div></article>
+        <article class="metric" style="--accent:var(--coral)"><div class="metric-label">Slowest decile to closure</div><div class="metric-value">216d</div><div class="metric-foot">p90 · roughly seven months</div></article>
       </div>
     </section>
 
-    <section id="backlog">
+    <section id="savings">
       <div class="section-head">
-        <div><div class="eyebrow">Backlog</div><h2>Open bugs are old enough to need active ownership</h2></div>
-        <p class="section-note">Age is measured from issue creation to the analysis cutoff. The cohort contains 99 still-open bug reports.</p>
+        <div><div class="eyebrow">Engineering savings</div><h2>4,723 hours returned for ≈ $4,104 in modeled usage</h2></div>
+        <p class="section-note">Base case: Devin owns intake through a reviewable PR for 429 demonstrated solves; engineers retain one hour of review per PR.</p>
       </div>
-      <div class="grid-2">
-        <article class="card"><h3>Open bug age distribution</h3><p class="card-sub">62 open bugs are at least 90 days old; 37 are 180+ days old.</p><div class="chart" id="age-chart"></div></article>
-        <article class="card"><h3>Most common labels on bug reports</h3><p class="card-sub">Current labels provide a view of recurring domains and severity/type signals.</p><div class="bar-list" id="label-bars"></div></article>
-      </div>
-    </section>
-
-    <section id="automation">
-      <div class="section-head">
-        <div><div class="eyebrow">Recommended intervention</div><h2>Where automation + constrained agents remove repeated work</h2></div>
-        <p class="section-note">Ranked by recurring effort removed and strength of the public evidence—not by ease of implementation.</p>
-      </div>
-      <div class="opportunities">
-        <article class="opportunity"><div class="rank">1</div><b>Owner routing + next-action ledger</b><p>296 bug reports had no maintainer comment, while the median response among answered reports was 4.1 days and p90 was 101.1 days. Assign an accountable queue, state, SLA, and escalation.</p><span class="impact">Very high</span></article>
-        <article class="opportunity"><div class="rank">2</div><b>Guided evidence completion</b><p>315 bug reports needed human clarification and 211 received no later reporter reply. Ask only for missing, category-specific evidence with copy/paste examples and timed reminders.</p><span class="impact">Very high</span></article>
-        <article class="opportunity"><div class="rank">3</div><b>Reproduction workspace + evidence schema</b><p>Only 134 reports exposed a reproduction signal. Record environment, steps, control run, artifacts, fingerprint, and an explicit reproducibility transition.</p><span class="impact">High</span></article>
-        <article class="opportunity"><div class="rank">4</div><b>Closure evidence and PR linkage</b><p>726 bugs closed, but only 429 met the stricter fix/PR proxy. Require a structured outcome: fixed by PR, duplicate of, unsupported/not planned, cannot reproduce, or inactive.</p><span class="impact">High</span></article>
-        <article class="opportunity"><div class="rank">5</div><b>Aging and cleanup guardrails</b><p>62 open bugs are 90+ days old, while closure activity is concentrated in cleanup bursts. Remind owners without automatically closing reproduced or owner-blocked bugs.</p><span class="impact">Medium-high</span></article>
-      </div>
-    </section>
-
-    <section id="devin-case">
-      <div class="section-head">
-        <div><div class="eyebrow">Engineer-run vs. Devin-run</div><h2>The modeled base case returns 4,700 engineering hours per year</h2></div>
-        <p class="section-note">This is a capacity model, not a measurement of Superset contributor labor. It assumes Devin owns intake through a reviewable PR for the 429 bugs with the strict closed-plus-fix/PR signal; an engineer still reviews and approves every PR.</p>
-      </div>
-
       <div class="estimate-metrics">
-        <article class="estimate-metric"><span>Engineering time saved</span><strong>4,700h/year</strong><small>394h/month · 2.4 FTE at 2,000h/FTE</small></article>
-        <article class="estimate-metric"><span>Human work retained</span><strong>429h/year</strong><small>One hour of approval time for each of 429 PRs</small></article>
-        <article class="estimate-metric"><span>Active Devin runtime</span><strong>2,300h/year</strong><small>Agent-active estimate; not billable wall-clock hours</small></article>
-        <article class="estimate-metric"><span>Token-priced equivalent</span><strong>≈ $4,100/year</strong><small>Extra-usage equivalent; plan fees and included quota separate</small></article>
+        <article class="estimate-metric"><span>Engineering time saved</span><strong>4,723h</strong><small>394h/month</small></article>
+        <article class="estimate-metric"><span>Capacity returned</span><strong>2.4 FTE</strong><small>At 2,000h/FTE/year</small></article>
+        <article class="estimate-metric"><span>Modeled Devin usage</span><strong>≈ $4,104</strong><small>Token-priced annual equivalent</small></article>
+        <article class="estimate-metric"><span>Usage per hour saved</span><strong>≈ $0.87</strong><small>Direct modeled usage only</small></article>
       </div>
-
       <div class="grid-2">
         <article class="card">
-          <h3>Operating model comparison · base case</h3>
-          <p class="card-sub">The engineer approval gate is intentionally unchanged. Waiting for reporters, test suites, or review is not counted as active engineering or agent runtime.</p>
-          <div class="table-scroll">
-            <table class="comparison-table">
-              <thead><tr><th>Annual work</th><th>Engineer-run</th><th>Devin-run</th><th>Difference</th></tr></thead>
-              <tbody>
-                <tr><td>Intake and triage · 825 bugs</td><td>275h</td><td>Automated</td><td>−275h</td></tr>
-                <tr><td>Human clarification · 315 bugs</td><td>158h</td><td>Automated</td><td>−158h</td></tr>
-                <tr><td>Reproduce and diagnose · 429 bugs</td><td>858h</td><td>Automated</td><td>−858h</td></tr>
-                <tr><td>Fix, test, and open PR · 429 bugs</td><td>3,432h</td><td>Automated</td><td>−3,432h</td></tr>
-                <tr><td>Review and approve · 429 PRs</td><td>429h</td><td>429h</td><td>No change</td></tr>
-                <tr class="base"><td>Total engineer time</td><td>5,152h</td><td>429h</td><td>−4,723h · −91.7%</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </article>
-
-        <article class="card">
-          <h3>How Devin usage is charged</h3>
-          <p class="card-sub">Devin does not publish one universal hourly rate. Cost depends on account type and the model work performed.</p>
-          <ul class="source-list">
-            <li><strong>Self-serve:</strong> paid plans include daily and weekly usage allowances. Extra usage is consumed at API token pricing; included quota can reduce incremental cash cost.</li>
-            <li><strong>Enterprise:</strong> newer contracts meter Agent Compute Units (ACUs). Dollar cost is <code>ACUs × contracted $/ACU</code>; no public universal enterprise ACU price is available.</li>
-            <li><strong>Runtime:</strong> planning, tool use, browser/code execution, VM, and networking contribute to usage. Sessions generally consume little while waiting and sleep when idle, so elapsed issue age is not billable runtime.</li>
-            <li><strong>Plan fees:</strong> public list prices start at $20/month Pro, $200/month Max, or $80/month for Teams plus $40/month per full seat. These are separate from the extra-usage estimate.</li>
-          </ul>
-          <div class="warning" style="margin-bottom:0"><strong>Not used:</strong> the documented Adaptive promotional token rate ended 7 July 2026, and SWE-1.7’s free preview ended 8 August. Neither expired promotion is treated as the current price.</div>
-        </article>
-      </div>
-
-      <div class="card" style="margin-top:18px">
-        <h3>Low / base / high sensitivity</h3>
-        <p class="card-sub">All three scenarios apply the report’s measured volumes. The range changes only modeled effort, agent runtime, and token consumption.</p>
-        <div class="table-scroll">
-          <table class="comparison-table">
-            <thead><tr><th>Annual estimate</th><th>Low</th><th class="base">Base</th><th>High</th></tr></thead>
+          <h3>Base operating model</h3>
+          <p class="card-sub">Engineers continue to review and approve every generated PR.</p>
+          <table class="data-table">
+            <thead><tr><th>Annual engineering work</th><th>Hours</th></tr></thead>
             <tbody>
-              <tr><td>Human intake per bug</td><td>10 min</td><td class="base">20 min</td><td>30 min</td></tr>
-              <tr><td>Human clarification per observed request</td><td>15 min</td><td class="base">30 min</td><td>45 min</td></tr>
-              <tr><td>Human reproduction + diagnosis per PR-path bug</td><td>1h</td><td class="base">2h</td><td>4h</td></tr>
-              <tr><td>Human fix + tests + PR per PR-path bug</td><td>4h</td><td class="base">8h</td><td>12h</td></tr>
-              <tr><td>Engineering time saved</td><td>2,361h · 1.2 FTE</td><td class="base">4,723h · 2.4 FTE</td><td>7,513h · 3.8 FTE</td></tr>
-              <tr><td>Approval time retained</td><td>215h</td><td class="base">429h</td><td>644h</td></tr>
-              <tr><td>Devin active time per intake / clarification</td><td>5 min / 5 min</td><td class="base">10 min / 10 min</td><td>20 min / 20 min</td></tr>
-              <tr><td>Devin active time per PR path</td><td>2.5h</td><td class="base">5h</td><td>10h</td></tr>
-              <tr><td>Active Devin runtime</td><td>1,168h</td><td class="base">2,335h</td><td>4,670h</td></tr>
-              <tr><td>Token-priced extra-usage equivalent</td><td>≈ $1,500</td><td class="base">≈ $4,100</td><td>≈ $10,900</td></tr>
-              <tr><td>Enterprise ACU planning range</td><td>≈ 3,100 ACUs</td><td class="base">≈ 6,100 ACUs</td><td>≈ 12,700 ACUs</td></tr>
-              <tr><td>Direct usage cost per engineer-hour saved</td><td>≈ $0.62</td><td class="base">≈ $0.87</td><td>≈ $1.45</td></tr>
+              <tr><td>Engineer-run workflow</td><td>5,152h</td></tr>
+              <tr><td>Human review retained with Devin</td><td>429h</td></tr>
+              <tr class="base"><td>Engineering time returned</td><td>4,723h · 91.7%</td></tr>
             </tbody>
           </table>
-        </div>
-      </div>
-
-      <div class="grid-2" style="margin-top:18px">
-        <article class="card">
-          <h3>Calculation</h3>
-          <p class="card-sub">The comparison uses the same annual cohort in both operating models.</p>
-          <p class="formula">hours saved = 825 × intake effort<br>+ 315 × clarification effort<br>+ 429 × (reproduction effort + fix/test/PR effort)<br><br>base = 825 × ⅓h + 315 × ½h + 429 × (2h + 8h)<br>= 4,722.5 engineering hours/year</p>
         </article>
         <article class="card">
-          <h3>Cost calculation</h3>
-          <p class="card-sub">The token estimate uses the published GPT-5.1 Medium rates as a transparent benchmark: $1.25/M input, $10/M output, and $0.125/M cache-read tokens.</p>
-          <p class="formula">base token profile<br>intake/clarification: 100k input + 10k output + 300k cache<br>PR path: 3M input + 300k output + 10M cache<br><br>1.10 × (1,140 × $0.2625 + 429 × $8.00)<br>= $4,104/year</p>
-          <p class="card-sub" style="margin:14px 0 0">The 1.10 multiplier is a 10% planning allowance for non-token VM/network usage. Low profiles use 50k/5k/150k tokens per intake and 1M/100k/4M per PR path; high profiles use 200k/20k/600k and 8M/800k/30M, ordered as input/output/cache read.</p>
+          <h3>Sensitivity range</h3>
+          <p class="card-sub">Only handling time and model usage assumptions change.</p>
+          <table class="data-table">
+            <thead><tr><th>Scenario</th><th>Hours saved</th><th>Usage</th></tr></thead>
+            <tbody>
+              <tr><td>Low</td><td>2,361h</td><td>≈ $1,500</td></tr>
+              <tr class="base"><td>Base</td><td>4,723h</td><td>≈ $4,104</td></tr>
+              <tr><td>High</td><td>7,513h</td><td>≈ $10,900</td></tr>
+            </tbody>
+          </table>
         </article>
       </div>
-
-      <div class="warning"><strong>Risk-adjusted year-one view:</strong> if Devin independently reaches a reviewable PR on 60% rather than 100% of the 429 PR-path bugs, base savings fall to about 3,000 hours/year and token-priced usage to about $2,600/year; the remaining fixes return to engineers. Also, public PR links include community work, so the headline estimate is gross engineering capacity across the ecosystem—not proven Apache maintainer payroll savings.</div>
-
-      <div class="card">
-        <h3>Pricing and model sources</h3>
-        <ul class="source-list">
-          <li><a href="https://devin.ai/pricing">Devin plans and pricing</a> — included quota, public plan fees, and API-priced extra usage.</li>
-          <li><a href="https://docs.devin.ai/desktop/accounts/quota">Usage and quota</a> — chargeable actions, VM/network contribution, and idle/wait behavior.</li>
-          <li><a href="https://docs.devin.ai/desktop/models">AI model pricing</a> — token rates and enterprise ACU model.</li>
-          <li><a href="https://docs.devin.ai/admin/billing/enterprise">Enterprise billing</a> — contract-priced ACU billing and consumption tracking.</li>
-          <li><a href="https://docs.devin.ai/use-cases/gallery/analyze-session-acu-efficiency">ACU efficiency example</a> — the base model uses the documented 12-ACU expected pagination task as an order-of-magnitude anchor; the same example reached 42 ACUs after avoidable dead-end work.</li>
-        </ul>
-      </div>
+      <div class="warning"><strong>Base formula:</strong> 825 bugs × 20 minutes intake + 315 clarifications × 30 minutes + 429 solved bugs × 10 hours reproduction/fix/PR = 4,722.5 engineering hours returned. Public PR links include community work, so this is ecosystem capacity—not proven maintainer payroll savings.</div>
     </section>
 
     <section id="method">
       <div class="section-head">
-        <div><div class="eyebrow">Methodology</div><h2>Definitions, sources, and limits</h2></div>
+        <div><div class="eyebrow">Method</div><h2>What the four metrics mean</h2></div>
         <button class="print" onclick="window.print()">Print / save PDF</button>
       </div>
       <div class="card method">
         <h3>Scope</h3>
-        <p>Public issues opened in <a href="https://github.com/apache/superset">apache/superset</a> from 2025-09-05 00:00 UTC through 2026-09-04 23:59 UTC. Pull requests are excluded. The window uses 365 complete days so an incomplete collection day does not distort intake.</p>
-        <h3>Collection</h3>
-        <p>GitHub REST search identified the monthly cohorts. Each issue’s public comments and timeline events were collected on 2026-09-05. Query pattern: <code>repo:apache/superset is:issue created:YYYY-MM-DD..YYYY-MM-DD</code>.</p>
-        <h3>Bug report</h3>
-        <p>An issue is counted as a bug when it has a <code>#bug</code>-family label or retains at least two recognizable fields from Superset’s official bug form (for example Bug description, reproduction steps, screenshots, expected behavior, or Superset version). This catches reports whose generic #bug label was later replaced by a more specific label.</p>
-        <h3>Clarification</h3>
-        <p>A public non-reporter comment explicitly asks for evidence such as versions, steps, logs, screenshots, configuration, sample data, or more information, or a more-info/missing-reproduction label is applied. Bot and human requests are separated; one issue can contain both.</p>
-        <h3>Reproduction proxy</h3>
-        <p>GitHub has no authoritative reproduction timestamp. The report counts an explicit successful reproduction/verification statement or a validated/regression label. Negative “cannot reproduce” language is excluded. The proxy is intentionally conservative and likely undercounts private, implicit, or code-only reproduction.</p>
-        <h3>Back-and-forth proxy</h3>
-        <p>The strict cycle requires three public events in order: a human clarification request, a later reporter reply, and a later reproduction signal. Only 8 reports met this observable sequence, so its timing is shown as directional evidence rather than a service-level metric.</p>
-        <h3>Resolution</h3>
-        <p>“Closed” and GitHub’s completed/not-planned/duplicate reasons are direct metadata. “Fix/PR signal” is a stricter but imperfect proxy: the issue is closed and has a PR cross-reference, explicit maintainer fix/merge wording, or closes-issue label. A cross-reference does not prove merge or causality.</p>
-        <h3>Response</h3>
-        <p>A maintainer response is the first comment whose GitHub author association is OWNER, MEMBER, or COLLABORATOR. Community answers and automated bot comments are not counted as maintainer responses.</p>
-        <h3>Important limitations</h3>
-        <ul>
-          <li>Deleted comments, private discussions, Slack, and internal tracking are invisible.</li>
-          <li>Current labels may differ from labels at intake; timeline events recover some but not all history.</li>
-          <li>Text detection can produce false positives or miss paraphrases.</li>
-          <li>Issues near the end of the cohort have less time to close than early issues.</li>
-          <li>Closure rate is a cohort snapshot, not a causal measure of maintainer performance.</li>
-        </ul>
-        <h3>Capacity estimate</h3>
-        <p>The Devin comparison is a separate scenario model layered onto the observed cohort. It does not infer labor hours from issue elapsed time. The 429 strict fix/PR proxy is used as the reviewable-PR workload; low/base/high handling times are explicit assumptions. FTE conversion uses 2,000 engineering hours per year. ACU planning assumes 0.5/1/2 ACUs per intake, 0.25/0.5/1 per clarification, and 6/12/25 per PR path. Token and ACU estimates are planning ranges, not invoices.</p>
+        <p>Public issues opened in <a href="https://github.com/apache/superset">apache/superset</a> from 5 September 2025 through 4 September 2026. Pull requests are excluded.</p>
+        <h3>Volume and solve rate</h3>
+        <p>Volume is direct GitHub metadata. A solve requires a closed bug plus a PR cross-reference, explicit fix/merge wording, or closes-issue label; it is stricter than closure and may undercount private or implicit fixes.</p>
+        <h3>Latency</h3>
+        <p>The 16.4-day median and 216.2-day p90 use public timestamps from the 726 bugs closed during the cohort snapshot.</p>
+        <h3>Engineering savings</h3>
+        <p>Savings are a scenario model, not measured labor. The base case assumes 20 minutes per intake, 30 minutes per human clarification, 10 hours per demonstrated solve, one retained review hour per PR, and 2,000 hours per FTE.</p>
+        <h3>Usage benchmark</h3>
+        <p>The ≈ $4,104 base estimate applies published GPT-5.1 Medium token rates plus a 10% VM/network allowance. Actual cost depends on included quota or contracted ACU pricing. Sources: <a href="https://devin.ai/pricing">plans</a>, <a href="https://docs.devin.ai/desktop/accounts/quota">usage</a>, and <a href="https://docs.devin.ai/desktop/models">model pricing</a>.</p>
       </div>
     </section>
   </main>
 
-  <footer class="shell"><span>Prepared from public GitHub data · Apache Superset is a trademark of The Apache Software Foundation.</span><span>Generated 5 Sep 2026</span></footer>
+  <footer class="shell">
+    <span>Prepared from public GitHub data · Apache Superset is a trademark of The Apache Software Foundation.</span>
+    <span>Generated 5 Sep 2026</span>
+  </footer>
 
   <script>
-    const report = {"generated_at":"2026-09-05T13:36:41.537740+00:00","period":{"start":"2025-09-05","end_exclusive":"2026-09-05","end_inclusive":"2026-09-04","days":365},"definitions":{"bug_cohort":"Issue had a #bug-family label or retained at least two fields from the official bug-report issue form.","clarification":"A non-reporter comment requested context/reproduction evidence, or an issue event applied a more-info/missing-reproduction label. Automated bot prompts and human clarification are reported separately.","reproduction":"A comment explicitly stated successful reproduction/verification, or a validated/regression label was applied. This is a conservative text/event proxy.","fixed":"A closed bug had a cross-referenced PR, an explicit maintainer fix/merge statement, or a closes-issue label. Closure alone is reported separately."},"totals":{"issues_created":1030,"issues_closed":882,"issues_open":148,"issue_closure_rate_pct":85.6,"bug_reports":825,"bug_share_pct":80.1,"bugs_closed":726,"bug_closure_rate_pct":88.0,"bugs_closed_completed":657,"bug_completed_rate_pct":79.6,"bugs_closed_not_planned":49,"bugs_closed_duplicate":20,"bugs_fixed_proxy":429,"bug_fixed_rate_pct":52.0,"bug_reports_with_clarification":683,"bug_clarification_rate_pct":82.8,"reporter_replies_to_clarification":349,"clarification_reply_rate_pct":51.1,"bug_reports_with_bot_clarification":601,"bug_reports_with_human_clarification":315,"human_clarification_rate_pct":38.2,"reporter_replies_to_human_clarification":104,"human_clarification_reply_rate_pct":33.0,"bug_reports_with_reproduction_signal":134,"bug_reproduction_signal_rate_pct":16.2,"cannot_reproduce_signals":22,"inactive_bug_signals":0,"bugs_with_linked_pr":475,"bugs_without_any_comment":44,"bugs_without_maintainer_response":296,"maintainer_response_coverage_pct":64.1,"unique_bug_reporters":502,"repeat_bug_reporters":116},"timings_days":{"first_maintainer_response":{"count":529,"median":4.1,"mean":24.43,"p75":17.8,"p90":101.13},"first_clarification":{"count":683,"median":0.0,"mean":2.79,"p75":0.01,"p90":0.69},"first_human_clarification":{"count":315,"median":3.1,"mean":31.66,"p75":22.32,"p90":124.29},"reporter_reply_after_clarification":{"count":349,"median":0.12,"mean":5.09,"p75":1.74,"p90":8.5},"reporter_reply_after_human_clarification":{"count":104,"median":0.45,"mean":7.92,"p75":2.06,"p90":10.62},"creation_to_reproduction":{"count":134,"median":0.02,"mean":15.93,"p75":8.26,"p90":35.83},"clarification_to_reproduction":{"count":74,"median":2.25,"mean":24.93,"p75":22.4,"p90":50.37},"human_clarification_to_reproduction":{"count":39,"median":0.0,"mean":15.84,"p75":11.96,"p90":34.2},"observable_back_and_forth_to_reproduction":{"count":8,"median":26.72,"mean":56.56,"p75":63.1,"p90":158.23},"bug_time_to_close":{"count":726,"median":16.39,"mean":64.05,"p75":109.61,"p90":216.22},"fixed_bug_time_to_close":{"count":429,"median":26.32,"mean":68.55,"p75":115.8,"p90":206.32},"creation_to_linked_pr":{"count":475,"median":3.47,"mean":32.22,"p75":24.31,"p90":122.85},"open_bug_age":{"count":99,"median":146.24,"mean":133.95,"p75":211.34,"p90":259.24}},"interaction":{"comments_per_bug":{"count":825,"median":3.0,"mean":3.88,"p75":5.0,"p90":8.0},"clarification_rounds":{"count":683,"median":0.0,"mean":0.62,"p75":1.0,"p90":2.0},"clarification_actor_counts":{"bot":601,"maintainer":174,"community":185,"label":19},"comment_actor_counts":{"bot":862,"community":738,"maintainer":850,"reporter":750},"close_actor_counts":[{"actor":"rusackas","count":353},{"actor":"sadpandajoe","count":53},{"actor":"hainenber","count":50},{"actor":"michael-s-molina","count":28},{"actor":"sfirke","count":22},{"actor":"msyavuz","count":10},{"actor":"EnxDev","count":9},{"actor":"richardfogaca","count":9},{"actor":"Vitor-Avila","count":7},{"actor":"SBIN2010","count":7}]},"monthly":[{"month":"2025-09","created":70,"bugs_created":56,"closed":31,"bugs_closed":24},{"month":"2025-10","created":92,"bugs_created":75,"closed":50,"bugs_closed":39},{"month":"2025-11","created":84,"bugs_created":70,"closed":46,"bugs_closed":40},{"month":"2025-12","created":66,"bugs_created":55,"closed":22,"bugs_closed":20},{"month":"2026-01","created":105,"bugs_created":93,"closed":42,"bugs_closed":34},{"month":"2026-02","created":94,"bugs_created":79,"closed":48,"bugs_closed":46},{"month":"2026-03","created":104,"bugs_created":90,"closed":80,"bugs_closed":64},{"month":"2026-04","created":83,"bugs_created":73,"closed":46,"bugs_closed":41},{"month":"2026-05","created":63,"bugs_created":54,"closed":42,"bugs_closed":38},{"month":"2026-06","created":78,"bugs_created":51,"closed":188,"bugs_closed":160},{"month":"2026-07","created":88,"bugs_created":62,"closed":161,"bugs_closed":132},{"month":"2026-08","created":96,"bugs_created":61,"closed":106,"bugs_closed":72},{"month":"2026-09","created":7,"bugs_created":6,"closed":20,"bugs_closed":16}],"open_bug_age_buckets":{"180+ days":37,"90\u2013179 days":25,"30\u201389 days":12,"7\u201329 days":18,"< 7 days":7},"bug_closure_outcomes":{"linked/fix signal":429,"closed without fix signal":297,"still open":99},"bug_state_reasons":{"completed":657,"not_planned":49,"duplicate":20},"top_bug_labels":[{"label":"#bug:cosmetic","count":87},{"label":"#bug:regression","count":53},{"label":"embedded","count":39},{"label":"sqllab","count":38},{"label":"authentication","count":36},{"label":"alert-reports","count":33},{"label":"api","count":32},{"label":"\ud83e\uddbe ai-candidate","count":26},{"label":"good first issue","count":25},{"label":"global:theming","count":24},{"label":"dashboard:native-filters","count":22},{"label":"#bug","count":20},{"label":"data:dataset","count":19},{"label":"change:frontend","count":18},{"label":"authentication:access-control","count":17}],"examples":{"longest_open_bugs":[{"number":35347,"title":"Stop button in Chart view doesn't stop running query in Trino, and other databases","url":"https://github.com/apache/superset/issues/35347","age_days":339.1,"comments":3},{"number":35712,"title":"\u30106.0.0-RC2\u3011Nginx proxy and subpath problem when \"add new dashboard\"","url":"https://github.com/apache/superset/issues/35712","age_days":322.65,"comments":8},{"number":35774,"title":"\"error\": \"Dataset schema is invalid, caused by: QueryContextFactory.create() missing 2 required keyword-only arguments: 'datasource' and 'queries'\"","url":"https://github.com/apache/superset/issues/35774","age_days":318.28,"comments":2},{"number":35853,"title":"Line chart skips intermediate categories when x\u2011axis is string (but data exists)","url":"https://github.com/apache/superset/issues/35853","age_days":312.69,"comments":11},{"number":36053,"title":"GET /api/v1/dashboard/{pk}/filter_state/{key} does not return \"name\" property","url":"https://github.com/apache/superset/issues/36053","age_days":298.52,"comments":8},{"number":36223,"title":"Admin UI: allow administrators to change/reset another user's password","url":"https://github.com/apache/superset/issues/36223","age_days":287.46,"comments":4},{"number":36325,"title":"X-Axis Label Interval \"All\" does not work on timeseries x-axis variables in Superset 6.0.0","url":"https://github.com/apache/superset/issues/36325","age_days":280.41,"comments":21},{"number":36406,"title":"[6.0.0rc3] Same color being picked twice in a chart when dashboard doesn't have a map_label_colors","url":"https://github.com/apache/superset/issues/36406","age_days":275.52,"comments":5},{"number":36500,"title":"View Query Not SHowing.","url":"https://github.com/apache/superset/issues/36500","age_days":267.78,"comments":5},{"number":36765,"title":"Boolean filters does not work for Databricks datasets","url":"https://github.com/apache/superset/issues/36765","age_days":259.52,"comments":5}],"longest_clarification_cycles":[{"number":35340,"title":"Several errors with docker install and websocket config","url":"https://github.com/apache/superset/issues/35340","days":261.64,"rounds":2},{"number":35996,"title":"[Bug][6.0.0-rc2] Inconsistent SQL query for the same chart between Dashboard and Chart Editor","url":"https://github.com/apache/superset/issues/35996","days":243.683,"rounds":3},{"number":36325,"title":"X-Axis Label Interval \"All\" does not work on timeseries x-axis variables in Superset 6.0.0","url":"https://github.com/apache/superset/issues/36325","days":227.446,"rounds":8},{"number":35414,"title":"[6.0.0-RC2] Oracle Database Bar Char Error: ORA-00979: not a GROUP BY expression","url":"https://github.com/apache/superset/issues/35414","days":191.21,"rounds":1},{"number":36930,"title":"SQL Lab: Problem when presenting a data type","url":"https://github.com/apache/superset/issues/36930","days":163.389,"rounds":0},{"number":38216,"title":"v5.0.0 - some reports run properly, others fail to fire","url":"https://github.com/apache/superset/issues/38216","days":132.543,"rounds":5},{"number":36189,"title":"Percentage number formatting in table not working on very small numbers in 5.0.0","url":"https://github.com/apache/superset/issues/36189","days":63.119,"rounds":1},{"number":35833,"title":"Dropdown menu shows 2 scroll bars.","url":"https://github.com/apache/superset/issues/35833","days":54.164,"rounds":0},{"number":37114,"title":"enabling async execution results in HTTP error 422 - Unprocessable Content","url":"https://github.com/apache/superset/issues/37114","days":41.526,"rounds":1},{"number":36530,"title":"(low priority) Histogram throws warning in logs in 6.0.0rc4","url":"https://github.com/apache/superset/issues/36530","days":41.187,"rounds":5}]}};
-    const colors = ['#17394a','#118a81','#efb852','#e46d5f','#4f84c4','#7764a9'];
+    const monthly = [
+      {month:'2025-09',created:70,bugs:56,closed:24},
+      {month:'2025-10',created:92,bugs:75,closed:39},
+      {month:'2025-11',created:84,bugs:70,closed:40},
+      {month:'2025-12',created:66,bugs:55,closed:20},
+      {month:'2026-01',created:105,bugs:93,closed:34},
+      {month:'2026-02',created:94,bugs:79,closed:46},
+      {month:'2026-03',created:104,bugs:90,closed:64},
+      {month:'2026-04',created:83,bugs:73,closed:41},
+      {month:'2026-05',created:63,bugs:54,closed:38},
+      {month:'2026-06',created:78,bugs:51,closed:160},
+      {month:'2026-07',created:88,bugs:62,closed:132},
+      {month:'2026-08',created:96,bugs:61,closed:72},
+      {month:'2026-09',created:7,bugs:6,closed:16}
+    ];
     const tooltip = document.getElementById('tooltip');
+
+    function svgNode(tag, attrs = {}, text = '') {
+      const node = document.createElementNS('http://www.w3.org/2000/svg', tag);
+      Object.entries(attrs).forEach(([key, value]) => node.setAttribute(key, value));
+      if (text) node.textContent = text;
+      return node;
+    }
+
+    function shortMonth(value) {
+      const [year, month] = value.split('-');
+      return new Date(Number(year), Number(month) - 1, 1).toLocaleString('en', {month:'short'});
+    }
 
     function showTip(event, text) {
       tooltip.textContent = text;
@@ -490,118 +381,48 @@
       tooltip.style.top = event.clientY + 'px';
       tooltip.style.opacity = 1;
     }
-    function hideTip() { tooltip.style.opacity = 0; }
-    function el(tag, attrs = {}, text = '') {
-      const node = document.createElementNS('http://www.w3.org/2000/svg', tag);
-      Object.entries(attrs).forEach(([key, value]) => node.setAttribute(key, value));
-      if (text) node.textContent = text;
-      return node;
-    }
-    function shortMonth(value) {
-      const [year, month] = value.split('-');
-      return new Date(Number(year), Number(month) - 1, 1).toLocaleString('en', {month:'short'});
-    }
+
     function renderMonthly() {
-      const rows = report.monthly;
       const host = document.getElementById('monthly-chart');
       const width = Math.max(760, host.clientWidth);
       const height = 290, left = 42, right = 15, top = 14, bottom = 42;
-      const innerW = width - left - right, innerH = height - top - bottom;
-      const max = Math.ceil(Math.max(...rows.flatMap(r => [r.created, r.bugs_created, r.bugs_closed])) / 25) * 25;
-      const svg = el('svg', {viewBox:`0 0 ${width} ${height}`, role:'img', 'aria-label':'Monthly issue intake and cohort closures'});
+      const innerWidth = width - left - right, innerHeight = height - top - bottom;
+      const max = Math.ceil(Math.max(...monthly.flatMap(row => [row.created, row.bugs, row.closed])) / 25) * 25;
+      const svg = svgNode('svg', {viewBox:`0 0 ${width} ${height}`, role:'img', 'aria-label':'Monthly issue volume and bug closures'});
+
       [0,.25,.5,.75,1].forEach(step => {
-        const y = top + innerH * (1-step);
-        svg.append(el('line', {x1:left,y1:y,x2:width-right,y2:y,class:'axis'}));
-        svg.append(el('text', {x:left-8,y:y+3,'text-anchor':'end',class:'axis-label'}, Math.round(max*step)));
+        const y = top + innerHeight * (1 - step);
+        svg.append(svgNode('line', {x1:left,y1:y,x2:width-right,y2:y,class:'axis'}));
+        svg.append(svgNode('text', {x:left-8,y:y+3,'text-anchor':'end',class:'axis-label'}, Math.round(max * step)));
       });
-      const slot = innerW / rows.length, barW = Math.min(13, slot/4);
-      rows.forEach((row, index) => {
-        const cx = left + slot * index + slot/2;
+
+      const slot = innerWidth / monthly.length, barWidth = Math.min(13, slot / 4);
+      monthly.forEach((row, index) => {
+        const center = left + slot * index + slot / 2;
         [
-          ['created','#17394a',-barW],
-          ['bugs_created','#118a81',0],
-          ['bugs_closed','#efb852',barW],
-        ].forEach(([key,color,offset]) => {
-          const value = row[key], h = value/max*innerH;
-          const rect = el('rect', {x:cx+offset-barW/2,y:top+innerH-h,width:barW,height:h,rx:3,fill:color});
-          rect.addEventListener('mousemove', e => showTip(e, `${shortMonth(row.month)} ${row.month.slice(0,4)} · ${key.replaceAll('_',' ')}: ${value}`));
-          rect.addEventListener('mouseleave', hideTip);
+          ['created', '#17394a', -barWidth, 'issues opened'],
+          ['bugs', '#118a81', 0, 'bugs opened'],
+          ['closed', '#efb852', barWidth, 'bugs closed']
+        ].forEach(([key, color, offset, label]) => {
+          const value = row[key], barHeight = value / max * innerHeight;
+          const rect = svgNode('rect', {
+            x:center + offset - barWidth / 2, y:top + innerHeight - barHeight,
+            width:barWidth, height:barHeight, rx:3, fill:color
+          });
+          rect.addEventListener('mousemove', event => showTip(event, `${shortMonth(row.month)} ${row.month.slice(0,4)} · ${label}: ${value}`));
+          rect.addEventListener('mouseleave', () => tooltip.style.opacity = 0);
           svg.append(rect);
         });
-        svg.append(el('text', {x:cx,y:height-19,'text-anchor':'middle',class:'axis-label'}, shortMonth(row.month)));
-      });
-      host.replaceChildren(svg);
-    }
-    function renderBars(hostId, rows, max = 100) {
-      const host = document.getElementById(hostId);
-      rows.forEach((row, index) => {
-        const item = document.createElement('div');
-        item.innerHTML = `<div class="bar-top"><span>${row.label}</span><span>${row.display ?? row.value}</span></div><div class="bar-track"><div class="bar-fill" style="--bar:${row.color || colors[index%colors.length]}"></div></div>`;
-        host.append(item);
-        requestAnimationFrame(() => item.querySelector('.bar-fill').style.width = `${Math.min(100,row.value/max*100)}%`);
-      });
-    }
-    function renderDonut(hostId, legendId, rows) {
-      const total = rows.reduce((sum,row)=>sum+row.value,0);
-      let cursor = 0;
-      const stops = rows.map((row,index) => {
-        const start = cursor/total*100; cursor += row.value; const end = cursor/total*100;
-        return `${row.color || colors[index]} ${start}% ${end}%`;
-      });
-      document.getElementById(hostId).style.background = `conic-gradient(${stops.join(',')})`;
-      const legend = document.getElementById(legendId);
-      rows.forEach((row,index) => {
-        const line = document.createElement('div'); line.className='legend-row';
-        line.innerHTML=`<i style="background:${row.color || colors[index]}"></i><span>${row.label}</span><b>${row.value.toLocaleString()} · ${(row.value/total*100).toFixed(1)}%</b>`;
-        legend.append(line);
-      });
-    }
-    function renderAge() {
-      const ordering=['< 7 days','7–29 days','30–89 days','90–179 days','180+ days'];
-      const rows=ordering.map(label=>({label,value:report.open_bug_age_buckets[label]||0}));
-      const host=document.getElementById('age-chart'), width=Math.max(520,host.clientWidth),height=270,left=72,right=18,top=15,bottom=45;
-      const innerW=width-left-right,innerH=height-top-bottom,max=Math.max(...rows.map(r=>r.value));
-      const svg=el('svg',{viewBox:`0 0 ${width} ${height}`,role:'img','aria-label':'Open bug age buckets'});
-      const slot=innerW/rows.length,barW=Math.min(65,slot*.62);
-      rows.forEach((row,index)=>{
-        const h=row.value/max*innerH,x=left+slot*index+(slot-barW)/2,y=top+innerH-h;
-        const rect=el('rect',{x,y,width:barW,height:h,rx:8,fill:colors[index]});
-        rect.addEventListener('mousemove',e=>showTip(e,`${row.label} · ${row.value} open bugs`));rect.addEventListener('mouseleave',hideTip);svg.append(rect);
-        svg.append(el('text',{x:x+barW/2,y:y-8,'text-anchor':'middle',fill:'#15222d','font-size':13,'font-weight':800},row.value));
-        svg.append(el('text',{x:x+barW/2,y:height-18,'text-anchor':'middle',class:'axis-label'},row.label.replace(' days','d')));
+        svg.append(svgNode('text', {x:center,y:height-19,'text-anchor':'middle',class:'axis-label'}, shortMonth(row.month)));
       });
       host.replaceChildren(svg);
     }
 
     renderMonthly();
-    renderBars('touch-bars',[
-      {label:'Bot clarification prompt',value:report.totals.bug_reports_with_bot_clarification/report.totals.bug_reports*100,display:`${report.totals.bug_reports_with_bot_clarification} · ${(report.totals.bug_reports_with_bot_clarification/report.totals.bug_reports*100).toFixed(1)}%`,color:'#4f84c4'},
-      {label:'Maintainer response',value:report.totals.maintainer_response_coverage_pct,display:`${report.totals.maintainer_response_coverage_pct}%`,color:'#17394a'},
-      {label:'Human clarification request',value:report.totals.human_clarification_rate_pct,display:`${report.totals.bug_reports_with_human_clarification} · ${report.totals.human_clarification_rate_pct}%`,color:'#e46d5f'},
-      {label:'Reporter replied after human ask',value:report.totals.reporter_replies_to_human_clarification/report.totals.bug_reports*100,display:`${report.totals.reporter_replies_to_human_clarification} · ${(report.totals.reporter_replies_to_human_clarification/report.totals.bug_reports*100).toFixed(1)}%`,color:'#efb852'},
-      {label:'Public reproduction signal',value:report.totals.bug_reproduction_signal_rate_pct,display:`${report.totals.bug_reports_with_reproduction_signal} · ${report.totals.bug_reproduction_signal_rate_pct}%`,color:'#118a81'}
-    ]);
-    renderDonut('comments-donut','comments-legend',[
-      {label:'Bot',value:report.interaction.comment_actor_counts.bot,color:'#4f84c4'},
-      {label:'Maintainer',value:report.interaction.comment_actor_counts.maintainer,color:'#17394a'},
-      {label:'Community',value:report.interaction.comment_actor_counts.community,color:'#8bd3c7'},
-      {label:'Original reporter',value:report.interaction.comment_actor_counts.reporter,color:'#efb852'}
-    ]);
-    renderDonut('outcome-donut','outcome-legend',[
-      {label:'Completed',value:report.bug_state_reasons.completed,color:'#118a81'},
-      {label:'Not planned',value:report.bug_state_reasons.not_planned,color:'#e46d5f'},
-      {label:'Duplicate',value:report.bug_state_reasons.duplicate,color:'#efb852'},
-      {label:'Open',value:report.totals.bug_reports-report.totals.bugs_closed,color:'#cbd2d0'}
-    ]);
-    renderBars('resolution-bars',[
-      {label:'Closed (any state reason)',value:report.totals.bug_closure_rate_pct,display:`${report.totals.bugs_closed} · ${report.totals.bug_closure_rate_pct}%`,color:'#17394a'},
-      {label:'Marked completed',value:report.totals.bug_completed_rate_pct,display:`${report.totals.bugs_closed_completed} · ${report.totals.bug_completed_rate_pct}%`,color:'#118a81'},
-      {label:'Cross-referenced PR',value:report.totals.bugs_with_linked_pr/report.totals.bug_reports*100,display:`${report.totals.bugs_with_linked_pr} · ${(report.totals.bugs_with_linked_pr/report.totals.bug_reports*100).toFixed(1)}%`,color:'#4f84c4'},
-      {label:'Closed + fix/PR signal',value:report.totals.bug_fixed_rate_pct,display:`${report.totals.bugs_fixed_proxy} · ${report.totals.bug_fixed_rate_pct}%`,color:'#efb852'}
-    ]);
-    renderAge();
-    renderBars('label-bars',report.top_bug_labels.slice(0,10).map((row,index)=>({label:row.label,value:row.count,display:row.count,color:colors[index%colors.length]})),report.top_bug_labels[0].count);
-    window.addEventListener('resize',()=>{ clearTimeout(window.__resizeTimer); window.__resizeTimer=setTimeout(()=>{renderMonthly();renderAge();},120); });
+    window.addEventListener('resize', () => {
+      clearTimeout(window.__resizeTimer);
+      window.__resizeTimer = setTimeout(renderMonthly, 120);
+    });
   </script>
 </body>
 </html>
